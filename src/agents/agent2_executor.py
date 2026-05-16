@@ -1,564 +1,347 @@
-"""
-Agent 2 — Executor.
+"""Agent 2: scenario execution agent.
 
-Runs a :class:`~src.models.scenario.ScenarioStabilizationInput` step by step
-against a live HTTP server and returns a
-:class:`~src.models.execution.ScenarioExecutionResult`.
-
-Execution loop (per step)
---------------------------
-1. Resolve all ``{{variable}}`` placeholders in path, query params, and body
-   using the current variable *context*.
-2. Detect any still-unresolved variables → ask Agent 3 to generate them.
-3. Build and send the HTTP request.
-4. Check the HTTP status code.
-5. Extract variables from the response body (JSONPath).
-6. Run all assertions against the response body.
-7. If the step **passed** → merge extracted variables into context, proceed.
-8. If the step **failed** → ask Agent 3 to refresh data, retry up to
-   ``config.agent2.max_retries_per_step`` times.
-9. After exhausting retries → mark the step as ``failed`` and **stop**
-   the scenario (remaining steps are skipped).
-
-Variable context
-----------------
-The context dict is seeded from ``constants.json`` at startup and grows as
-steps extract new variables from responses.  All ``{{varName}}`` references
-in subsequent steps are substituted from this dict.
+Agent 2 is the orchestration agent. It owns the variable context, calls tools,
+asks Agent 3 for generated values, retries failed steps with fresh generated
+data, extracts response variables, and emits an auditable execution result.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import re
-from typing import Any, Dict, Optional, Set, Tuple
-
-import httpx
-from jsonpath_ng import parse as jsonpath_parse  # type: ignore[import]
+from typing import Any, Dict, Optional
 
 from src.agents.agent3_data_generator import DataGeneratorAgent
-from src.models.execution import AssertionResult, ScenarioExecutionResult, StepResult
-from src.models.scenario import Assertion, ScenarioStabilizationInput, TestStep
+from src.agents.tools import (
+    BusinessCheckTool,
+    JsonPathExtractionTool,
+    RestRequestTool,
+    StatusCodeValidatorTool,
+    TemplateResolverTool,
+    VariableContextTool,
+)
+from src.models.execution import (
+    ExecutedRequest,
+    ScenarioExecutionResult,
+    StepResult,
+    ToolCallRecord,
+    VariableContext,
+)
+from src.models.scenario import ScenarioStabilizationInput, TestStep, VariableSource
 from src.utils.config import AppConfig
 
 logger = logging.getLogger(__name__)
 
-_VAR_RE = re.compile(r"\{\{(\w+)\}\}")
-
-
-# ---------------------------------------------------------------------------
-# ExecutorAgent
-# ---------------------------------------------------------------------------
-
 
 class ExecutorAgent:
-    """
-    Agent 2: executes a test scenario step by step.
+    """Executes a scenario step-by-step with bounded retries."""
 
-    Args:
-        config:   Application configuration (drives retry limits, LLM provider).
-        base_url: Base URL of the API under test (e.g. ``http://localhost:8080``).
-    """
+    name = "agent2"
 
     def __init__(self, config: AppConfig, base_url: str) -> None:
         self.config = config
         self.base_url = base_url.rstrip("/")
-        self._agent3 = DataGeneratorAgent(config)
-        self._http = httpx.Client(timeout=30.0)
+        self.agent3 = DataGeneratorAgent(config)
+        self.context_tool = VariableContextTool()
+        self.resolver_tool = TemplateResolverTool()
+        self.request_tool = RestRequestTool()
+        self.extractor_tool = JsonPathExtractionTool()
+        self.status_tool = StatusCodeValidatorTool()
+        self.business_tool = BusinessCheckTool()
 
     def __enter__(self) -> "ExecutorAgent":
         return self
 
     def __exit__(self, *_: Any) -> None:
-        self._http.close()
+        self.request_tool.close()
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def run(
-        self,
-        scenario: ScenarioStabilizationInput,
-        constants: Dict[str, Any],
-    ) -> ScenarioExecutionResult:
-        """
-        Execute all steps in *scenario*.
-
-        Args:
-            scenario:  Output of Agent 1.
-            constants: Key-value pairs from ``constants.json``.
-
-        Returns:
-            A :class:`ScenarioExecutionResult` with full per-step traces.
-        """
-        context: Dict[str, Any] = dict(constants)
+    def run(self, scenario: ScenarioStabilizationInput, constants: Dict[str, Any]) -> ScenarioExecutionResult:
+        logger.info("Agent2: start scenario=%s steps=%d", scenario.scenario_name, len(scenario.steps))
+        context, seed_call = self.context_tool.seed_constants({**constants, **scenario.constant_variables})
+        tool_calls: list[ToolCallRecord] = [seed_call]
+        reasoning: list[str] = [f"Loaded {len(context.constants)} constant variables."]
         step_results: list[StepResult] = []
+        ready_requests: list[ExecutedRequest] = []
         max_retries = self.config.agent2.max_retries_per_step
-        total_steps = len(scenario.steps)
 
-        logger.info(
-            "Agent2: starting scenario '%s'  (%d steps)",
-            scenario.scenario_name, total_steps,
-        )
+        source_map = {source.name: source for source in scenario.variable_sources}
 
         for step in scenario.steps:
-            result = self._run_step_with_retries(step, context, max_retries, total_steps)
+            result = self._run_step(
+                scenario=scenario,
+                step=step,
+                context=context,
+                source_map=source_map,
+                max_retries=max_retries,
+                reasoning=reasoning,
+                global_tool_calls=tool_calls,
+            )
             step_results.append(result)
 
             if result.status == "passed":
-                # Merge extracted variables into shared context
-                context.update(result.extracted_vars)
-                logger.info(
-                    "Agent2: step %d PASSED  extracted=%s",
-                    step.step_num, list(result.extracted_vars.keys()),
-                )
-            else:
-                logger.error(
-                    "Agent2: step %d FAILED after %d attempt(s) — stopping",
-                    step.step_num, result.attempts,
-                )
-                # Append skipped placeholders for remaining steps
-                for remaining in scenario.steps[step.step_num:]:
-                    step_results.append(
-                        StepResult(
-                            step_num=remaining.step_num,
-                            name=remaining.name,
-                            status="skipped",
-                            method=remaining.method,
-                            url="",
-                        )
+                if result.attempts_trace:
+                    ready_requests.append(result.attempts_trace[-1])
+                continue
+
+            reasoning.append(f"Stopped on step {step.step}: {result.error or 'step failed'}.")
+            for remaining in scenario.steps[step.step:]:
+                step_results.append(
+                    StepResult(
+                        step_num=remaining.step,
+                        name=remaining.name,
+                        status="skipped",
+                        method=remaining.method,
                     )
-                break
+                )
+            break
 
-        passed = sum(1 for r in step_results if r.status == "passed")
-        failed = sum(1 for r in step_results if r.status == "failed")
-
+        passed = sum(1 for step in step_results if step.status == "passed")
+        failed = sum(1 for step in step_results if step.status == "failed")
         overall = "passed" if failed == 0 and passed == len(scenario.steps) else "failed"
-
-        logger.info(
-            "Agent2: scenario finished  overall=%s  passed=%d  failed=%d",
-            overall, passed, failed,
-        )
-
+        logger.info("Agent2: finished overall=%s passed=%d failed=%d", overall, passed, failed)
         return ScenarioExecutionResult(
             scenario_name=scenario.scenario_name,
             overall_status=overall,
+            reasoning_log=reasoning,
             total_steps=len(scenario.steps),
             passed_steps=passed,
             failed_steps=failed,
             steps=step_results,
-            final_context=context,
+            ready_requests=ready_requests,
+            variables=context,
+            final_context=context.values(),
+            tool_calls=tool_calls,
         )
 
-    # ------------------------------------------------------------------
-    # Step execution with retry
-    # ------------------------------------------------------------------
-
-    def _run_step_with_retries(
+    def _run_step(
         self,
+        scenario: ScenarioStabilizationInput,
         step: TestStep,
-        context: Dict[str, Any],
+        context: VariableContext,
+        source_map: Dict[str, VariableSource],
         max_retries: int,
-        total_steps: int = 0,
+        reasoning: list[str],
+        global_tool_calls: list[ToolCallRecord],
     ) -> StepResult:
-        local_context = dict(context)  # copy so retries don't pollute global ctx
+        logger.info("Agent2: step %d/%d %s", step.step, len(scenario.steps), step.name)
+        attempts_trace: list[ExecutedRequest] = []
+        last_error: Optional[str] = None
 
-        logger.info(
-            "Agent2: ═══ Step %d/%d — %s ═══",
-            step.step_num, total_steps, step.name,
-        )
-        logger.debug("Agent2: step description: %s", step.description)
-        logger.debug(
-            "Agent2: %s %s | expected status: %d",
-            step.method, step.path, step.expected_status_code,
-        )
-
-        for attempt in range(1, max_retries + 2):  # +1 for the initial attempt
-            # Fill missing variables via Agent 3
-            missing = self._find_missing_vars(step, local_context)
+        for attempt in range(1, max_retries + 2):
+            previous_error = last_error
+            current_error: Optional[str] = None
+            attempt_calls: list[ToolCallRecord] = []
+            missing = self.resolver_tool.missing_variables(step, context)
             if missing:
-                logger.info(
-                    "Agent2: ⚠ step %d missing vars: %s",
-                    step.step_num, sorted(missing),
-                )
-                logger.debug(
-                    "Agent2:   available context keys: %s",
-                    sorted(local_context.keys()),
-                )
-                generated = self._agent3.generate(step, local_context, missing)
-                local_context.update(generated)
-
-            logger.debug(
-                "Agent2: context for step %d — %s",
-                step.step_num,
-                {k: v for k, v in local_context.items() if not k.startswith("_")},
-            )
-
-            result = self._execute_step(step, local_context, attempt)
-
-            if result.status == "passed":
-                return result
-
-            if attempt > max_retries:
-                return result
-
-            # Ask Agent 3 to refresh data before retrying
-            logger.warning(
-                "Agent2: ↻ step %d attempt %d/%d FAILED — %s",
-                step.step_num, attempt, max_retries + 1, result.error or "unknown error",
-            )
-            refreshed = self._agent3.refresh(step, local_context, result.error or "")
-            local_context.update(refreshed)
-
-        return result  # unreachable, but satisfies type checker
-
-    # ------------------------------------------------------------------
-    # Single attempt execution
-    # ------------------------------------------------------------------
-
-    def _execute_step(
-        self,
-        step: TestStep,
-        context: Dict[str, Any],
-        attempt: int,
-    ) -> StepResult:
-        """Make one HTTP request and validate the response."""
-
-        # 1. Resolve URL
-        path = self._resolve_path(step, context)
-        url = f"{self.base_url}{path}"
-
-        # 2. Resolve query params
-        params: Optional[Dict[str, str]] = None
-        if step.query_params:
-            params = {k: self._sub(v, context) for k, v in step.query_params.items()}
-
-        # 3. Resolve body
-        body: Any = None
-        if step.body:
-            body = self._sub_deep(step.body, context)
-
-        logger.info("Agent2: → %s %s", step.method, url)
-        if params:
-            logger.debug("Agent2:   params = %s", params)
-        if body:
-            logger.debug("Agent2:   body   = %s", json.dumps(body, ensure_ascii=False))
-
-        # 4. Send request
-        try:
-            response = self._http.request(
-                method=step.method,
-                url=url,
-                params=params,
-                json=body,
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
-            )
-        except httpx.RequestError as exc:
-            error_msg = f"HTTP request error: {exc}"
-            logger.error("Agent2: %s", error_msg)
-            return StepResult(
-                step_num=step.step_num,
-                name=step.name,
-                status="failed",
-                attempts=attempt,
-                method=step.method,
-                url=url,
-                request_params=params,
-                request_body=body,
-                error=error_msg,
-            )
-
-        logger.info("Agent2: ← %d %s", response.status_code, response.reason_phrase)
-
-        # 5. Parse response body
-        resp_body: Any = None
-        try:
-            resp_body = response.json()
-        except Exception:  # noqa: BLE001
-            resp_body = response.text
-
-        logger.debug(
-            "Agent2:   response body = %s",
-            json.dumps(resp_body, ensure_ascii=False)
-            if isinstance(resp_body, (dict, list))
-            else str(resp_body)[:200],
-        )
-
-        # 6. Check status code
-        if response.status_code != step.expected_status_code:
-            error_msg = (
-                f"Status code mismatch: expected {step.expected_status_code}, "
-                f"got {response.status_code}. Body: {resp_body}"
-            )
-            return StepResult(
-                step_num=step.step_num,
-                name=step.name,
-                status="failed",
-                attempts=attempt,
-                method=step.method,
-                url=url,
-                request_params=params,
-                request_body=body,
-                response_status=response.status_code,
-                response_body=resp_body,
-                error=error_msg,
-            )
-
-        # 7. Extract variables
-        extracted = self._extract_vars(step, resp_body)
-        for var_name, value in extracted.items():
-            logger.info("Agent2:   ↳ extracted %s = %r", var_name, value)
-
-        # 8. Run assertions
-        assertion_results = [
-            self._check_assertion(a, resp_body, context)
-            for a in step.assertions
-        ]
-        all_passed = all(r.passed for r in assertion_results)
-
-        for ar in assertion_results:
-            if ar.passed:
-                logger.debug(
-                    "Agent2:   ✔ [%s] %s = %r", ar.operator, ar.path, ar.actual,
-                )
-            else:
-                logger.warning(
-                    "Agent2:   ✘ [%s] %s: expected=%r actual=%r",
-                    ar.operator, ar.path, ar.expected, ar.actual,
-                )
-
-        failed_assertions = [r for r in assertion_results if not r.passed]
-        error_msg = None
-        if not all_passed:
-            msgs = [f"[{r.operator}] {r.path}: {r.error or 'failed'}" for r in failed_assertions]
-            error_msg = "Assertions failed: " + "; ".join(msgs)
-
-        return StepResult(
-            step_num=step.step_num,
-            name=step.name,
-            status="passed" if all_passed else "failed",
-            attempts=attempt,
-            method=step.method,
-            url=url,
-            request_params=params,
-            request_body=body,
-            response_status=response.status_code,
-            response_body=resp_body,
-            extracted_vars=extracted,
-            assertion_results=assertion_results,
-            error=error_msg,
-        )
-
-    # ------------------------------------------------------------------
-    # Variable resolution
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _find_missing_vars(step: TestStep, context: Dict[str, Any]) -> Set[str]:
-        """Return variable names referenced in the step but absent from context."""
-        pattern = _VAR_RE
-        parts: list[str] = [step.path]
-
-        for v in (step.path_params or {}).values():
-            parts.append(v)
-        for v in (step.query_params or {}).values():
-            parts.append(v)
-
-        def collect(obj: Any) -> None:
-            if isinstance(obj, str):
-                parts.append(obj)
-            elif isinstance(obj, dict):
-                for val in obj.values():
-                    collect(val)
-            elif isinstance(obj, list):
-                for item in obj:
-                    collect(item)
-
-        collect(step.body)
-
-        all_refs: Set[str] = set()
-        for part in parts:
-            all_refs.update(pattern.findall(part))
-
-        return {ref for ref in all_refs if ref not in context}
-
-    def _resolve_path(self, step: TestStep, context: Dict[str, Any]) -> str:
-        """Substitute ``{paramName}`` placeholders in the path template."""
-        path = step.path
-        for param_name, param_value in (step.path_params or {}).items():
-            resolved = self._sub(param_value, context)
-            path = path.replace(f"{{{param_name}}}", resolved)
-        # Safety: also substitute any remaining {{var}} in path
-        path = self._sub(path, context)
-        return path
-
-    @staticmethod
-    def _sub(value: str, context: Dict[str, Any]) -> str:
-        """Replace all ``{{varName}}`` in *value* with context values."""
-        def replacer(m: re.Match) -> str:
-            key = m.group(1)
-            return str(context.get(key, m.group(0)))  # keep placeholder if missing
-        return _VAR_RE.sub(replacer, value)
-
-    def _sub_deep(self, obj: Any, context: Dict[str, Any]) -> Any:
-        """Recursively substitute ``{{varName}}`` in any nested structure."""
-        if isinstance(obj, str):
-            return self._sub(obj, context)
-        if isinstance(obj, dict):
-            return {k: self._sub_deep(v, context) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [self._sub_deep(item, context) for item in obj]
-        return obj
-
-    # ------------------------------------------------------------------
-    # Variable extraction
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _extract_vars(step: TestStep, response_body: Any) -> Dict[str, Any]:
-        """Extract variables from the response body using JSONPath expressions."""
-        extracted: Dict[str, Any] = {}
-        for var_name, jsonpath_expr in step.extract_vars.items():
-            try:
-                expr = jsonpath_parse(jsonpath_expr)
-                matches = expr.find(response_body)
-                if matches:
-                    extracted[var_name] = matches[0].value
-                    logger.debug("Agent2: extracted %s = %r", var_name, extracted[var_name])
-                else:
-                    logger.warning(
-                        "Agent2: JSONPath '%s' matched nothing in response (var: %s)",
-                        jsonpath_expr, var_name,
+                reasoning.append(f"Step {step.step} attempt {attempt}: missing variables {sorted(missing)}.")
+            for var_name in sorted(missing):
+                source = source_map.get(var_name)
+                if source and source.kind == "extracted":
+                    current_error = f"Variable {var_name} must be extracted from step {source.source_step}, but it is absent."
+                    record = ToolCallRecord(
+                        agent=self.name,
+                        tool="variable_context",
+                        action="missing_extracted_variable",
+                        input_summary={"variable": var_name, "step": step.step},
+                        success=False,
+                        error=current_error,
                     )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Agent2: failed to evaluate JSONPath '%s': %s",
-                    jsonpath_expr, exc,
+                    attempt_calls.append(record)
+                    global_tool_calls.append(record)
+                    continue
+
+                generated, record = self.agent3.generate_variable(
+                    variable_name=var_name,
+                    step=step,
+                    context=context,
+                    business_context=scenario.business_context,
+                    business_rules=scenario.business_rules,
+                    source=source,
+                    previous_error=previous_error if attempt > 1 else None,
                 )
-        return extracted
+                attempt_calls.append(record)
+                global_tool_calls.append(record)
+                if generated is not None:
+                    context.generated[var_name] = generated
+                    reasoning.append(
+                        f"Step {step.step} attempt {attempt}: generated {var_name} using {generated.generator_name}."
+                    )
 
-    # ------------------------------------------------------------------
-    # Assertion checking
-    # ------------------------------------------------------------------
+            unresolved = self.resolver_tool.missing_variables(step, context)
+            if unresolved:
+                current_error = f"Unresolved variables remain: {sorted(unresolved)}"
+                failed_attempt = self._failed_attempt(step, attempt, current_error, attempt_calls)
+                attempts_trace.append(failed_attempt)
+                last_error = current_error
+                if attempt > max_retries:
+                    return self._step_failed(step, attempt, attempts_trace, current_error)
+                continue
 
-    def _check_assertion(
-        self,
-        assertion: Assertion,
-        response_body: Any,
-        context: Dict[str, Any],
-    ) -> AssertionResult:
-        """Evaluate one assertion against the response body."""
-        # Resolve expected value if it contains {{var}} refs
-        expected = assertion.expected
-        if isinstance(expected, str):
-            expected = self._sub(expected, context)
-            # Try to match type: if original was numeric, keep as string here
+            resolved, record = self.resolver_tool.resolve_step(step, self.base_url, context)
+            attempt_calls.append(record)
+            global_tool_calls.append(record)
 
-        try:
-            expr = jsonpath_parse(assertion.path)
-            matches = expr.find(response_body)
-        except Exception as exc:  # noqa: BLE001
-            return AssertionResult(
-                description=assertion.description,
-                path=assertion.path,
-                operator=assertion.operator,
-                expected=assertion.expected,
-                passed=False,
-                error=f"Invalid JSONPath '{assertion.path}': {exc}",
+            response_status, response_body, record = self.request_tool.request(
+                method=step.method,
+                url=resolved["url"],
+                headers=resolved["headers"],
+                query=resolved["query"],
+                body=resolved["body"],
             )
+            attempt_calls.append(record)
+            global_tool_calls.append(record)
 
-        # --- exists ---
-        if assertion.operator == "exists":
-            passed = len(matches) > 0
-            return AssertionResult(
-                description=assertion.description,
-                path=assertion.path,
-                operator=assertion.operator,
-                expected=assertion.expected,
-                actual=len(matches),
-                passed=passed,
-                error=None if passed else f"Path '{assertion.path}' not found",
+            status_result, record = self.status_tool.validate(step.expected_status, response_status)
+            attempt_calls.append(record)
+            global_tool_calls.append(record)
+
+            business_results, record = self.business_tool.check(step.assertions, response_body)
+            attempt_calls.append(record)
+            global_tool_calls.append(record)
+
+            extracted_values: Dict[str, Any] = {}
+            if status_result.passed and all(result.passed for result in business_results):
+                extracted_values, record = self.extractor_tool.extract(response_body, step.extract_variables, step.step)
+                attempt_calls.append(record)
+                global_tool_calls.append(record)
+                if not record.success:
+                    current_error = record.error or "Required extraction failed."
+
+            passed = status_result.passed and all(result.passed for result in business_results) and current_error is None
+            attempt_result = ExecutedRequest(
+                step=step.step,
+                attempt=attempt,
+                name=step.name,
+                method=step.method,
+                url=resolved["url"],
+                templated_path=step.path,
+                templated_headers=step.headers,
+                templated_query_params=step.query_params,
+                templated_request_body=step.request_body,
+                request_headers=resolved["headers"],
+                request_params=resolved["query"],
+                request_body=resolved["body"],
+                response_status=response_status,
+                response_body=response_body,
+                business_check_results=[status_result, *business_results],
+                tool_calls=attempt_calls,
+                status="passed" if passed else "failed",
+                error=None if passed else self._attempt_error(status_result, business_results, current_error),
             )
+            attempts_trace.append(attempt_result)
 
-        if not matches:
-            return AssertionResult(
-                description=assertion.description,
-                path=assertion.path,
-                operator=assertion.operator,
-                expected=assertion.expected,
-                passed=False,
-                error=f"Path '{assertion.path}' not found in response",
-            )
+            if passed:
+                saved: Dict[str, Any] = {}
+                for rule in step.extract_variables:
+                    if rule.name in extracted_values:
+                        save_record = self.context_tool.save_extracted(
+                            context=context,
+                            name=rule.name,
+                            value=extracted_values[rule.name],
+                            source_step=step.step,
+                            expression=rule.expression,
+                        )
+                        global_tool_calls.append(save_record)
+                        attempt_result.tool_calls.append(save_record)
+                        saved[rule.name] = extracted_values[rule.name]
+                reasoning.append(f"Step {step.step} passed on attempt {attempt}. Extracted: {sorted(saved)}.")
+                return StepResult(
+                    step_num=step.step,
+                    name=step.name,
+                    status="passed",
+                    attempts=attempt,
+                    method=step.method,
+                    url=resolved["url"],
+                    request_params=resolved["query"],
+                    request_body=resolved["body"],
+                    response_status=response_status,
+                    response_body=response_body,
+                    extracted_vars=saved,
+                    assertion_results=[status_result, *business_results],
+                    attempts_trace=attempts_trace,
+                )
 
-        actual = matches[0].value
+            last_error = attempt_result.error
+            reasoning.append(f"Step {step.step} attempt {attempt} failed: {last_error}")
+            if attempt > max_retries:
+                return self._step_failed(step, attempt, attempts_trace, last_error)
 
-        # --- not_null ---
-        if assertion.operator == "not_null":
-            passed = actual is not None
-            return AssertionResult(
-                description=assertion.description,
-                path=assertion.path,
-                operator=assertion.operator,
-                actual=actual,
-                passed=passed,
-                error=None if passed else f"Expected not null at '{assertion.path}', got null",
-            )
+            self._drop_generated_for_step(step, context)
+            reasoning.append(f"Step {step.step}: regenerated dynamic values before retry.")
 
-        # --- eq ---
-        if assertion.operator == "eq":
-            # Coerce types for comparison (e.g. "1" == 1 → False, keep strict)
-            passed = actual == expected or str(actual) == str(expected)
-            return AssertionResult(
-                description=assertion.description,
-                path=assertion.path,
-                operator=assertion.operator,
-                expected=assertion.expected,
-                actual=actual,
-                passed=passed,
-                error=None if passed else f"Expected {expected!r}, got {actual!r}",
-            )
+        return self._step_failed(step, max_retries + 1, attempts_trace, last_error or "Unknown error")
 
-        # --- ne ---
-        if assertion.operator == "ne":
-            passed = actual != expected and str(actual) != str(expected)
-            return AssertionResult(
-                description=assertion.description,
-                path=assertion.path,
-                operator=assertion.operator,
-                expected=assertion.expected,
-                actual=actual,
-                passed=passed,
-                error=None if passed else f"Expected value != {expected!r}, got {actual!r}",
-            )
+    @staticmethod
+    def _attempt_error(
+        status_result,
+        business_results,
+        previous_error: Optional[str],
+    ) -> str:
+        errors = []
+        if not status_result.passed:
+            errors.append(status_result.error or "status check failed")
+        for result in business_results:
+            if not result.passed:
+                errors.append(result.error or result.description)
+        if previous_error:
+            errors.append(previous_error)
+        return "; ".join(errors) or "Attempt failed"
 
-        # --- contains ---
-        if assertion.operator == "contains":
-            try:
-                if isinstance(actual, list):
-                    passed = expected in actual
-                else:
-                    passed = str(expected) in str(actual)
-            except Exception:  # noqa: BLE001
-                passed = False
-            return AssertionResult(
-                description=assertion.description,
-                path=assertion.path,
-                operator=assertion.operator,
-                expected=assertion.expected,
-                actual=actual,
-                passed=passed,
-                error=None if passed else f"'{expected}' not found in {actual!r}",
-            )
-
-        # Unknown operator — pass with warning
-        logger.warning("Agent2: unknown assertion operator '%s'", assertion.operator)
-        return AssertionResult(
-            description=assertion.description,
-            path=assertion.path,
-            operator=assertion.operator,
-            expected=assertion.expected,
-            actual=actual,
-            passed=True,
-            error=f"Unknown operator '{assertion.operator}' — skipped",
+    @staticmethod
+    def _failed_attempt(step: TestStep, attempt: int, error: str, calls: list[ToolCallRecord]) -> ExecutedRequest:
+        return ExecutedRequest(
+            step=step.step,
+            attempt=attempt,
+            name=step.name,
+            method=step.method,
+            url="",
+            templated_path=step.path,
+            templated_headers=step.headers,
+            templated_query_params=step.query_params,
+            templated_request_body=step.request_body,
+            tool_calls=calls,
+            status="failed",
+            error=error,
         )
+
+    @staticmethod
+    def _step_failed(step: TestStep, attempts: int, trace: list[ExecutedRequest], error: str) -> StepResult:
+        last = trace[-1] if trace else None
+        return StepResult(
+            step_num=step.step,
+            name=step.name,
+            status="failed",
+            attempts=attempts,
+            method=step.method,
+            url=last.url if last else "",
+            request_params=last.request_params if last else None,
+            request_body=last.request_body if last else None,
+            response_status=last.response_status if last else None,
+            response_body=last.response_body if last else None,
+            assertion_results=last.business_check_results if last else [],
+            error=error,
+            attempts_trace=trace,
+        )
+
+    @staticmethod
+    def _drop_generated_for_step(step: TestStep, context: VariableContext) -> None:
+        refs = set()
+
+        def visit(value: Any) -> None:
+            import re
+
+            if isinstance(value, str):
+                refs.update(re.findall(r"\{\{\s*(\w+)\s*\}\}", value))
+            elif isinstance(value, dict):
+                for item in value.values():
+                    visit(item)
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item)
+
+        visit(step.path)
+        visit(step.path_params)
+        visit(step.headers)
+        visit(step.query_params)
+        visit(step.request_body)
+        for name in refs:
+            context.generated.pop(name, None)

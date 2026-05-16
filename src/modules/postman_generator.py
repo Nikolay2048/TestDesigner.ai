@@ -1,467 +1,251 @@
-"""
-Postman Collection Generator (format v2.1).
-
-Converts one or more :class:`~src.models.scenario.ScenarioStabilizationInput`
-objects (output of Agent 1) into a single Postman collection JSON that can be
-imported directly into Postman.
-
-Collection structure
---------------------
-::
-
-    Collection
-    ├── variables          ← seeded from constants.json + empty slots for context vars
-    └── item[]
-        └── Folder (one per scenario)
-            ├── item[0]   ← "Setup: Reset Mock" helper request
-            └── item[1…n] ← one request per TestStep
-                ├── pre-request script  (runs JS generator snippets for "generate" vars)
-                └── test script         (status check → extract vars → assertions)
-
-Variable conventions
---------------------
-Variables are classified using ``var_sources`` from Agent 1 (deterministic):
-
-* **constant** — seeded from ``constants.json`` with their real values.
-* **context**  — initialised as empty string; populated at runtime by the test
-  script's ``pm.collectionVariables.set()`` call after each step.
-* **generate** — have a JS snippet in the :class:`GeneratorRegistry`; the snippet
-  is pasted into the pre-request script of every step that references the var.
-  These vars are NOT added to the static variable list (they are set dynamically).
-
-JSONPath → JavaScript
----------------------
-Assertion paths such as ``$.items[0].vehicleId`` are converted to JavaScript
-property access expressions (``json.items[0].vehicleId``) for use in Postman
-test scripts.
-"""
+"""Postman collection and environment generator."""
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
-import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 from src.agents.generator_registry import GeneratorRegistry
-from src.models.scenario import Assertion, ScenarioStabilizationInput, TestStep
+from src.models.execution import ScenarioExecutionResult, VariableContext
+from src.models.scenario import ScenarioStabilizationInput, TestStep
 
 logger = logging.getLogger(__name__)
 
-_VAR_RE = re.compile(r"\{\{(\w+)\}\}")
-
-POSTMAN_SCHEMA = (
-    "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
-)
-
+POSTMAN_SCHEMA = "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+_VAR_RE = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 _DEFAULT_REGISTRY_PATH = Path("data/generator_registry.json")
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
 class PostmanGenerator:
-    """
-    Generates a Postman collection v2.1 from Agent 1 output.
+    """Builds Postman v2.1 collections from scenarios or successful execution traces."""
 
-    Args:
-        reset_mock_between_scenarios: If ``True``, inserts a
-            ``POST {{base_url}}/v1/debug/reset`` request at the beginning of
-            every scenario folder so each scenario starts with a clean server
-            state.
-        registry_path: Path to the generator function registry JSON file.
-            Defaults to ``data/generator_registry.json``.
-    """
-
-    def __init__(
-        self,
-        reset_mock_between_scenarios: bool = True,
-        registry_path: Path = _DEFAULT_REGISTRY_PATH,
-    ) -> None:
-        self.reset_mock = reset_mock_between_scenarios
-        self._registry = GeneratorRegistry(registry_path)
-
-    # ------------------------------------------------------------------
-    # Entry point
-    # ------------------------------------------------------------------
+    def __init__(self, registry_path: Path = _DEFAULT_REGISTRY_PATH, reset_mock_between_scenarios: bool = True) -> None:
+        self.registry = GeneratorRegistry(registry_path)
+        self.reset_mock_between_scenarios = reset_mock_between_scenarios
 
     def generate(
         self,
         scenarios: List[ScenarioStabilizationInput],
         constants: Dict[str, Any],
-        collection_name: str = "Carsharing API — Test Suite",
+        collection_name: str = "Generated API Test Suite",
     ) -> Dict[str, Any]:
-        """
-        Build the full Postman collection dict.
-
-        Args:
-            scenarios:       Ordered list of Agent 1 outputs (one per scenario file).
-            constants:       Key-value pairs from ``constants.json``.
-            collection_name: Human-readable name of the generated collection.
-
-        Returns:
-            A dict that serialises directly to a valid Postman collection v2.1
-            JSON file.
-        """
-        logger.info(
-            "PostmanGenerator: building collection '%s' from %d scenario(s)",
-            collection_name, len(scenarios),
-        )
-
-        collection = {
-            "info": self._build_info(collection_name, scenarios),
-            "item": [self._build_folder(s) for s in scenarios],
-            "variable": self._build_variables(constants, scenarios),
+        logger.info("PostmanGenerator: building collection from %d scenario card(s)", len(scenarios))
+        return {
+            "info": self._info(collection_name),
+            "item": [self._scenario_folder(scenario) for scenario in scenarios],
+            "variable": self._variables_from_constants(constants),
         }
 
-        total_requests = sum(len(s.steps) for s in scenarios)
-        logger.info(
-            "PostmanGenerator: done — %d folder(s), %d request(s)",
-            len(scenarios), total_requests,
-        )
-        return collection
-
-    # ------------------------------------------------------------------
-    # Top-level builders
-    # ------------------------------------------------------------------
-
-    def _build_info(
-        self, name: str, scenarios: List[ScenarioStabilizationInput]
+    def generate_from_execution(
+        self,
+        result: ScenarioExecutionResult,
+        collection_name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        scenario_names = "\n".join(f"- {s.scenario_name}" for s in scenarios)
+        logger.info("PostmanGenerator: building collection from execution result %s", result.scenario_name)
+        name = collection_name or result.scenario_name
+        return {
+            "info": self._info(name),
+            "item": [
+                {
+                    "name": result.scenario_name,
+                    "description": "\n".join(result.reasoning_log),
+                    "item": [self._executed_item(request) for request in result.ready_requests],
+                }
+            ],
+            "variable": self._variables_from_context(result.variables),
+        }
+
+    def generate_environment(
+        self,
+        variables: VariableContext,
+        environment_name: str = "Generated API Test Environment",
+    ) -> Dict[str, Any]:
+        values = variables.values()
+        return {
+            "id": str(uuid.uuid4()),
+            "name": environment_name,
+            "values": [
+                {"key": key, "value": self._stringify(value), "type": "default", "enabled": True}
+                for key, value in sorted(values.items())
+            ],
+            "_postman_variable_scope": "environment",
+            "_postman_exported_using": "TestDesignerAI",
+        }
+
+    @staticmethod
+    def _info(name: str) -> Dict[str, Any]:
         return {
             "_postman_id": str(uuid.uuid4()),
             "name": name,
-            "description": (
-                f"Auto-generated by PostmanGenerator.\n\n"
-                f"Scenarios ({len(scenarios)}):\n{scenario_names}\n\n"
-                f"Requires mock server: python src/mock.py"
-            ),
             "schema": POSTMAN_SCHEMA,
+            "description": "Generated by TestDesignerAI multi-agent pipeline.",
         }
 
-    def _build_variables(
-        self,
-        constants: Dict[str, Any],
-        scenarios: List[ScenarioStabilizationInput],
-    ) -> List[Dict[str, Any]]:
-        """
-        Build collection-level variable list.
-
-        Uses ``var_sources`` from each scenario for precise classification.
-        Falls back to heuristic (constants dict lookup + registry check) for
-        older cached plans that pre-date the ``var_sources`` field.
-
-        Variable kinds:
-        * **constant** — seeded from ``constants.json`` with their real values.
-        * **context**  — initialised as empty string (test script will fill them).
-        * **generate** — handled by pre-request JS snippets; excluded from the
-          static variable list so Postman doesn't need a seed value.
-        """
-        variables: Dict[str, Any] = {}
-
-        # Constants are always seeded with their values
-        for key, value in constants.items():
-            variables[key] = value
-
-        constant_keys = set(constants.keys())
-
-        for scenario in scenarios:
-            if scenario.var_sources:
-                # Precise path: use Agent 1's explicit classification
-                for vs in scenario.var_sources:
-                    if vs.kind == "constant":
-                        pass  # already seeded above
-                    elif vs.kind == "context":
-                        # Empty string — will be filled by test script
-                        variables.setdefault(vs.name, "")
-                    elif vs.kind == "generate":
-                        # Has a JS pre-request snippet → do NOT add to static vars
-                        # (Postman will pick up the value set by the pre-request script)
-                        pass
-            else:
-                # Fallback for old cache: heuristic classification
-                for step in scenario.steps:
-                    for ref in self._collect_step_var_refs(step):
-                        if ref in constant_keys:
-                            continue
-                        if self._registry.lookup(ref) is not None:
-                            # Generator exists → pre-request script handles it
-                            continue
-                        variables.setdefault(ref, "")
-
-        return [
-            {"key": k, "value": str(v), "type": "any"}
-            for k, v in variables.items()
-        ]
-
-    # ------------------------------------------------------------------
-    # Folder builder
-    # ------------------------------------------------------------------
-
-    def _build_folder(self, scenario: ScenarioStabilizationInput) -> Dict[str, Any]:
-        # Build the set of vars that need pre-request JS for this scenario
-        generate_vars: Set[str] = {
-            vs.name for vs in scenario.var_sources if vs.kind == "generate"
-        }
-        # Fallback: if no var_sources, treat all registry-known refs as generate
-        if not scenario.var_sources:
-            for step in scenario.steps:
-                for ref in self._collect_step_var_refs(step):
-                    if self._registry.lookup(ref) is not None:
-                        generate_vars.add(ref)
-
-        items: List[Dict[str, Any]] = []
-
-        if self.reset_mock:
-            items.append(self._build_reset_request())
-
-        for step in scenario.steps:
-            items.append(self._build_item(step, generate_vars))
-
+    def _scenario_folder(self, scenario: ScenarioStabilizationInput) -> Dict[str, Any]:
+        items = []
+        if self.reset_mock_between_scenarios:
+            items.append(self._reset_item())
+        items.extend(self._scenario_item(step) for step in scenario.steps)
         return {
             "name": scenario.scenario_name,
-            "description": scenario.description,
+            "description": scenario.business_context,
             "item": items,
         }
 
-    # ------------------------------------------------------------------
-    # Reset mock helper request
-    # ------------------------------------------------------------------
-
-    def _build_reset_request(self) -> Dict[str, Any]:
+    def _scenario_item(self, step: TestStep) -> Dict[str, Any]:
         return {
-            "name": "⚙ Setup: Reset Mock Server",
+            "name": f"Step {step.step}: {step.name}",
+            "request": self._request_object(
+                method=step.method,
+                path=self._template_path(step),
+                headers=step.headers,
+                query=step.query_params,
+                body=step.request_body,
+                description=step.description or "\n".join(step.success_criteria),
+            ),
+            "event": [
+                {"listen": "prerequest", "script": {"type": "text/javascript", "exec": self._pre_request_lines(step)}},
+                {"listen": "test", "script": {"type": "text/javascript", "exec": self._test_lines(step)}},
+            ],
+            "response": [],
+        }
+
+    def _executed_item(self, request) -> Dict[str, Any]:
+        return {
+            "name": f"Step {request.step}: {request.name}",
+            "request": self._request_object(
+                method=request.method,
+                path=request.templated_path,
+                headers=request.templated_headers,
+                query=request.templated_query_params,
+                body=request.templated_request_body,
+                description=f"Successful response example: {json.dumps(request.response_body, ensure_ascii=False)}",
+            ),
+            "response": [
+                {
+                    "name": "Successful response",
+                    "originalRequest": self._request_object(
+                        method=request.method,
+                        path=request.templated_path,
+                        headers=request.templated_headers,
+                        query=request.templated_query_params,
+                        body=request.templated_request_body,
+                    ),
+                    "status": str(request.response_status),
+                    "code": request.response_status,
+                    "body": json.dumps(request.response_body, ensure_ascii=False, indent=2),
+                    "header": [{"key": "Content-Type", "value": "application/json"}],
+                }
+            ],
             "event": [
                 {
                     "listen": "test",
                     "script": {
-                        "exec": [
-                            'pm.test("Mock reset OK", function() {',
-                            "    pm.response.to.have.status(200);",
-                            "});",
-                        ],
                         "type": "text/javascript",
+                        "exec": [f"pm.response.to.have.status({request.response_status});"],
                     },
                 }
             ],
-            "request": {
-                "method": "POST",
-                "header": [],
-                "url": {
-                    "raw": "{{base_url}}/v1/debug/reset",
-                    "host": ["{{base_url}}"],
-                    "path": ["v1", "debug", "reset"],
-                },
-                "description": "Resets the mock server to its initial seed state.",
-            },
-            "response": [],
         }
 
-    # ------------------------------------------------------------------
-    # Per-step item builder
-    # ------------------------------------------------------------------
-
-    def _build_item(self, step: TestStep, generate_vars: Set[str]) -> Dict[str, Any]:
-        events: List[Dict[str, Any]] = []
-
-        prereq_lines = self._build_prerequest_lines(step, generate_vars)
-        if prereq_lines:
-            events.append({
-                "listen": "prerequest",
-                "script": {
-                    "exec": prereq_lines,
-                    "type": "text/javascript",
-                },
-            })
-
-        test_lines = self._build_test_lines(step)
-        events.append({
-            "listen": "test",
-            "script": {
-                "exec": test_lines,
-                "type": "text/javascript",
-            },
-        })
-
-        return {
-            "name": f"Step {step.step_num}: {step.name}",
-            "event": events,
-            "request": self._build_request_obj(step),
-            "response": [],
-        }
-
-    # ------------------------------------------------------------------
-    # Request object
-    # ------------------------------------------------------------------
-
-    def _build_request_obj(self, step: TestStep) -> Dict[str, Any]:
-        headers: List[Dict[str, str]] = [
-            {"key": "Accept", "value": "application/json"},
-        ]
-        if step.body is not None:
-            headers.append({"key": "Content-Type", "value": "application/json"})
-
+    def _request_object(
+        self,
+        method: str,
+        path: str,
+        headers: Optional[Dict[str, Any]],
+        query: Optional[Dict[str, Any]],
+        body: Optional[Any],
+        description: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        raw = "{{base_url}}" + path
+        query_items = []
+        if query:
+            query_items = [{"key": key, "value": self._stringify(value)} for key, value in query.items()]
+            raw += "?" + "&".join(f"{item['key']}={item['value']}" for item in query_items)
         request: Dict[str, Any] = {
-            "method": step.method,
-            "header": headers,
-            "url": self._build_url(step),
+            "method": method,
+            "header": [{"key": key, "value": self._stringify(value)} for key, value in (headers or {}).items()],
+            "url": {
+                "raw": raw,
+                "host": ["{{base_url}}"],
+                "path": [segment for segment in path.strip("/").split("/") if segment],
+            },
         }
-
-        if step.body is not None:
+        if query_items:
+            request["url"]["query"] = query_items
+        if body is not None:
             request["body"] = {
                 "mode": "raw",
-                "raw": json.dumps(step.body, indent=2, ensure_ascii=False),
+                "raw": json.dumps(body, ensure_ascii=False, indent=2),
                 "options": {"raw": {"language": "json"}},
             }
-
-        if step.description:
-            request["description"] = step.description
-
+        if description:
+            request["description"] = description
         return request
 
-    # ------------------------------------------------------------------
-    # URL builder
-    # ------------------------------------------------------------------
-
-    def _build_url(self, step: TestStep) -> Dict[str, Any]:
-        # Resolve path: replace {paramName} with path_params value (e.g. {{bookingId}})
+    @staticmethod
+    def _template_path(step: TestStep) -> str:
         path = step.path
-        for param_name, param_value in (step.path_params or {}).items():
-            path = path.replace(f"{{{param_name}}}", param_value)
+        for name, value in step.path_params.items():
+            path = path.replace(f"{{{name}}}", str(value))
+        return path
 
-        # Build path segments
-        segments = [seg for seg in path.strip("/").split("/") if seg]
-
-        # Build query array
-        query: List[Dict[str, str]] = []
-        if step.query_params:
-            for k, v in step.query_params.items():
-                query.append({"key": k, "value": v})
-
-        # Build raw URL
-        raw = "{{base_url}}" + path
-        if query:
-            qs = "&".join(f"{q['key']}={q['value']}" for q in query)
-            raw += "?" + qs
-
-        url_obj: Dict[str, Any] = {
-            "raw": raw,
-            "host": ["{{base_url}}"],
-            "path": segments,
-        }
-        if query:
-            url_obj["query"] = query
-
-        return url_obj
-
-    # ------------------------------------------------------------------
-    # Pre-request script  (JS generator snippets from registry)
-    # ------------------------------------------------------------------
-
-    def _build_prerequest_lines(
-        self, step: TestStep, generate_vars: Set[str]
-    ) -> List[str]:
-        """
-        Build pre-request script lines for this step.
-
-        For each ``{{varName}}`` referenced in the step that belongs to
-        ``generate_vars`` AND has a registry entry with a ``js_snippet``,
-        paste the snippet into the script.  Snippets are deduplicated so
-        a var used in multiple fields only generates once.
-        """
-        refs = self._collect_step_var_refs(step)
-        # Only process vars that are "generate" kind and referenced in this step
-        vars_to_generate = refs & generate_vars
-
+    def _pre_request_lines(self, step: TestStep) -> List[str]:
         lines: List[str] = []
-        seen: Set[str] = set()
-
-        for var_name in sorted(vars_to_generate):
-            if var_name in seen:
-                continue
-            func = self._registry.lookup(var_name)
-            if func is None:
-                logger.debug(
-                    "PostmanGenerator: no registry entry for generate-var '%s' in step %d",
-                    var_name, step.step_num,
-                )
-                continue
-            lines.extend(func.js_snippet.splitlines())
-            lines.append("")  # blank line separator between snippets
-            seen.add(var_name)
-
+        refs = self._refs([step.path, step.path_params, step.headers, step.query_params, step.request_body])
+        for name in sorted(refs):
+            func = self.registry.lookup(name)
+            if func and func.js_snippet:
+                lines.extend(func.js_snippet.splitlines())
+                lines.append("")
         return lines
 
-    # ------------------------------------------------------------------
-    # Test script
-    # ------------------------------------------------------------------
-
-    def _build_test_lines(self, step: TestStep) -> List[str]:
-        lines: List[str] = []
-
-        # 1. Status code assertion
-        lines += [
-            f'pm.test("Status is {step.expected_status_code}", function() {{',
-            f"    pm.response.to.have.status({step.expected_status_code});",
+    def _test_lines(self, step: TestStep) -> List[str]:
+        lines = [
+            f'pm.test("HTTP status is {step.expected_status}", function () {{',
+            f"  pm.response.to.have.status({step.expected_status});",
             "});",
             "",
         ]
-
-        # 2. Parse JSON (needed for extract_vars and assertions)
-        has_json_usage = bool(step.extract_vars or step.assertions)
-        if has_json_usage:
-            lines += [
-                "const json = pm.response.json();",
-                "",
-            ]
-
-        # 3. Variable extraction
-        if step.extract_vars:
-            lines.append("// Extract variables for subsequent steps")
-            for var_name, jsonpath in step.extract_vars.items():
-                js_expr = self._jsonpath_to_js(jsonpath)
-                lines += [
-                    f"try {{",
-                    f"    const _val_{var_name} = {js_expr};",
-                    f"    if (_val_{var_name} !== undefined && _val_{var_name} !== null) {{",
-                    f'        pm.collectionVariables.set("{var_name}", _val_{var_name});',
-                    f'        console.log("Extracted {var_name}:", _val_{var_name});',
-                    f"    }}",
-                    f"}} catch(e) {{",
-                    f'    console.error("Could not extract {var_name}:", e.message);',
-                    f"}}",
+        if step.extract_variables or step.assertions:
+            lines.extend(["const json = pm.response.json();", ""])
+        for rule in step.extract_variables:
+            js_expr = self._jsonpath_to_js(rule.expression)
+            lines.extend(
+                [
+                    f"const {rule.name} = {js_expr};",
+                    f"if ({rule.name} !== undefined && {rule.name} !== null) {{",
+                    f'  pm.collectionVariables.set("{rule.name}", {rule.name});',
+                    "}",
+                    "",
                 ]
-            lines.append("")
-
-        # 4. Assertions
-        if step.assertions:
-            lines.append("// Business assertions")
-            for assertion in step.assertions:
-                lines += self._assertion_to_js_lines(assertion)
-                lines.append("")
-
+            )
+        for assertion in step.assertions:
+            js_expr = self._jsonpath_to_js(assertion.path)
+            expected = json.dumps(assertion.expected, ensure_ascii=False)
+            lines.append(f'pm.test("{assertion.description}", function () {{')
+            if assertion.operator == "not_null":
+                lines.append(f"  pm.expect({js_expr}).to.not.be.null;")
+                lines.append(f"  pm.expect({js_expr}).to.not.be.undefined;")
+            elif assertion.operator == "exists":
+                lines.append(f"  pm.expect({js_expr}).to.not.equal(undefined);")
+            elif assertion.operator == "eq":
+                lines.append(f"  pm.expect(String({js_expr})).to.equal(String({expected}));")
+            elif assertion.operator == "ne":
+                lines.append(f"  pm.expect(String({js_expr})).to.not.equal(String({expected}));")
+            elif assertion.operator == "contains":
+                lines.append(f"  pm.expect({js_expr}).to.include({expected});")
+            else:
+                lines.append("  pm.expect(true).to.equal(true);")
+            lines.extend(["});", ""])
         return lines
 
-    # ------------------------------------------------------------------
-    # JSONPath → JavaScript
-    # ------------------------------------------------------------------
-
     @staticmethod
-    def _jsonpath_to_js(jsonpath: str) -> str:
-        """
-        Convert a simple JSONPath expression to a JavaScript property accessor.
-
-        Examples::
-            "$.bookingId"           → "json.bookingId"
-            "$.items[0].vehicleId"  → "json.items[0].vehicleId"
-            "$.code"                → "json.code"
-        """
-        path = jsonpath.strip()
+    def _jsonpath_to_js(path: str) -> str:
         if path == "$":
             return "json"
         if path.startswith("$."):
@@ -470,107 +254,62 @@ class PostmanGenerator:
             return "json" + path[1:]
         return "json." + path.lstrip("$.")
 
-    # ------------------------------------------------------------------
-    # Assertion → JS
-    # ------------------------------------------------------------------
-
-    def _assertion_to_js_lines(self, assertion: Assertion) -> List[str]:
-        js_expr = self._jsonpath_to_js(assertion.path)
-        desc = assertion.description.replace('"', '\\"')
-        op = assertion.operator
-        expected = assertion.expected
-
-        lines = [f'pm.test("{desc}", function() {{']
-
-        if op == "not_null":
-            lines += [
-                f"    const _v = {js_expr};",
-                "    pm.expect(_v).to.not.be.null;",
-                "    pm.expect(_v).to.not.be.undefined;",
-            ]
-
-        elif op == "exists":
-            lines += [
-                f"    pm.expect(json).to.have.nested.property"
-                f'("{assertion.path.lstrip("$.").replace("[", "[").replace("]", "]")}");',
-            ]
-
-        elif op == "eq":
-            if isinstance(expected, str):
-                if _VAR_RE.search(expected):
-                    resolved = _VAR_RE.sub(
-                        lambda m: f'" + pm.collectionVariables.get("{m.group(1)}") + "',
-                        expected,
-                    )
-                    expected_js = f'"{resolved}"'
-                else:
-                    expected_js = f'"{expected}"'
-            elif isinstance(expected, bool):
-                expected_js = "true" if expected else "false"
-            elif expected is None:
-                expected_js = "null"
-            else:
-                expected_js = str(expected)
-
-            lines += [
-                f"    pm.expect(String({js_expr})).to.equal(String({expected_js}));",
-            ]
-
-        elif op == "ne":
-            if isinstance(expected, str):
-                expected_js = f'"{expected}"'
-            elif expected is None:
-                expected_js = "null"
-            else:
-                expected_js = str(expected)
-            lines += [
-                f"    pm.expect(String({js_expr})).to.not.equal(String({expected_js}));",
-            ]
-
-        elif op == "contains":
-            if isinstance(expected, str):
-                expected_js = f'"{expected}"'
-            else:
-                expected_js = str(expected)
-            lines += [
-                f"    pm.expect({js_expr}).to.include({expected_js});",
-            ]
-
-        else:
-            lines += [
-                f'    // Unknown operator "{op}" — skipped',
-                "    pm.expect(true).to.be.true;",
-            ]
-
-        lines.append("});")
-        return lines
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _variables_from_constants(constants: Dict[str, Any]) -> List[Dict[str, Any]]:
+        return [{"key": key, "value": PostmanGenerator._stringify(value), "type": "any"} for key, value in sorted(constants.items())]
 
     @staticmethod
-    def _collect_step_var_refs(step: TestStep) -> Set[str]:
-        """Return all ``{{varName}}`` references across the step."""
-        parts: List[str] = [step.path]
-        for v in (step.path_params or {}).values():
-            parts.append(str(v))
-        for v in (step.query_params or {}).values():
-            parts.append(str(v))
+    def _variables_from_context(context: VariableContext) -> List[Dict[str, Any]]:
+        return [
+            {"key": key, "value": PostmanGenerator._stringify(value), "type": "any"}
+            for key, value in sorted(context.values().items())
+        ]
 
-        def _collect(obj: Any) -> None:
-            if isinstance(obj, str):
-                parts.append(obj)
-            elif isinstance(obj, dict):
-                for val in obj.values():
-                    _collect(val)
-            elif isinstance(obj, list):
-                for item in obj:
-                    _collect(item)
+    @staticmethod
+    def _refs(values: List[Any]) -> set[str]:
+        refs: set[str] = set()
 
-        _collect(step.body)
+        def visit(value: Any) -> None:
+            if isinstance(value, str):
+                refs.update(_VAR_RE.findall(value))
+            elif isinstance(value, dict):
+                for item in value.values():
+                    visit(item)
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item)
 
-        refs: Set[str] = set()
-        for part in parts:
-            refs.update(_VAR_RE.findall(part))
+        for value in values:
+            visit(value)
         return refs
+
+    @staticmethod
+    def _stringify(value: Any) -> str:
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False)
+        return "" if value is None else str(value)
+
+    @staticmethod
+    def _reset_item() -> Dict[str, Any]:
+        return {
+            "name": "Setup: Reset Mock Server",
+            "request": {
+                "method": "POST",
+                "header": [{"key": "Accept", "value": "application/json"}],
+                "url": {
+                    "raw": "{{base_url}}/v1/debug/reset",
+                    "host": ["{{base_url}}"],
+                    "path": ["v1", "debug", "reset"],
+                },
+            },
+            "event": [
+                {
+                    "listen": "test",
+                    "script": {
+                        "type": "text/javascript",
+                        "exec": ["pm.response.to.have.status(200);"],
+                    },
+                }
+            ],
+            "response": [],
+        }

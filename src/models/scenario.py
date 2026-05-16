@@ -1,197 +1,121 @@
-"""
-Data models for Agent 1 output and Agent 2 input.
+"""Scenario contracts shared by all agents.
 
-Agent 1 (ScenarioBuilderAgent) reads a business scenario and an API spec,
-then produces a :class:`ScenarioStabilizationInput` — an ordered list of
-:class:`TestStep` objects that Agent 2 can execute against a real server.
-
-Variable reference convention
-------------------------------
-Dynamic values (extracted from previous responses or generated at runtime)
-are represented as ``{{variableName}}`` string placeholders, e.g.::
-
-    {"bookingId": "{{bookingId}}", "city": "{{city}}"}
-
-Agent 2 substitutes these placeholders with actual values from its context
-before each HTTP request.
-
-Variable classification (``var_sources``)
------------------------------------------
-After Agent 1 runs, a deterministic post-processing step classifies every
-``{{varName}}`` reference into one of three kinds:
-
-* **constant** — the name exists in ``constants.json``; value is known upfront.
-* **context**  — the name appears in ``extract_vars`` of a prior step; value is
-  extracted from a response at runtime.  ``provided_by_step`` holds that step's
-  number.
-* **generate** — not a constant and not extracted; Agent 3 (DataGeneratorAgent)
-  must generate it at runtime (e.g. ``startDate``).
+Agent 1 produces :class:`ScenarioStabilizationInput`. Agent 2 treats that
+object as an executable plan. The model intentionally keeps the original
+business-oriented fields from the prompt and adds machine-facing metadata:
+assertions, extraction rules, variable sources, and OpenAPI endpoint linkage.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
-# ---------------------------------------------------------------------------
-# Variable source classification
-# ---------------------------------------------------------------------------
-
-VarKind = Literal["constant", "context", "generate"]
-
-
-class VarSource(BaseModel):
-    """Describes where a ``{{varName}}`` placeholder gets its value from."""
-
-    name: str = Field(description="Variable name without braces, e.g. 'bookingId'.")
-    kind: VarKind = Field(
-        description=(
-            "'constant' — value from constants.json; "
-            "'context' — extracted from a prior step's response; "
-            "'generate' — Agent 3 generates it at runtime."
-        )
-    )
-    provided_by_step: Optional[int] = Field(
-        default=None,
-        description="For kind='context': step_num of the step that extracts this variable.",
-    )
-
-
-# ---------------------------------------------------------------------------
-# Assertion
-# ---------------------------------------------------------------------------
-
+HTTPMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
 AssertionOperator = Literal["eq", "ne", "exists", "not_null", "contains"]
+VariableKind = Literal["constant", "generated", "extracted", "unknown"]
+
+
+class BusinessRule(BaseModel):
+    """Business rule inferred from the system-analysis document."""
+
+    id: str = Field(description="Stable rule identifier, for example BR-001.")
+    description: str = Field(description="Human-readable business rule.")
+    applies_to_variables: List[str] = Field(default_factory=list)
+    applies_to_steps: List[int] = Field(default_factory=list)
+
+
+class VariableSource(BaseModel):
+    """Where a template variable should come from at runtime."""
+
+    name: str
+    kind: VariableKind
+    description: Optional[str] = None
+    source_step: Optional[int] = None
+    extraction_expression: Optional[str] = None
+    generation_goal: Optional[str] = None
+    generation_requires: Dict[str, Any] = Field(default_factory=dict)
 
 
 class Assertion(BaseModel):
-    """A single check to validate against an API response body."""
+    """Machine-checkable assertion against a response body."""
 
-    description: str = Field(
-        description="Human-readable description of what is being checked."
-    )
-    path: str = Field(
-        description=(
-            "JSONPath expression pointing to the value under test. "
-            "Use '$' for the root object. "
-            "Examples: '$.status', '$.bookingId', '$.items[0].vehicleId'."
-        )
-    )
-    operator: AssertionOperator = Field(
-        description=(
-            "Comparison operator. "
-            "'eq' — equals expected; "
-            "'ne' — not equals; "
-            "'exists' — key is present (expected not needed); "
-            "'not_null' — value is not null (expected not needed); "
-            "'contains' — string or array contains expected."
-        )
-    )
-    expected: Optional[Union[str, int, float, bool]] = Field(
-        default=None,
-        description=(
-            "Expected scalar value — string, number, or boolean. "
-            "Not required for 'exists' and 'not_null'. "
-            "Example: 'CREATED', 1, true. NEVER use a dict or list here."
-        ),
-    )
+    description: str
+    path: str = Field(description="JSONPath expression, e.g. $.status.")
+    operator: AssertionOperator
+    expected: Optional[Union[str, int, float, bool]] = None
 
 
-# ---------------------------------------------------------------------------
-# TestStep
-# ---------------------------------------------------------------------------
+class ExtractionRule(BaseModel):
+    """A variable extraction rule for a successful response."""
+
+    name: str
+    expression: str = Field(description="JSONPath expression.")
+    description: Optional[str] = None
+    required: bool = True
 
 
 class TestStep(BaseModel):
-    """
-    One executable test step — a single HTTP request with pre/post conditions.
+    """Single executable API test scenario step."""
 
-    Path parameters and body values may use ``{{variableName}}`` placeholders
-    that Agent 2 resolves from its runtime context before sending the request.
-    """
+    model_config = ConfigDict(populate_by_name=True)
 
-    step_num: int = Field(description="Sequential step number starting from 1.")
-    name: str = Field(description="Short human-readable step name.")
-    description: str = Field(description="What this step does and why it matters.")
+    step: int = Field(alias="step_num", description="Sequential step number.")
+    name: str
+    method: HTTPMethod
+    path: str = Field(description="Relative endpoint path. May contain templates.")
+    headers: Optional[Dict[str, Any]] = None
+    request_body: Optional[Dict[str, Any]] = Field(default=None, alias="body")
+    query_params: Optional[Dict[str, Any]] = None
+    path_params: Dict[str, Any] = Field(default_factory=dict)
+    expected_status: int = Field(alias="expected_status_code")
+    success_criteria: List[str] = Field(default_factory=list)
 
-    method: str = Field(
-        description="HTTP method in uppercase: GET, POST, PUT, PATCH, DELETE."
-    )
-    path: str = Field(
-        description=(
-            "API path template as defined in the spec, "
-            "e.g. '/v1/bookings/{bookingId}'."
-        )
-    )
+    extract_variables: List[ExtractionRule] = Field(default_factory=list)
+    assertions: List[Assertion] = Field(default_factory=list)
+    variable_sources: List[VariableSource] = Field(default_factory=list)
+    endpoint_operation_id: Optional[str] = None
+    description: Optional[str] = None
 
-    path_params: Dict[str, str] = Field(
-        default_factory=dict,
-        description=(
-            "Values for path template parameters. "
-            "Use {{varName}} for runtime variables. "
-            "Example: {'bookingId': '{{bookingId}}'}."
-        ),
-    )
-    query_params: Optional[Dict[str, str]] = Field(
-        default=None,
-        description=(
-            "Query string parameters. "
-            "Use {{varName}} for constants or runtime variables. "
-            "Example: {'city': '{{city}}'}."
-        ),
-    )
-    body: Optional[Dict[str, Any]] = Field(
-        default=None,
-        description=(
-            "Request body as a flat or nested JSON object. "
-            "Use {{varName}} string placeholders for dynamic values. "
-            "Example: {'userId': '{{userId}}', 'vehicleId': '{{vehicleId}}', "
-            "'startDate': '{{startDate}}'}."
-        ),
-    )
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def step_num(self) -> int:
+        """Backward-compatible name used by older scripts."""
+        return self.step
 
-    expected_status_code: int = Field(
-        description="Expected HTTP response status code for a successful call, e.g. 200, 201, 204."
-    )
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def expected_status_code(self) -> int:
+        """Backward-compatible name used by older scripts."""
+        return self.expected_status
 
-    extract_vars: Dict[str, str] = Field(
-        default_factory=dict,
-        description=(
-            "Variables to extract from the response body for use in later steps. "
-            "Key = variable name, value = JSONPath expression. "
-            "Example: {'bookingId': '$.bookingId', 'vehicleId': '$.items[0].vehicleId'}."
-        ),
-    )
-    assertions: List[Assertion] = Field(
-        default_factory=list,
-        description="Assertions to validate the response of this step.",
-    )
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def body(self) -> Optional[Dict[str, Any]]:
+        """Backward-compatible name used by older scripts."""
+        return self.request_body
 
-
-# ---------------------------------------------------------------------------
-# Top-level output of Agent 1
-# ---------------------------------------------------------------------------
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def extract_vars(self) -> Dict[str, str]:
+        """Backward-compatible extraction mapping."""
+        return {rule.name: rule.expression for rule in self.extract_variables}
 
 
 class ScenarioStabilizationInput(BaseModel):
-    """
-    Complete test scenario output produced by Agent 1.
+    """Complete scenario card produced by Agent 1 and executed by Agent 2."""
 
-    Passed directly to Agent 2 as its execution plan.
+    scenario_name: str
+    business_context: str = ""
+    business_rules: List[BusinessRule] = Field(default_factory=list)
+    constant_variables: Dict[str, Any] = Field(default_factory=dict)
+    steps: List[TestStep]
+    variable_sources: List[VariableSource] = Field(default_factory=list)
+    description: Optional[str] = None
 
-    The ``var_sources`` field is populated by a deterministic post-processing
-    step in :class:`~src.agents.agent1_scenario_builder.ScenarioBuilderAgent`
-    — it is NOT filled by the LLM.
-    """
-
-    scenario_name: str = Field(description="Name / identifier of the test scenario.")
-    description: str = Field(description="One-sentence summary of what the scenario tests.")
-    steps: List[TestStep] = Field(description="Ordered list of test steps to execute.")
-    var_sources: List[VarSource] = Field(
-        default_factory=list,
-        description=(
-            "Classification of every {{varName}} placeholder used in this scenario. "
-            "Populated after LLM output by a deterministic algorithm — not by the LLM."
-        ),
-    )
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def var_sources(self) -> List[VariableSource]:
+        """Backward-compatible alias for older generators."""
+        return self.variable_sources

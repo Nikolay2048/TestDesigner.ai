@@ -1,31 +1,9 @@
-"""
-Agent 3 — Data Generator.
+"""Agent 3: data generation agent.
 
-Generates or refreshes runtime variable values that are either:
-
-* **Missing** — referenced as ``{{varName}}`` in a step but not yet in context.
-* **Stale / invalid** — a previous attempt with the current values failed; the
-  agent produces fresh data for a retry.
-
-How it works
-------------
-1. For each missing variable, look it up in the :class:`GeneratorRegistry`.
-2. If found (builtin or previously saved LLM function), execute its
-   ``python_expr`` and return the value.
-3. If **not** found, call the LLM and ask it to produce:
-   * A short description.
-   * A single-line Python expression usable in the registry's eval context.
-   * A JavaScript snippet for Postman pre-request scripts.
-   The result is saved as a new :class:`GeneratorFunction` so future runs
-   never call the LLM again for the same variable name.
-
-Variable refresh (retry after failure)
----------------------------------------
-``refresh()`` re-executes the generator for every ``{{var}}`` referenced by the
-failed step that has a registered generator (i.e. variables that change over
-time, like dates or random IDs).  Variables that are extracted from API
-responses (``context`` kind) are *not* regenerated here — Agent 2 handles
-those by re-running the extraction step.
+Agent 3 owns data-generation policy. Agent 2 asks it for a variable, business
+context, goal, and constraints. Agent 3 first uses the reviewed generator
+registry. If no suitable function exists, it asks the LLM to create a new
+single-expression generator and persists that policy for future runs.
 """
 
 from __future__ import annotations
@@ -35,275 +13,171 @@ import logging
 import re
 from datetime import timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional
 
 from src.agents.generator_registry import GeneratorFunction, GeneratorRegistry
-from src.models.scenario import TestStep
+from src.models.execution import GeneratedVariable, ToolCallRecord, VariableContext
+from src.models.scenario import BusinessRule, TestStep, VariableSource
 from src.utils.config import AppConfig
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_REGISTRY_PATH = Path("data/generator_registry.json")
 
-_VAR_RE = re.compile(r"\{\{(\w+)\}\}")
-
 
 class DataGeneratorAgent:
-    """
-    Agent 3: generates missing or refreshed variable values for a test step.
+    """Generates runtime data values for Agent 2."""
 
-    Args:
-        config:        Application configuration (LLM settings for fallback).
-        registry_path: Path to the JSON file where LLM-generated functions are
-                       persisted.  Defaults to ``data/generator_registry.json``.
-    """
+    name = "agent3"
 
-    def __init__(
-        self,
-        config: AppConfig,
-        registry_path: Path = _DEFAULT_REGISTRY_PATH,
-    ) -> None:
+    def __init__(self, config: AppConfig, registry_path: Path = _DEFAULT_REGISTRY_PATH) -> None:
         self.config = config
         self._registry = GeneratorRegistry(registry_path)
-        self._llm: Any = None  # lazy-loaded only when needed
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+        self._llm: Any = None
 
     @property
     def registry(self) -> GeneratorRegistry:
-        """Expose the registry (used by PostmanGenerator)."""
         return self._registry
 
-    def generate(
+    def generate_variable(
         self,
+        variable_name: str,
         step: TestStep,
-        context: Dict[str, Any],
-        missing_vars: Set[str],
-    ) -> Dict[str, Any]:
-        """
-        Produce values for *missing_vars* required by *step*.
+        context: VariableContext,
+        business_context: str,
+        business_rules: list[BusinessRule],
+        source: Optional[VariableSource] = None,
+        previous_error: Optional[str] = None,
+    ) -> tuple[Optional[GeneratedVariable], ToolCallRecord]:
+        """Generate one variable and return the value plus audit record."""
 
-        Args:
-            step:         The test step that needs data.
-            context:      Current variable context (already-resolved values).
-            missing_vars: Variable names referenced in the step but absent
-                          from *context*.
+        values = context.values()
+        rules = [
+            rule.description
+            for rule in business_rules
+            if variable_name in rule.applies_to_variables or step.step in rule.applies_to_steps
+        ]
+        requires: Dict[str, Any] = {}
+        if source:
+            requires.update(source.generation_requires)
+        if rules:
+            requires["business_rules"] = rules
+        if previous_error:
+            requires["previous_error"] = previous_error
 
-        Returns:
-            ``{var_name: generated_value}`` — merge this into context before
-            re-executing the step.
-        """
-        generated: Dict[str, Any] = {}
-
-        for var in sorted(missing_vars):
-            value = self._generate_one(var, step, context)
-            if value is not None:
-                generated[var] = value
-                logger.info(
-                    "Agent3 [%s]: %s = %r  (step %d)",
-                    self._registry.lookup(var).source if self._registry.lookup(var) else "llm",
-                    var, value, step.step_num,
-                )
-            else:
-                logger.warning(
-                    "Agent3: could not generate value for '%s'  (step %d)",
-                    var, step.step_num,
-                )
-
-        return generated
-
-    def refresh(
-        self,
-        step: TestStep,
-        context: Dict[str, Any],
-        error_description: str,
-    ) -> Dict[str, Any]:
-        """
-        Regenerate dynamic variables when a step failed and must be retried.
-
-        Re-executes the generator for every ``{{var}}`` in the step that has a
-        registered generator — these are the vars whose values change each time
-        (dates, random IDs, etc.).  Context vars extracted from API responses
-        are not touched here.
-
-        Args:
-            step:              The failed step.
-            context:           Current variable context.
-            error_description: Human-readable failure reason (for logging).
-
-        Returns:
-            ``{var_name: fresh_value}`` — merge into context before retrying.
-        """
         logger.info(
-            "Agent3: refreshing data for step %d — %s",
-            step.step_num, error_description,
+            "Agent3: generate variable=%s step=%s requires=%s",
+            variable_name,
+            step.step,
+            requires,
         )
 
-        all_refs = self._collect_var_refs(step)
-        # Only refresh vars that have a registered generator (those are the ones
-        # Agent 3 produced; context vars come from API responses, not from here).
-        to_refresh = {v for v in all_refs if self._registry.lookup(v) is not None}
+        func = self._registry.lookup(variable_name)
+        if func is None or previous_error:
+            func = self._create_or_reuse_policy(variable_name, step, business_context, requires, func)
 
-        if to_refresh:
-            logger.debug("Agent3.refresh: re-generating %s", sorted(to_refresh))
-        return self.generate(step, context, to_refresh)
+        if func is None:
+            return None, ToolCallRecord(
+                agent=self.name,
+                tool="generator_registry",
+                action="generate_variable",
+                input_summary={"variable": variable_name, "requires": requires},
+                success=False,
+                error="No generator policy available",
+            )
 
-    # ------------------------------------------------------------------
-    # Internal generation logic
-    # ------------------------------------------------------------------
+        value = self._registry.execute(func, values)
+        if value is None:
+            return None, ToolCallRecord(
+                agent=self.name,
+                tool="generator_registry",
+                action="execute_generator",
+                input_summary={"variable": variable_name, "function": func.name},
+                success=False,
+                error="Generator returned None",
+            )
 
-    def _generate_one(
+        generated = GeneratedVariable(
+            name=variable_name,
+            generated_value=value,
+            generator_name=func.name,
+            generator_params=requires,
+            reason=source.generation_goal if source else f"Required by step {step.step}.",
+            overwrite_reason="Regenerated after failed attempt." if previous_error else None,
+            generator_function=func.python_expr,
+        )
+        return generated, ToolCallRecord(
+            agent=self.name,
+            tool="generator_registry",
+            action="execute_generator",
+            input_summary={"variable": variable_name, "function": func.name, "requires": requires},
+            output_summary={"value": value},
+        )
+
+    def _create_or_reuse_policy(
         self,
-        var_name: str,
+        variable_name: str,
         step: TestStep,
-        context: Dict[str, Any],
-    ) -> Any:
-        """Return a generated value for *var_name*, or ``None`` if all attempts fail."""
+        business_context: str,
+        requires: Dict[str, Any],
+        existing: Optional[GeneratorFunction],
+    ) -> Optional[GeneratorFunction]:
+        if existing is not None and not requires.get("previous_error"):
+            return existing
+        if existing is not None and not self._should_rewrite_policy(requires):
+            return existing
+        return self._llm_create_function(variable_name, step, business_context, requires) or existing
 
-        # 1. Registry lookup (builtin or previously saved LLM function)
-        logger.debug(
-            "Agent3: looking up '%s' in registry (%d functions)",
-            var_name, len(self._registry._functions),
-        )
-        func = self._registry.lookup(var_name)
-        if func is not None:
-            logger.debug(
-                "Agent3: found '%s' [%s] — expr: %s",
-                var_name, func.source, func.python_expr,
-            )
-            value = self._registry.execute(func, context)
-            if value is not None:
-                logger.debug("Agent3: eval('%s') → %r", func.name, value)
-                return value
-            logger.warning(
-                "Agent3: registry function for '%s' returned None, trying LLM fallback",
-                var_name,
-            )
-        else:
-            logger.info("Agent3: '%s' not in registry — will call LLM", var_name)
-
-        # 2. LLM fallback: create a new generator function and save it
-        func = self._llm_create_function(var_name, step, context)
-        if func is not None:
-            self._registry.register(func)
-            logger.info(
-                "Agent3: 💾 new generator saved: '%s' — %s",
-                func.name, func.description,
-            )
-            logger.debug("Agent3: python_expr = %s", func.python_expr)
-            return self._registry.execute(func, context)
-
-        return None
-
-    # ------------------------------------------------------------------
-    # LLM fallback — create a new GeneratorFunction
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _should_rewrite_policy(requires: Dict[str, Any]) -> bool:
+        error = str(requires.get("previous_error") or "").lower()
+        return any(token in error for token in ("date", "format", "invalid", "validation", "400"))
 
     def _llm_create_function(
         self,
-        var_name: str,
+        variable_name: str,
         step: TestStep,
-        context: Dict[str, Any],
+        business_context: str,
+        requires: Dict[str, Any],
     ) -> Optional[GeneratorFunction]:
-        """
-        Ask the LLM to design a generator function for an unknown variable.
-
-        The LLM returns a JSON object with ``description``, ``python_expr``,
-        and ``js_snippet``.  The result is wrapped in a :class:`GeneratorFunction`
-        and saved to the registry so future runs never need this call again.
-        """
         if self._llm is None:
             from src.utils.llm_factory import create_llm
+
             self._llm = create_llm(self.config)
 
-        logger.info("Agent3: calling LLM to create generator for '%s'", var_name)
-
         prompt = (
-            f"You are a test data generator. Create a data generator for the variable '{var_name}'.\n\n"
-            f"Context:\n"
-            f"  Step description : {step.description}\n"
-            f"  API call         : {step.method} {step.path}\n"
-            f"  Context keys     : {sorted(context.keys())}\n\n"
-            f"Return ONLY a JSON object with these exact fields (no markdown, no explanation):\n"
-            f"{{\n"
-            f'  "description": "short description of what this generates",\n'
-            f'  "python_expr": "single-line Python expression — no imports, no def, no semicolons",\n'
-            f'  "js_snippet":  "JavaScript block ending with pm.collectionVariables.set(\'{var_name}\', value)"\n'
-            f"}}\n\n"
-            f"Python eval context provides: datetime, timedelta, timezone, random, string, uuid, context.\n"
-            f"Examples of valid python_expr:\n"
-            f"  - str(random.randint(1, 100))\n"
-            f"  - 'prefix_' + uuid.uuid4().hex[:8]\n"
-            f"  - (datetime.now(tz=timezone.utc) + timedelta(days=7)).strftime('%Y-%m-%d')\n\n"
-            f"For js_snippet: use pm.collectionVariables.set() and pm.variables.replaceIn() for built-in Postman vars."
+            "Create a deterministic Python data generator for API testing.\n"
+            "Return only JSON with fields description, python_expr, js_snippet.\n"
+            "The python_expr must be a single expression. Available names: "
+            "datetime, timedelta, timezone, random, string, uuid, context, str, int, float, bool, round.\n\n"
+            f"Variable: {variable_name}\n"
+            f"Step: {step.method} {step.path}\n"
+            f"Step body template: {step.request_body}\n"
+            f"Business context: {business_context[:3000]}\n"
+            f"Requires: {json.dumps(requires, ensure_ascii=False)}\n"
+            "The js_snippet must set the same variable with pm.collectionVariables.set()."
         )
-
-        logger.debug("Agent3: LLM prompt:\n%s", prompt)
-
         try:
             response = self._llm.invoke(prompt)
-            content = response.content.strip()
-
-            # Strip markdown code fences if the LLM wrapped the JSON
-            content = re.sub(r"^```(?:json)?\s*\n?", "", content)
-            content = re.sub(r"\n?```\s*$", "", content)
-
+            content = getattr(response, "content", response)
+            if not isinstance(content, str):
+                content = str(content)
+            content = re.sub(r"^```(?:json)?\s*", "", content.strip())
+            content = re.sub(r"\s*```$", "", content)
             data = json.loads(content)
-
             from datetime import datetime as _dt
+
             func = GeneratorFunction(
-                name=var_name,
+                name=variable_name,
                 description=data["description"],
                 python_expr=data["python_expr"],
                 js_snippet=data["js_snippet"],
                 source="llm_generated",
                 created_at=_dt.now(tz=timezone.utc).isoformat(),
             )
+            self._registry.register(func)
+            logger.info("Agent3: saved generated policy for %s", variable_name)
             return func
-
-        except json.JSONDecodeError as exc:
-            logger.error(
-                "Agent3 (LLM): could not parse JSON for '%s': %s\nRaw: %s",
-                var_name, exc, response.content[:300],
-            )
-        except KeyError as exc:
-            logger.error(
-                "Agent3 (LLM): missing field %s in response for '%s'", exc, var_name
-            )
         except Exception as exc:  # noqa: BLE001
-            logger.error("Agent3 (LLM): unexpected error for '%s': %s", var_name, exc)
-
-        return None
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _collect_var_refs(step: TestStep) -> Set[str]:
-        """Collect all ``{{varName}}`` references across the entire step."""
-        text_parts: list[str] = [step.path]
-
-        for v in (step.path_params or {}).values():
-            text_parts.append(str(v))
-        for v in (step.query_params or {}).values():
-            text_parts.append(str(v))
-
-        def _scan(obj: Any) -> None:
-            if isinstance(obj, str):
-                text_parts.append(obj)
-            elif isinstance(obj, dict):
-                for v in obj.values():
-                    _scan(v)
-            elif isinstance(obj, list):
-                for item in obj:
-                    _scan(item)
-
-        _scan(step.body)
-
-        refs: Set[str] = set()
-        for part in text_parts:
-            refs.update(_VAR_RE.findall(part))
-        return refs
+            logger.error("Agent3: failed to create generator for %s: %s", variable_name, exc)
+            return None
