@@ -1,0 +1,20 @@
+type: object
+
+required:
+  - userId
+  - vehicleId
+  - startDate
+
+properties:
+  userId:
+    type: string
+    example: user-1
+
+  vehicleId:
+    type: string
+    example: vehicle-1
+
+  startDate:
+    type: string
+    format: date-time
+    example: "2026-05-20T10:00:00Z"

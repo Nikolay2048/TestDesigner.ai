@@ -64,7 +64,7 @@ def ask_data_generation_agent(
     user_prompt = f"""
 Generate test data for API field.
 
-Field name:
+Field name: 
 {field_name}
 
 Field schema:
