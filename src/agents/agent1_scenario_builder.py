@@ -40,16 +40,80 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.models.scenario import ScenarioStabilizationInput
+from src.models.scenario import ScenarioStabilizationInput, VarSource
 from src.modules.swagger_parser import EndpointDescriptor, ParsedSpec
 from src.utils.config import AppConfig
 from src.utils.llm_factory import create_llm
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Path correction helper
+# ---------------------------------------------------------------------------
+
+
+def _normalize_path_against_spec(generated_path: str, spec_paths: list[str]) -> str | None:
+    """
+    Try to map a hallucinated path back to the correct spec path.
+
+    Strategy (in order):
+    1. Direct match (already correct) — return as-is.
+    2. Replace the leading path prefix with each prefix found in the spec.
+       E.g. ``/api/accidents/{id}`` → try ``/v1/accidents/{id}`` (using spec prefix ``/v1``).
+    3. Strip leading segments one by one and re-try with spec prefixes.
+
+    Returns the matched spec path template (e.g. ``/v1/accidents/{accidentId}``)
+    or ``None`` if no correction found.
+    """
+    def _spec_to_regex(spec_path: str) -> re.Pattern:
+        """``/v1/accidents/{accidentId}`` → regex matching any concrete values."""
+        # Replace {param} BEFORE re.escape so braces don't get escaped
+        pattern = re.sub(r"\{[^}]+\}", "___PARAM___", spec_path)
+        pattern = re.escape(pattern)
+        pattern = pattern.replace("___PARAM___", "[^/]+")
+        return re.compile(r"^" + pattern + r"$")
+
+    regexes = [(_spec_to_regex(p), p) for p in spec_paths]
+
+    def _try(path: str) -> str | None:
+        for rx, spec_path in regexes:
+            if rx.match(path):
+                return spec_path
+        return None
+
+    # 1. Direct match
+    result = _try(generated_path)
+    if result:
+        return result
+
+    # 2. Detect spec prefixes (unique first segments, e.g. "/v1", "/api/v1")
+    #    and try replacing the generated path's first segment(s) with them.
+    spec_prefixes: set[str] = set()
+    for sp in spec_paths:
+        segs = sp.split("/")  # ['', 'v1', 'accidents', ...]
+        if len(segs) >= 2 and segs[1]:
+            spec_prefixes.add("/" + segs[1])          # /v1
+        if len(segs) >= 3 and segs[2]:
+            spec_prefixes.add("/" + segs[1] + "/" + segs[2])  # /v1/accidents (deeper prefix)
+
+    gen_segs = generated_path.split("/")  # ['', 'api', 'accidents', ...]
+
+    # Try replacing 1, 2, 3 leading segments of generated_path with each spec prefix
+    for skip in range(1, min(4, len(gen_segs))):
+        tail = "/" + "/".join(gen_segs[skip + 1:]) if gen_segs[skip + 1:] else ""
+        for prefix in sorted(spec_prefixes, key=len, reverse=True):
+            candidate = prefix + tail
+            result = _try(candidate)
+            if result:
+                return result
+
+    return None
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -81,12 +145,15 @@ NEVER hard-code IDs or dates that are runtime values — always use the {{name}}
 
 ## Path rules — CRITICAL
 
-- The "path" field must be the EXACT path template from the spec, e.g. "/v1/bookings/{bookingId}".
+- The "path" field must be the EXACT path template from the API SPEC section below.
+- ONLY use paths that literally appear in the API SPEC. NEVER invent paths.
+- Paths start exactly as shown in the spec (e.g. "/v1/accidents/{accidentId}").
+  NEVER change the prefix — do NOT use "/api/", "/accidents/", or any other prefix.
 - NEVER embed {{variables}} or query strings directly into the path string.
-- NEVER write "/v1/bookings/{{bookingId}}" — keep the original {bookingId} placeholder.
+- NEVER write "/v1/bookings/{{bookingId}}" — keep the original {paramName} placeholder.
 - NEVER write "/v1/vehicles/available?city={{city}}" — put query params in query_params dict.
 - For every {paramName} in the path template, add a matching entry to path_params:
-    path_params: {"bookingId": "{{bookingId}}"}
+    path_params: {"bookingId": "{{bookingId}}", "accidentId": "{{accidentId}}"}
 
 ## query_params rules
 
@@ -98,8 +165,11 @@ NEVER hard-code IDs or dates that are runtime values — always use the {{name}}
 
 For each step, list every variable that SUBSEQUENT steps will need:
 - Key = variable name (no braces), e.g. "bookingId"
-- Value = JSONPath into the response body, e.g. "$.bookingId"
+- Value = JSONPath into the response body — MUST start with "$."
+- Examples: "$.bookingId", "$.accidentId", "$.participantId", "$.claimId"
 - For arrays use index notation: "$.items[0].vehicleId"
+- NEVER use "response.fieldName" — always use "$.fieldName"
+- The field name must match exactly what appears in the API response example in the spec.
 
 ## Assertion rules
 
@@ -199,12 +269,18 @@ class ScenarioBuilderAgent:
 
         logger.debug("Agent1: invoking LLM...")
         result: ScenarioStabilizationInput = structured_llm.invoke(messages)
-        result = self._normalize(result)
+        spec_paths = [ep.path for ep in spec.endpoints]
+        result = self._normalize(result, spec_paths=spec_paths)
+        result = self._classify_vars(result, constants)
 
         logger.info(
-            "Agent1: done — scenario='%s'  steps=%d",
+            "Agent1: done — scenario='%s'  steps=%d  vars=%d (const=%d ctx=%d gen=%d)",
             result.scenario_name,
             len(result.steps),
+            len(result.var_sources),
+            sum(1 for v in result.var_sources if v.kind == "constant"),
+            sum(1 for v in result.var_sources if v.kind == "context"),
+            sum(1 for v in result.var_sources if v.kind == "generate"),
         )
         return result
 
@@ -213,16 +289,26 @@ class ScenarioBuilderAgent:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _normalize(result: ScenarioStabilizationInput) -> ScenarioStabilizationInput:
+    def _normalize(
+        result: ScenarioStabilizationInput,
+        spec_paths: list[str] | None = None,
+    ) -> ScenarioStabilizationInput:
         """
-        Fix common LLM structured-output quirks:
+        Fix common LLM structured-output quirks.
 
-        * ``expected: {"value": "X"}`` → ``expected: "X"``
-        * ``path`` contains embedded query string → strip and move to query_params
-        * ``path`` contains ``{{var}}`` instead of ``{var}`` → restore template form
+        Fixes applied (in order):
+        1. Strip query string accidentally embedded in ``path``.
+        2. Convert ``{{param}}`` → ``{param}`` in path templates.
+        3. Fix wrong path prefix (``/api/``, ``/accidents/`` …) using spec path list.
+        4. Fix ``extract_vars`` values: ``response.field`` → ``$.field``,
+           ``field`` → ``$.field`` (ensure JSONPath ``$.`` prefix).
+        5. Unwrap ``expected: {"value": X}`` in assertions.
         """
+        import re as _re
+
         for step in result.steps:
-            # --- Fix path: strip query string accidentally embedded in path ---
+
+            # ── 1. Strip embedded query string ──────────────────────────────
             if "?" in step.path:
                 path_part, qs = step.path.split("?", 1)
                 step.path = path_part
@@ -237,12 +323,10 @@ class ScenarioBuilderAgent:
                     step.step_num,
                 )
 
-            # --- Fix path: {{param}} → {param} (restore template placeholders) ---
-            import re
-            fixed_path = re.sub(r"\{\{(\w+)\}\}", r"{\1}", step.path)
+            # ── 2. {{param}} → {param} in path ──────────────────────────────
+            fixed_path = _re.sub(r"\{\{(\w+)\}\}", r"{\1}", step.path)
             if fixed_path != step.path:
-                # Rebuild path_params from the embedded var references
-                for var in re.findall(r"\{(\w+)\}", fixed_path):
+                for var in _re.findall(r"\{(\w+)\}", fixed_path):
                     step.path_params.setdefault(var, f"{{{{{var}}}}}")
                 step.path = fixed_path
                 logger.debug(
@@ -250,11 +334,56 @@ class ScenarioBuilderAgent:
                     step.step_num, step.path,
                 )
 
-            # --- Fix assertions: unwrap {"value": X} and similar dict wrappers ---
+            # ── 3. Fix wrong path prefix using spec path list ────────────────
+            if spec_paths:
+                # Normalise the generated path to a template for matching
+                # (replace concrete values like "accident-1" with placeholder)
+                path_template = _re.sub(r"/[a-zA-Z0-9_-]+-\d+", "/{x}", step.path)
+                # Build a strip-and-try strategy: remove leading segments and see
+                # if the remainder matches a known spec path template
+                matched = _normalize_path_against_spec(step.path, spec_paths)
+                if matched and matched != step.path:
+                    logger.warning(
+                        "Agent1.normalize: corrected wrong path in step %d: %r → %r",
+                        step.step_num, step.path, matched,
+                    )
+                    step.path = matched
+                    # Re-populate path_params for the corrected path
+                    for var in _re.findall(r"\{(\w+)\}", matched):
+                        step.path_params.setdefault(var, f"{{{{{var}}}}}")
+
+            # ── 4. Fix extract_vars JSONPath ─────────────────────────────────
+            if step.extract_vars:
+                fixed_ev: dict[str, str] = {}
+                for var_name, jsonpath in step.extract_vars.items():
+                    original = jsonpath
+                    # "response.field" → "$.field"
+                    if _re.match(r"^response\.", jsonpath):
+                        jsonpath = "$." + jsonpath[len("response."):]
+                    # "field" (no prefix) → "$.field"
+                    elif not jsonpath.startswith("$"):
+                        jsonpath = "$." + jsonpath.lstrip(".")
+                    # "$[" is also valid (array root)
+                    if jsonpath != original:
+                        logger.debug(
+                            "Agent1.normalize: fixed extract_vars[%r] %r → %r in step %d",
+                            var_name, original, jsonpath, step.step_num,
+                        )
+                    fixed_ev[var_name] = jsonpath
+                step.extract_vars = fixed_ev
+
+            # ── 5. Fix assertion JSONPath prefix ────────────────────────────
+            for assertion in step.assertions:
+                if assertion.path and not assertion.path.startswith("$"):
+                    if _re.match(r"^response\.", assertion.path):
+                        assertion.path = "$." + assertion.path[len("response."):]
+                    else:
+                        assertion.path = "$." + assertion.path.lstrip(".")
+
+            # ── 6. Unwrap {"value": X} in assertion.expected ────────────────
             for assertion in step.assertions:
                 if isinstance(assertion.expected, dict):
                     raw = assertion.expected
-                    # {"value": "CREATED"} → "CREATED"
                     if "value" in raw and len(raw) == 1:
                         assertion.expected = raw["value"]
                         logger.debug(
@@ -263,7 +392,6 @@ class ScenarioBuilderAgent:
                             assertion.expected, step.step_num,
                         )
                     else:
-                        # Unknown dict structure — discard and use not_null
                         logger.warning(
                             "Agent1.normalize: dropping unsupported expected=%r "
                             "in step %d assertion '%s'; changing to not_null",
@@ -271,6 +399,97 @@ class ScenarioBuilderAgent:
                         )
                         assertion.expected = None
                         assertion.operator = "not_null"
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Variable source classification  (deterministic, no LLM)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _classify_vars(
+        result: ScenarioStabilizationInput,
+        constants: Dict[str, Any],
+    ) -> ScenarioStabilizationInput:
+        """
+        Classify every ``{{varName}}`` reference in the scenario into one of:
+
+        * ``constant``  — name is present in ``constants`` dict
+        * ``context``   — name appears in ``extract_vars`` of a prior step
+        * ``generate``  — must be generated at runtime (Agent 3 / Postman pre-request)
+
+        The classification is purely algorithmic: no LLM involved.
+        The result is stored in ``result.var_sources``.
+        """
+        import re
+        _VAR_RE = re.compile(r"\{\{(\w+)\}\}")
+
+        constant_keys: set[str] = set(constants.keys())
+
+        # Build extraction map: var_name → step_num of the step that produces it
+        extracted_by: Dict[str, int] = {}
+        for step in result.steps:
+            for var_name in step.extract_vars:
+                extracted_by[var_name] = step.step_num
+
+        # Collect ALL {{var}} references across every step field
+        def _refs_from_obj(obj: Any) -> set[str]:
+            found: set[str] = set()
+            if isinstance(obj, str):
+                found.update(_VAR_RE.findall(obj))
+            elif isinstance(obj, dict):
+                for v in obj.values():
+                    found |= _refs_from_obj(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    found |= _refs_from_obj(item)
+            return found
+
+        all_refs: set[str] = set()
+        for step in result.steps:
+            all_refs |= _refs_from_obj(step.path)
+            all_refs |= _refs_from_obj(step.path_params)
+            all_refs |= _refs_from_obj(step.query_params)
+            all_refs |= _refs_from_obj(step.body)
+            # Also include var names that appear in path_params values
+            for v in (step.path_params or {}).values():
+                all_refs |= _refs_from_obj(v)
+
+        sources: list[VarSource] = []
+        for var_name in sorted(all_refs):
+            if var_name in constant_keys:
+                sources.append(VarSource(name=var_name, kind="constant"))
+            elif var_name in extracted_by:
+                sources.append(
+                    VarSource(
+                        name=var_name,
+                        kind="context",
+                        provided_by_step=extracted_by[var_name],
+                    )
+                )
+            else:
+                sources.append(VarSource(name=var_name, kind="generate"))
+                logger.debug(
+                    "Agent1.classify_vars: '%s' → generate (not in constants or extract_vars)",
+                    var_name,
+                )
+
+        result.var_sources = sources
+
+        # Log summary
+        by_kind = {"constant": [], "context": [], "generate": []}
+        for vs in sources:
+            by_kind[vs.kind].append(vs.name)
+        if by_kind["generate"]:
+            logger.info(
+                "Agent1.classify_vars: vars to generate at runtime: %s",
+                by_kind["generate"],
+            )
+        if by_kind["context"]:
+            logger.debug(
+                "Agent1.classify_vars: context vars (from step responses): %s",
+                by_kind["context"],
+            )
 
         return result
 

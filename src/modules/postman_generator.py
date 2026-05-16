@@ -10,24 +10,24 @@ Collection structure
 ::
 
     Collection
-    ├── variables          ← seeded from constants.json
+    ├── variables          ← seeded from constants.json + empty slots for context vars
     └── item[]
         └── Folder (one per scenario)
             ├── item[0]   ← "Setup: Reset Mock" helper request
             └── item[1…n] ← one request per TestStep
-                ├── pre-request script  (generates {{startDate}} when needed)
+                ├── pre-request script  (runs JS generator snippets for "generate" vars)
                 └── test script         (status check → extract vars → assertions)
 
 Variable conventions
 --------------------
-All ``{{varName}}`` placeholders from Agent 1 map 1-to-1 to Postman collection
-variables.  The generator:
+Variables are classified using ``var_sources`` from Agent 1 (deterministic):
 
-* Seeds known constants (``base_url``, ``user_id``, ``city``, …) with their
-  values.
-* Initialises dynamic variables (``vehicleId``, ``bookingId``) as empty strings.
-* Generates ``startDate`` (ISO-8601 datetime 24 h ahead) in a pre-request
-  script whenever it is referenced in a step's body or query params.
+* **constant** — seeded from ``constants.json`` with their real values.
+* **context**  — initialised as empty string; populated at runtime by the test
+  script's ``pm.collectionVariables.set()`` call after each step.
+* **generate** — have a JS snippet in the :class:`GeneratorRegistry`; the snippet
+  is pasted into the pre-request script of every step that references the var.
+  These vars are NOT added to the static variable list (they are set dynamically).
 
 JSONPath → JavaScript
 ---------------------
@@ -42,33 +42,21 @@ import json
 import re
 import uuid
 import logging
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set
 
+from src.agents.generator_registry import GeneratorRegistry
 from src.models.scenario import Assertion, ScenarioStabilizationInput, TestStep
 
 logger = logging.getLogger(__name__)
 
 _VAR_RE = re.compile(r"\{\{(\w+)\}\}")
 
-# Variables that must be auto-generated in pre-request scripts
-_TIME_VARS: Dict[str, str] = {
-    "startDate": (
-        "// Auto-generate startDate: ISO-8601, 24 h in the future\n"
-        "const _future = new Date(Date.now() + 86400000);\n"
-        "pm.collectionVariables.set('startDate',\n"
-        "    _future.toISOString().replace(/\\.\\d{3}Z$/, 'Z'));"
-    ),
-    "endDate": (
-        "// Auto-generate endDate: ISO-8601, 48 h in the future\n"
-        "const _end = new Date(Date.now() + 172800000);\n"
-        "pm.collectionVariables.set('endDate',\n"
-        "    _end.toISOString().replace(/\\.\\d{3}Z$/, 'Z'));"
-    ),
-}
-
 POSTMAN_SCHEMA = (
     "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 )
+
+_DEFAULT_REGISTRY_PATH = Path("data/generator_registry.json")
 
 
 # ---------------------------------------------------------------------------
@@ -85,10 +73,17 @@ class PostmanGenerator:
             ``POST {{base_url}}/v1/debug/reset`` request at the beginning of
             every scenario folder so each scenario starts with a clean server
             state.
+        registry_path: Path to the generator function registry JSON file.
+            Defaults to ``data/generator_registry.json``.
     """
 
-    def __init__(self, reset_mock_between_scenarios: bool = True) -> None:
+    def __init__(
+        self,
+        reset_mock_between_scenarios: bool = True,
+        registry_path: Path = _DEFAULT_REGISTRY_PATH,
+    ) -> None:
         self.reset_mock = reset_mock_between_scenarios
+        self._registry = GeneratorRegistry(registry_path)
 
     # ------------------------------------------------------------------
     # Entry point
@@ -157,28 +152,47 @@ class PostmanGenerator:
         """
         Build collection-level variable list.
 
-        Priority:
-        1. Constants from constants.json (seeded with real values).
-        2. Dynamic variables referenced in steps (initialised as empty strings,
-           populated at runtime by test scripts).
+        Uses ``var_sources`` from each scenario for precise classification.
+        Falls back to heuristic (constants dict lookup + registry check) for
+        older cached plans that pre-date the ``var_sources`` field.
+
+        Variable kinds:
+        * **constant** — seeded from ``constants.json`` with their real values.
+        * **context**  — initialised as empty string (test script will fill them).
+        * **generate** — handled by pre-request JS snippets; excluded from the
+          static variable list so Postman doesn't need a seed value.
         """
         variables: Dict[str, Any] = {}
 
-        # Seed from constants
+        # Constants are always seeded with their values
         for key, value in constants.items():
             variables[key] = value
 
-        # Collect all {{var}} references from all steps
-        all_refs: set[str] = set()
-        for scenario in scenarios:
-            for step in scenario.steps:
-                all_refs.update(self._collect_step_var_refs(step))
+        constant_keys = set(constants.keys())
 
-        # Dynamic vars not already in constants → init as empty
-        known = set(constants.keys())
-        for ref in sorted(all_refs):
-            if ref not in known and ref not in _TIME_VARS:
-                variables[ref] = ""
+        for scenario in scenarios:
+            if scenario.var_sources:
+                # Precise path: use Agent 1's explicit classification
+                for vs in scenario.var_sources:
+                    if vs.kind == "constant":
+                        pass  # already seeded above
+                    elif vs.kind == "context":
+                        # Empty string — will be filled by test script
+                        variables.setdefault(vs.name, "")
+                    elif vs.kind == "generate":
+                        # Has a JS pre-request snippet → do NOT add to static vars
+                        # (Postman will pick up the value set by the pre-request script)
+                        pass
+            else:
+                # Fallback for old cache: heuristic classification
+                for step in scenario.steps:
+                    for ref in self._collect_step_var_refs(step):
+                        if ref in constant_keys:
+                            continue
+                        if self._registry.lookup(ref) is not None:
+                            # Generator exists → pre-request script handles it
+                            continue
+                        variables.setdefault(ref, "")
 
         return [
             {"key": k, "value": str(v), "type": "any"}
@@ -190,14 +204,24 @@ class PostmanGenerator:
     # ------------------------------------------------------------------
 
     def _build_folder(self, scenario: ScenarioStabilizationInput) -> Dict[str, Any]:
+        # Build the set of vars that need pre-request JS for this scenario
+        generate_vars: Set[str] = {
+            vs.name for vs in scenario.var_sources if vs.kind == "generate"
+        }
+        # Fallback: if no var_sources, treat all registry-known refs as generate
+        if not scenario.var_sources:
+            for step in scenario.steps:
+                for ref in self._collect_step_var_refs(step):
+                    if self._registry.lookup(ref) is not None:
+                        generate_vars.add(ref)
+
         items: List[Dict[str, Any]] = []
 
-        # Optional reset request at the start of each scenario
         if self.reset_mock:
             items.append(self._build_reset_request())
 
         for step in scenario.steps:
-            items.append(self._build_item(step))
+            items.append(self._build_item(step, generate_vars))
 
         return {
             "name": scenario.scenario_name,
@@ -242,10 +266,10 @@ class PostmanGenerator:
     # Per-step item builder
     # ------------------------------------------------------------------
 
-    def _build_item(self, step: TestStep) -> Dict[str, Any]:
+    def _build_item(self, step: TestStep, generate_vars: Set[str]) -> Dict[str, Any]:
         events: List[Dict[str, Any]] = []
 
-        prereq_lines = self._build_prerequest_lines(step)
+        prereq_lines = self._build_prerequest_lines(step, generate_vars)
         if prereq_lines:
             events.append({
                 "listen": "prerequest",
@@ -310,7 +334,7 @@ class PostmanGenerator:
         for param_name, param_value in (step.path_params or {}).items():
             path = path.replace(f"{{{param_name}}}", param_value)
 
-        # Build path segments (handle {{var}} segments correctly)
+        # Build path segments
         segments = [seg for seg in path.strip("/").split("/") if seg]
 
         # Build query array
@@ -336,17 +360,41 @@ class PostmanGenerator:
         return url_obj
 
     # ------------------------------------------------------------------
-    # Pre-request script
+    # Pre-request script  (JS generator snippets from registry)
     # ------------------------------------------------------------------
 
-    def _build_prerequest_lines(self, step: TestStep) -> List[str]:
-        """Return JS lines to auto-generate time-sensitive variables."""
+    def _build_prerequest_lines(
+        self, step: TestStep, generate_vars: Set[str]
+    ) -> List[str]:
+        """
+        Build pre-request script lines for this step.
+
+        For each ``{{varName}}`` referenced in the step that belongs to
+        ``generate_vars`` AND has a registry entry with a ``js_snippet``,
+        paste the snippet into the script.  Snippets are deduplicated so
+        a var used in multiple fields only generates once.
+        """
         refs = self._collect_step_var_refs(step)
+        # Only process vars that are "generate" kind and referenced in this step
+        vars_to_generate = refs & generate_vars
+
         lines: List[str] = []
-        for var_name, snippet in _TIME_VARS.items():
-            if var_name in refs:
-                lines.extend(snippet.splitlines())
-                lines.append("")  # blank line separator
+        seen: Set[str] = set()
+
+        for var_name in sorted(vars_to_generate):
+            if var_name in seen:
+                continue
+            func = self._registry.lookup(var_name)
+            if func is None:
+                logger.debug(
+                    "PostmanGenerator: no registry entry for generate-var '%s' in step %d",
+                    var_name, step.step_num,
+                )
+                continue
+            lines.extend(func.js_snippet.splitlines())
+            lines.append("")  # blank line separator between snippets
+            seen.add(var_name)
+
         return lines
 
     # ------------------------------------------------------------------
@@ -442,7 +490,6 @@ class PostmanGenerator:
             ]
 
         elif op == "exists":
-            # Check the parent exists and has the key
             lines += [
                 f"    pm.expect(json).to.have.nested.property"
                 f'("{assertion.path.lstrip("$.").replace("[", "[").replace("]", "]")}");',
@@ -450,7 +497,6 @@ class PostmanGenerator:
 
         elif op == "eq":
             if isinstance(expected, str):
-                # Resolve {{var}} in expected at runtime
                 if _VAR_RE.search(expected):
                     resolved = _VAR_RE.sub(
                         lambda m: f'" + pm.collectionVariables.get("{m.group(1)}") + "',
@@ -504,13 +550,13 @@ class PostmanGenerator:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _collect_step_var_refs(step: TestStep) -> set[str]:
-        """Return all {{varName}} references across the step."""
+    def _collect_step_var_refs(step: TestStep) -> Set[str]:
+        """Return all ``{{varName}}`` references across the step."""
         parts: List[str] = [step.path]
         for v in (step.path_params or {}).values():
-            parts.append(v)
+            parts.append(str(v))
         for v in (step.query_params or {}).values():
-            parts.append(v)
+            parts.append(str(v))
 
         def _collect(obj: Any) -> None:
             if isinstance(obj, str):
@@ -524,7 +570,7 @@ class PostmanGenerator:
 
         _collect(step.body)
 
-        refs: set[str] = set()
+        refs: Set[str] = set()
         for part in parts:
             refs.update(_VAR_RE.findall(part))
         return refs

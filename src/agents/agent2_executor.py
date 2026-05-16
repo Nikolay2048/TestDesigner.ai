@@ -29,6 +29,7 @@ in subsequent steps are substituted from this dict.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any, Dict, Optional, Set, Tuple
@@ -94,14 +95,15 @@ class ExecutorAgent:
         context: Dict[str, Any] = dict(constants)
         step_results: list[StepResult] = []
         max_retries = self.config.agent2.max_retries_per_step
+        total_steps = len(scenario.steps)
 
         logger.info(
             "Agent2: starting scenario '%s'  (%d steps)",
-            scenario.scenario_name, len(scenario.steps),
+            scenario.scenario_name, total_steps,
         )
 
         for step in scenario.steps:
-            result = self._run_step_with_retries(step, context, max_retries)
+            result = self._run_step_with_retries(step, context, max_retries, total_steps)
             step_results.append(result)
 
             if result.status == "passed":
@@ -158,19 +160,40 @@ class ExecutorAgent:
         step: TestStep,
         context: Dict[str, Any],
         max_retries: int,
+        total_steps: int = 0,
     ) -> StepResult:
         local_context = dict(context)  # copy so retries don't pollute global ctx
+
+        logger.info(
+            "Agent2: ═══ Step %d/%d — %s ═══",
+            step.step_num, total_steps, step.name,
+        )
+        logger.debug("Agent2: step description: %s", step.description)
+        logger.debug(
+            "Agent2: %s %s | expected status: %d",
+            step.method, step.path, step.expected_status_code,
+        )
 
         for attempt in range(1, max_retries + 2):  # +1 for the initial attempt
             # Fill missing variables via Agent 3
             missing = self._find_missing_vars(step, local_context)
             if missing:
                 logger.info(
-                    "Agent2: step %d needs vars %s — calling Agent3",
-                    step.step_num, missing,
+                    "Agent2: ⚠ step %d missing vars: %s",
+                    step.step_num, sorted(missing),
+                )
+                logger.debug(
+                    "Agent2:   available context keys: %s",
+                    sorted(local_context.keys()),
                 )
                 generated = self._agent3.generate(step, local_context, missing)
                 local_context.update(generated)
+
+            logger.debug(
+                "Agent2: context for step %d — %s",
+                step.step_num,
+                {k: v for k, v in local_context.items() if not k.startswith("_")},
+            )
 
             result = self._execute_step(step, local_context, attempt)
 
@@ -182,8 +205,8 @@ class ExecutorAgent:
 
             # Ask Agent 3 to refresh data before retrying
             logger.warning(
-                "Agent2: step %d attempt %d failed — asking Agent3 to refresh",
-                step.step_num, attempt,
+                "Agent2: ↻ step %d attempt %d/%d FAILED — %s",
+                step.step_num, attempt, max_retries + 1, result.error or "unknown error",
             )
             refreshed = self._agent3.refresh(step, local_context, result.error or "")
             local_context.update(refreshed)
@@ -216,10 +239,11 @@ class ExecutorAgent:
         if step.body:
             body = self._sub_deep(step.body, context)
 
-        logger.info(
-            "Agent2: [attempt %d] %s %s  params=%s",
-            attempt, step.method, url, params,
-        )
+        logger.info("Agent2: → %s %s", step.method, url)
+        if params:
+            logger.debug("Agent2:   params = %s", params)
+        if body:
+            logger.debug("Agent2:   body   = %s", json.dumps(body, ensure_ascii=False))
 
         # 4. Send request
         try:
@@ -245,7 +269,7 @@ class ExecutorAgent:
                 error=error_msg,
             )
 
-        logger.info("Agent2: response %d", response.status_code)
+        logger.info("Agent2: ← %d %s", response.status_code, response.reason_phrase)
 
         # 5. Parse response body
         resp_body: Any = None
@@ -253,6 +277,13 @@ class ExecutorAgent:
             resp_body = response.json()
         except Exception:  # noqa: BLE001
             resp_body = response.text
+
+        logger.debug(
+            "Agent2:   response body = %s",
+            json.dumps(resp_body, ensure_ascii=False)
+            if isinstance(resp_body, (dict, list))
+            else str(resp_body)[:200],
+        )
 
         # 6. Check status code
         if response.status_code != step.expected_status_code:
@@ -276,6 +307,8 @@ class ExecutorAgent:
 
         # 7. Extract variables
         extracted = self._extract_vars(step, resp_body)
+        for var_name, value in extracted.items():
+            logger.info("Agent2:   ↳ extracted %s = %r", var_name, value)
 
         # 8. Run assertions
         assertion_results = [
@@ -283,6 +316,17 @@ class ExecutorAgent:
             for a in step.assertions
         ]
         all_passed = all(r.passed for r in assertion_results)
+
+        for ar in assertion_results:
+            if ar.passed:
+                logger.debug(
+                    "Agent2:   ✔ [%s] %s = %r", ar.operator, ar.path, ar.actual,
+                )
+            else:
+                logger.warning(
+                    "Agent2:   ✘ [%s] %s: expected=%r actual=%r",
+                    ar.operator, ar.path, ar.expected, ar.actual,
+                )
 
         failed_assertions = [r for r in assertion_results if not r.passed]
         error_msg = None

@@ -1,42 +1,51 @@
 """
 Agent 3 — Data Generator.
 
-Generates or regenerates runtime variable values that are either:
+Generates or refreshes runtime variable values that are either:
 
 * **Missing** — referenced as ``{{varName}}`` in a step but not yet in context.
-* **Stale / invalid** — a previous attempt with the current values failed, so
-  the agent tries to produce fresh data.
+* **Stale / invalid** — a previous attempt with the current values failed; the
+  agent produces fresh data for a retry.
 
-Current implementation is rule-based (no LLM call needed for the carsharing
-scenario).  An LLM-based fallback is available for unknown variable names.
+How it works
+------------
+1. For each missing variable, look it up in the :class:`GeneratorRegistry`.
+2. If found (builtin or previously saved LLM function), execute its
+   ``python_expr`` and return the value.
+3. If **not** found, call the LLM and ask it to produce:
+   * A short description.
+   * A single-line Python expression usable in the registry's eval context.
+   * A JavaScript snippet for Postman pre-request scripts.
+   The result is saved as a new :class:`GeneratorFunction` so future runs
+   never call the LLM again for the same variable name.
 
-Known generators
-----------------
-``startDate``
-    ISO-8601 date-time string 24 h in the future, e.g.
-    ``"2026-05-17T10:00:00Z"``.  Always regenerated on retry (clock skew fix).
-
-``vehicleId``, ``bookingId``
-    Extracted from API responses by Agent 2; not generated here unless missing
-    from context (which would indicate a logic error in a previous step).
-
-LLM-based fallback
-------------------
-If Agent 3 encounters an unknown variable name it falls back to the configured
-LLM and asks it to produce a sensible value given the step description.
+Variable refresh (retry after failure)
+---------------------------------------
+``refresh()`` re-executes the generator for every ``{{var}}`` referenced by the
+failed step that has a registered generator (i.e. variables that change over
+time, like dates or random IDs).  Variables that are extracted from API
+responses (``context`` kind) are *not* regenerated here — Agent 2 handles
+those by re-running the extraction step.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Set
+from datetime import timezone
+from pathlib import Path
+from typing import Any, Dict, Optional, Set
 
+from src.agents.generator_registry import GeneratorFunction, GeneratorRegistry
 from src.models.scenario import TestStep
 from src.utils.config import AppConfig
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_REGISTRY_PATH = Path("data/generator_registry.json")
+
+_VAR_RE = re.compile(r"\{\{(\w+)\}\}")
 
 
 class DataGeneratorAgent:
@@ -44,16 +53,28 @@ class DataGeneratorAgent:
     Agent 3: generates missing or refreshed variable values for a test step.
 
     Args:
-        config: Application configuration (used for the LLM fallback).
+        config:        Application configuration (LLM settings for fallback).
+        registry_path: Path to the JSON file where LLM-generated functions are
+                       persisted.  Defaults to ``data/generator_registry.json``.
     """
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        registry_path: Path = _DEFAULT_REGISTRY_PATH,
+    ) -> None:
         self.config = config
-        self._llm: Any = None  # lazy-loaded only if needed
+        self._registry = GeneratorRegistry(registry_path)
+        self._llm: Any = None  # lazy-loaded only when needed
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    @property
+    def registry(self) -> GeneratorRegistry:
+        """Expose the registry (used by PostmanGenerator)."""
+        return self._registry
 
     def generate(
         self,
@@ -67,21 +88,22 @@ class DataGeneratorAgent:
         Args:
             step:         The test step that needs data.
             context:      Current variable context (already-resolved values).
-            missing_vars: Variable names that are referenced in the step but
-                          not present in *context*.
+            missing_vars: Variable names referenced in the step but absent
+                          from *context*.
 
         Returns:
-            A dict mapping variable names to generated values.  Merge this
-            into the context before re-executing the step.
+            ``{var_name: generated_value}`` — merge this into context before
+            re-executing the step.
         """
         generated: Dict[str, Any] = {}
 
-        for var in missing_vars:
+        for var in sorted(missing_vars):
             value = self._generate_one(var, step, context)
             if value is not None:
                 generated[var] = value
                 logger.info(
-                    "Agent3: generated  %s = %r  (step %d)",
+                    "Agent3 [%s]: %s = %r  (step %d)",
+                    self._registry.lookup(var).source if self._registry.lookup(var) else "llm",
                     var, value, step.step_num,
                 )
             else:
@@ -99,35 +121,37 @@ class DataGeneratorAgent:
         error_description: str,
     ) -> Dict[str, Any]:
         """
-        Regenerate dynamic variables when a step failed.
+        Regenerate dynamic variables when a step failed and must be retried.
 
-        Re-generates all time-sensitive variables (``startDate``, etc.) so
-        that a retry has fresh data.
+        Re-executes the generator for every ``{{var}}`` in the step that has a
+        registered generator — these are the vars whose values change each time
+        (dates, random IDs, etc.).  Context vars extracted from API responses
+        are not touched here.
 
         Args:
             step:              The failed step.
             context:           Current variable context.
-            error_description: Human-readable failure reason (used for logging
-                               and the LLM fallback prompt).
+            error_description: Human-readable failure reason (for logging).
 
         Returns:
-            A dict of refreshed variable values to merge into context.
+            ``{var_name: fresh_value}`` — merge into context before retrying.
         """
         logger.info(
-            "Agent3: refreshing data for step %d after failure: %s",
+            "Agent3: refreshing data for step %d — %s",
             step.step_num, error_description,
         )
 
-        # Collect all {{varName}} references in the step
         all_refs = self._collect_var_refs(step)
-        # Re-generate only time-sensitive ones; others stay as-is
-        time_sensitive = {"startDate", "endDate", "pickupDate", "returnDate"}
-        to_refresh = all_refs & time_sensitive
+        # Only refresh vars that have a registered generator (those are the ones
+        # Agent 3 produced; context vars come from API responses, not from here).
+        to_refresh = {v for v in all_refs if self._registry.lookup(v) is not None}
 
+        if to_refresh:
+            logger.debug("Agent3.refresh: re-generating %s", sorted(to_refresh))
         return self.generate(step, context, to_refresh)
 
     # ------------------------------------------------------------------
-    # Internal generators
+    # Internal generation logic
     # ------------------------------------------------------------------
 
     def _generate_one(
@@ -136,87 +160,150 @@ class DataGeneratorAgent:
         step: TestStep,
         context: Dict[str, Any],
     ) -> Any:
-        """Return a generated value for *var_name*, or ``None`` if unknown."""
+        """Return a generated value for *var_name*, or ``None`` if all attempts fail."""
 
-        # --- Time values ---
-        if var_name in ("startDate", "pickupDate"):
-            return self._future_datetime(hours=24)
+        # 1. Registry lookup (builtin or previously saved LLM function)
+        logger.debug(
+            "Agent3: looking up '%s' in registry (%d functions)",
+            var_name, len(self._registry._functions),
+        )
+        func = self._registry.lookup(var_name)
+        if func is not None:
+            logger.debug(
+                "Agent3: found '%s' [%s] — expr: %s",
+                var_name, func.source, func.python_expr,
+            )
+            value = self._registry.execute(func, context)
+            if value is not None:
+                logger.debug("Agent3: eval('%s') → %r", func.name, value)
+                return value
+            logger.warning(
+                "Agent3: registry function for '%s' returned None, trying LLM fallback",
+                var_name,
+            )
+        else:
+            logger.info("Agent3: '%s' not in registry — will call LLM", var_name)
 
-        if var_name in ("endDate", "returnDate"):
-            hours = 24 + int(context.get("booking_duration_days", 1)) * 24
-            return self._future_datetime(hours=hours)
+        # 2. LLM fallback: create a new generator function and save it
+        func = self._llm_create_function(var_name, step, context)
+        if func is not None:
+            self._registry.register(func)
+            logger.info(
+                "Agent3: 💾 new generator saved: '%s' — %s",
+                func.name, func.description,
+            )
+            logger.debug("Agent3: python_expr = %s", func.python_expr)
+            return self._registry.execute(func, context)
 
-        # --- LLM fallback for unknown variables ---
-        return self._llm_generate(var_name, step, context)
+        return None
+
+    # ------------------------------------------------------------------
+    # LLM fallback — create a new GeneratorFunction
+    # ------------------------------------------------------------------
+
+    def _llm_create_function(
+        self,
+        var_name: str,
+        step: TestStep,
+        context: Dict[str, Any],
+    ) -> Optional[GeneratorFunction]:
+        """
+        Ask the LLM to design a generator function for an unknown variable.
+
+        The LLM returns a JSON object with ``description``, ``python_expr``,
+        and ``js_snippet``.  The result is wrapped in a :class:`GeneratorFunction`
+        and saved to the registry so future runs never need this call again.
+        """
+        if self._llm is None:
+            from src.utils.llm_factory import create_llm
+            self._llm = create_llm(self.config)
+
+        logger.info("Agent3: calling LLM to create generator for '%s'", var_name)
+
+        prompt = (
+            f"You are a test data generator. Create a data generator for the variable '{var_name}'.\n\n"
+            f"Context:\n"
+            f"  Step description : {step.description}\n"
+            f"  API call         : {step.method} {step.path}\n"
+            f"  Context keys     : {sorted(context.keys())}\n\n"
+            f"Return ONLY a JSON object with these exact fields (no markdown, no explanation):\n"
+            f"{{\n"
+            f'  "description": "short description of what this generates",\n'
+            f'  "python_expr": "single-line Python expression — no imports, no def, no semicolons",\n'
+            f'  "js_snippet":  "JavaScript block ending with pm.collectionVariables.set(\'{var_name}\', value)"\n'
+            f"}}\n\n"
+            f"Python eval context provides: datetime, timedelta, timezone, random, string, uuid, context.\n"
+            f"Examples of valid python_expr:\n"
+            f"  - str(random.randint(1, 100))\n"
+            f"  - 'prefix_' + uuid.uuid4().hex[:8]\n"
+            f"  - (datetime.now(tz=timezone.utc) + timedelta(days=7)).strftime('%Y-%m-%d')\n\n"
+            f"For js_snippet: use pm.collectionVariables.set() and pm.variables.replaceIn() for built-in Postman vars."
+        )
+
+        logger.debug("Agent3: LLM prompt:\n%s", prompt)
+
+        try:
+            response = self._llm.invoke(prompt)
+            content = response.content.strip()
+
+            # Strip markdown code fences if the LLM wrapped the JSON
+            content = re.sub(r"^```(?:json)?\s*\n?", "", content)
+            content = re.sub(r"\n?```\s*$", "", content)
+
+            data = json.loads(content)
+
+            from datetime import datetime as _dt
+            func = GeneratorFunction(
+                name=var_name,
+                description=data["description"],
+                python_expr=data["python_expr"],
+                js_snippet=data["js_snippet"],
+                source="llm_generated",
+                created_at=_dt.now(tz=timezone.utc).isoformat(),
+            )
+            return func
+
+        except json.JSONDecodeError as exc:
+            logger.error(
+                "Agent3 (LLM): could not parse JSON for '%s': %s\nRaw: %s",
+                var_name, exc, response.content[:300],
+            )
+        except KeyError as exc:
+            logger.error(
+                "Agent3 (LLM): missing field %s in response for '%s'", exc, var_name
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Agent3 (LLM): unexpected error for '%s': %s", var_name, exc)
+
+        return None
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _future_datetime(hours: int = 24) -> str:
-        """Return an ISO-8601 UTC datetime string *hours* from now."""
-        dt = datetime.now(tz=timezone.utc) + timedelta(hours=hours)
-        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    @staticmethod
     def _collect_var_refs(step: TestStep) -> Set[str]:
         """Collect all ``{{varName}}`` references across the entire step."""
-        pattern = re.compile(r"\{\{(\w+)\}\}")
         text_parts: list[str] = [step.path]
 
         for v in (step.path_params or {}).values():
-            text_parts.append(v)
+            text_parts.append(str(v))
         for v in (step.query_params or {}).values():
-            text_parts.append(v)
+            text_parts.append(str(v))
 
-        def collect_body(obj: Any) -> None:
+        def _scan(obj: Any) -> None:
             if isinstance(obj, str):
                 text_parts.append(obj)
             elif isinstance(obj, dict):
                 for v in obj.values():
-                    collect_body(v)
+                    _scan(v)
             elif isinstance(obj, list):
                 for item in obj:
-                    collect_body(item)
+                    _scan(item)
 
-        collect_body(step.body)
+        _scan(step.body)
 
         refs: Set[str] = set()
         for part in text_parts:
-            refs.update(pattern.findall(part))
+            refs.update(_VAR_RE.findall(part))
         return refs
-
-    def _llm_generate(
-        self,
-        var_name: str,
-        step: TestStep,
-        context: Dict[str, Any],
-    ) -> Any:
-        """
-        Ask the LLM to generate a value for an unknown variable.
-
-        Used as a last resort when no built-in rule exists.
-        """
-        if self._llm is None:
-            from src.utils.llm_factory import create_llm
-            self._llm = create_llm(self.config)
-
-        prompt = (
-            f"You are a test data generator. Generate a single value for the "
-            f"variable '{{{{ {var_name} }}}}' needed by this API test step.\n\n"
-            f"Step description: {step.description}\n"
-            f"API path: {step.method} {step.path}\n"
-            f"Current context keys: {list(context.keys())}\n\n"
-            f"Reply with ONLY the raw value — no explanation, no quotes "
-            f"(unless the value is a string that needs them)."
-        )
-
-        try:
-            response = self._llm.invoke(prompt)
-            value = response.content.strip().strip('"').strip("'")
-            logger.info("Agent3 (LLM fallback): %s = %r", var_name, value)
-            return value
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Agent3 LLM fallback failed for '%s': %s", var_name, exc)
-            return None

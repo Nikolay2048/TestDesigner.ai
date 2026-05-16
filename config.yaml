@@ -18,8 +18,8 @@ paths:
 
 agent2:
   # Maximum number of data regeneration attempts per step before giving up
-  max_retries_per_step: 3
+  max_retries_per_step: 7
 
 logging:
-  level: INFO  # DEBUG | INFO | WARNING | ERROR
+  level: DEBUG  # DEBUG | INFO | WARNING | ERROR
   format: rich  # rich | json | plain

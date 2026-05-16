@@ -14,6 +14,18 @@ are represented as ``{{variableName}}`` string placeholders, e.g.::
 
 Agent 2 substitutes these placeholders with actual values from its context
 before each HTTP request.
+
+Variable classification (``var_sources``)
+-----------------------------------------
+After Agent 1 runs, a deterministic post-processing step classifies every
+``{{varName}}`` reference into one of three kinds:
+
+* **constant** — the name exists in ``constants.json``; value is known upfront.
+* **context**  — the name appears in ``extract_vars`` of a prior step; value is
+  extracted from a response at runtime.  ``provided_by_step`` holds that step's
+  number.
+* **generate** — not a constant and not extracted; Agent 3 (DataGeneratorAgent)
+  must generate it at runtime (e.g. ``startDate``).
 """
 
 from __future__ import annotations
@@ -21,6 +33,30 @@ from __future__ import annotations
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
+
+# ---------------------------------------------------------------------------
+# Variable source classification
+# ---------------------------------------------------------------------------
+
+VarKind = Literal["constant", "context", "generate"]
+
+
+class VarSource(BaseModel):
+    """Describes where a ``{{varName}}`` placeholder gets its value from."""
+
+    name: str = Field(description="Variable name without braces, e.g. 'bookingId'.")
+    kind: VarKind = Field(
+        description=(
+            "'constant' — value from constants.json; "
+            "'context' — extracted from a prior step's response; "
+            "'generate' — Agent 3 generates it at runtime."
+        )
+    )
+    provided_by_step: Optional[int] = Field(
+        default=None,
+        description="For kind='context': step_num of the step that extracts this variable.",
+    )
+
 
 # ---------------------------------------------------------------------------
 # Assertion
@@ -143,8 +179,19 @@ class ScenarioStabilizationInput(BaseModel):
     Complete test scenario output produced by Agent 1.
 
     Passed directly to Agent 2 as its execution plan.
+
+    The ``var_sources`` field is populated by a deterministic post-processing
+    step in :class:`~src.agents.agent1_scenario_builder.ScenarioBuilderAgent`
+    — it is NOT filled by the LLM.
     """
 
     scenario_name: str = Field(description="Name / identifier of the test scenario.")
     description: str = Field(description="One-sentence summary of what the scenario tests.")
     steps: List[TestStep] = Field(description="Ordered list of test steps to execute.")
+    var_sources: List[VarSource] = Field(
+        default_factory=list,
+        description=(
+            "Classification of every {{varName}} placeholder used in this scenario. "
+            "Populated after LLM output by a deterministic algorithm — not by the LLM."
+        ),
+    )

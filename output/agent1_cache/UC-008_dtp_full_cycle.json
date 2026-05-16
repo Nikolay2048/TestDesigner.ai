@@ -1,0 +1,299 @@
+{
+  "scenario_name": "UC-008 Полный цикл регистрации ДТП с двумя участниками и страховой выплатой",
+  "description": "Регистрация ДТП, добавление участников и транспортных средств, создание страхового дела, экспертная оценка ущерба и выплата страхового возмещения.",
+  "steps": [
+    {
+      "step_num": 1,
+      "name": "Создать запись о ДТП",
+      "description": "Передать: дату ({{startDate}}), адрес происшествия, описание. Сохранить accidentId из поля `accidentId` ответа.",
+      "method": "POST",
+      "path": "/api/accidents",
+      "path_params": {},
+      "query_params": null,
+      "body": {
+        "date": "{{startDate}}",
+        "location": "ул. Ленина, 42",
+        "description": "Столкновение на перекрёстке"
+      },
+      "expected_status_code": 201,
+      "extract_vars": {
+        "accidentId": "$.accidentId"
+      },
+      "assertions": []
+    },
+    {
+      "step_num": 2,
+      "name": "Добавить первого участника ДТП — виновника",
+      "description": "Передать: accidentId из шага 1, имя («Иванов Иван Иванович»), телефон, номер страхового полиса, role=CULPRIT, faultPercentage=100. Сохранить participant1Id из поля `participantId` ответа.",
+      "method": "POST",
+      "path": "/api/accidents/{accidentId}/participants",
+      "path_params": {
+        "accidentId": "{{accidentId}}"
+      },
+      "query_params": null,
+      "body": {
+        "name": "Иванов Иван Иванович",
+        "phone": "{{participantPhone}}",
+        "insurancePolicyNumber": "{{participantInsurancePolicy}}",
+        "role": "CULPRIT",
+        "faultPercentage": 100
+      },
+      "expected_status_code": 201,
+      "extract_vars": {
+        "participant1Id": "$.participantId"
+      },
+      "assertions": []
+    },
+    {
+      "step_num": 3,
+      "name": "Добавить транспортное средство первого участника (виновника)",
+      "description": "Передать: accidentId, participant1Id, licensePlate («А100ВВ77»), brand («Toyota»), model («Camry»), damageAmount=45000. Сохранить vehicle1Id из поля `accidentVehicleId` ответа.",
+      "method": "POST",
+      "path": "/api/vehicles",
+      "path_params": {},
+      "query_params": null,
+      "body": {
+        "accidentId": "{{accidentId}}",
+        "participantId": "{{participant1Id}}",
+        "licensePlate": "А100ВВ77",
+        "brand": "Toyota",
+        "model": "Camry",
+        "damageAmount": 45000
+      },
+      "expected_status_code": 201,
+      "extract_vars": {
+        "vehicle1Id": "$.accidentVehicleId"
+      },
+      "assertions": []
+    },
+    {
+      "step_num": 4,
+      "name": "Добавить второго участника ДТП — пострадавшего",
+      "description": "Передать: accidentId из шага 1, имя («Петров Пётр Петрович»), телефон, номер страхового полиса, role=VICTIM, faultPercentage=0. Сохранить participant2Id из поля `participantId` ответа.",
+      "method": "POST",
+      "path": "/api/accidents/{accidentId}/participants",
+      "path_params": {
+        "accidentId": "{{accidentId}}"
+      },
+      "query_params": null,
+      "body": {
+        "name": "Петров Пётр Петрович",
+        "phone": "{{participantPhone}}",
+        "insurancePolicyNumber": "{{participantInsurancePolicy}}",
+        "role": "VICTIM",
+        "faultPercentage": 0
+      },
+      "expected_status_code": 201,
+      "extract_vars": {
+        "participant2Id": "$.participantId"
+      },
+      "assertions": []
+    },
+    {
+      "step_num": 5,
+      "name": "Добавить транспортное средство второго участника (пострадавшего)",
+      "description": "Передать: accidentId, participant2Id, licensePlate («В200ММ77»), brand («Honda»), model («Civic»), damageAmount=78500. Сохранить vehicle2Id из поля `accidentVehicleId` ответа.",
+      "method": "POST",
+      "path": "/api/vehicles",
+      "path_params": {},
+      "query_params": null,
+      "body": {
+        "accidentId": "{{accidentId}}",
+        "participantId": "{{participant2Id}}",
+        "licensePlate": "В200ММ77",
+        "brand": "Honda",
+        "model": "Civic",
+        "damageAmount": 78500
+      },
+      "expected_status_code": 201,
+      "extract_vars": {
+        "vehicle2Id": "$.accidentVehicleId"
+      },
+      "assertions": []
+    },
+    {
+      "step_num": 6,
+      "name": "Создать страховое дело от имени пострадавшего",
+      "description": "Передать: accidentId, claimantParticipantId=participant2Id, claimedAmount=85000. Сохранить claimId из поля `claimId` ответа.",
+      "method": "POST",
+      "path": "/api/claims",
+      "path_params": {},
+      "query_params": null,
+      "body": {
+        "accidentId": "{{accidentId}}",
+        "claimantParticipantId": "{{participant2Id}}",
+        "claimedAmount": 85000
+      },
+      "expected_status_code": 201,
+      "extract_vars": {
+        "claimId": "$.claimId"
+      },
+      "assertions": []
+    },
+    {
+      "step_num": 7,
+      "name": "Обновить страховое дело: уточнить описание ущерба",
+      "description": "Передать: accidentId, claimId. Тело: description=«Повреждения переднего бампера и капота в результате столкновения», claimedAmount=85000.",
+      "method": "PATCH",
+      "path": "/api/claims/{claimId}",
+      "path_params": {
+        "claimId": "{{claimId}}"
+      },
+      "query_params": null,
+      "body": {
+        "description": "Повреждения переднего бампера и капота в результате столкновения",
+        "claimedAmount": 85000
+      },
+      "expected_status_code": 200,
+      "extract_vars": {},
+      "assertions": []
+    },
+    {
+      "step_num": 8,
+      "name": "Создать запрос на экспертную оценку ущерба по страховому делу",
+      "description": "Передать: accidentId, claimId, expertName=«Сидоров Александр Николаевич», scheduledDate={{startDate}}. Сохранить assessmentId из поля `assessmentId` ответа.",
+      "method": "POST",
+      "path": "/api/assessments",
+      "path_params": {},
+      "query_params": null,
+      "body": {
+        "accidentId": "{{accidentId}}",
+        "claimId": "{{claimId}}",
+        "expertName": "Сидоров Александр Николаевич",
+        "scheduledDate": "{{startDate}}"
+      },
+      "expected_status_code": 201,
+      "extract_vars": {
+        "assessmentId": "$.assessmentId"
+      },
+      "assertions": []
+    },
+    {
+      "step_num": 9,
+      "name": "Внести результаты экспертизы",
+      "description": "Передать: accidentId, claimId, assessmentId. Тело: assessedAmount=78500, report=«Осмотр проведён. Зафиксированы повреждения лакокрасочного покрытия, бампера и капота. Рыночная стоимость ремонта составляет 78 500 руб.», status=COMPLETED.",
+      "method": "PATCH",
+      "path": "/api/assessments/{assessmentId}",
+      "path_params": {
+        "assessmentId": "{{assessmentId}}"
+      },
+      "query_params": null,
+      "body": {
+        "assessedAmount": 78500,
+        "report": "Осмотр проведён. Зафиксированы повреждения лакокрасочного покрытия, бампера и капота. Рыночная стоимость ремонта составляет 78 500 руб.",
+        "status": "COMPLETED"
+      },
+      "expected_status_code": 200,
+      "extract_vars": {},
+      "assertions": []
+    },
+    {
+      "step_num": 10,
+      "name": "Получить информацию о страховом деле",
+      "description": "Передать: accidentId, claimId. Проверить: status=UNDER_REVIEW, approvedAmount=78500.",
+      "method": "GET",
+      "path": "/api/claims/{claimId}",
+      "path_params": {
+        "claimId": "{{claimId}}"
+      },
+      "query_params": null,
+      "body": null,
+      "expected_status_code": 200,
+      "extract_vars": {},
+      "assertions": [
+        {
+          "description": "Статус дела должен быть UNDER_REVIEW",
+          "path": "$.status",
+          "operator": "eq",
+          "expected": "UNDER_REVIEW"
+        },
+        {
+          "description": "Утвержденная сумма должна быть 78500 руб.",
+          "path": "$.approvedAmount",
+          "operator": "eq",
+          "expected": 78500
+        }
+      ]
+    },
+    {
+      "step_num": 11,
+      "name": "Создать выплату страхового возмещения",
+      "description": "Передать: accidentId, claimId.",
+      "method": "POST",
+      "path": "/api/payments",
+      "path_params": {},
+      "query_params": null,
+      "body": {
+        "accidentId": "{{accidentId}}",
+        "claimId": "{{claimId}}"
+      },
+      "expected_status_code": 201,
+      "extract_vars": {
+        "paymentId": "$.paymentId"
+      },
+      "assertions": []
+    },
+    {
+      "step_num": 12,
+      "name": "Получить информацию о выплате страхового возмещения",
+      "description": "Передать: paymentId.",
+      "method": "GET",
+      "path": "/api/payments/{paymentId}",
+      "path_params": {
+        "paymentId": "{{paymentId}}"
+      },
+      "query_params": null,
+      "body": null,
+      "expected_status_code": 200,
+      "extract_vars": {},
+      "assertions": []
+    }
+  ],
+  "var_sources": [
+    {
+      "name": "accidentId",
+      "kind": "context",
+      "provided_by_step": 1
+    },
+    {
+      "name": "assessmentId",
+      "kind": "context",
+      "provided_by_step": 8
+    },
+    {
+      "name": "claimId",
+      "kind": "context",
+      "provided_by_step": 6
+    },
+    {
+      "name": "participant1Id",
+      "kind": "context",
+      "provided_by_step": 2
+    },
+    {
+      "name": "participant2Id",
+      "kind": "context",
+      "provided_by_step": 4
+    },
+    {
+      "name": "participantInsurancePolicy",
+      "kind": "generate",
+      "provided_by_step": null
+    },
+    {
+      "name": "participantPhone",
+      "kind": "generate",
+      "provided_by_step": null
+    },
+    {
+      "name": "paymentId",
+      "kind": "context",
+      "provided_by_step": 11
+    },
+    {
+      "name": "startDate",
+      "kind": "generate",
+      "provided_by_step": null
+    }
+  ]
+}
