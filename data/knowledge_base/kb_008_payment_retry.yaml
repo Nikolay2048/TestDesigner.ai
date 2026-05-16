@@ -1,0 +1,215 @@
+# ═══════════════════════════════════════════════════════════════════════
+# KB-008 — Повторная попытка оплаты после FAILED
+# ═══════════════════════════════════════════════════════════════════════
+
+card_id: KB-008
+title: "Retry платежа: FAILED → retry (fail) → retry (success) → CAPTURED"
+type: positive
+category: payment_retry
+chain_id: POS-008
+
+source_files:
+  business_requirements: "data/cases/case_008_payment_retry_after_failed_capture/01_business_requirements.md"
+  system_analysis: "data/cases/case_008_payment_retry_after_failed_capture/02_system_analysis.md"
+  openapi: "data/cases/case_008_payment_retry_after_failed_capture/03_openapi.yaml"
+  flk_rules: "data/cases/case_008_payment_retry_after_failed_capture/04_flk_rules.yaml"
+  status_matrix: "data/cases/case_008_payment_retry_after_failed_capture/05_status_transition_matrix.yaml"
+
+summary: >
+  Сценарий: payment-failed уже в статусе FAILED с retry_count=0.
+  Шаг 1: retry при недоступном провайдере → FAILED, retry_count=1.
+  Шаг 2: retry при доступном провайдере → CAPTURED, retry_count=2.
+  Проверки: 3 неудачные попытки → PAYMENT_RETRY_LIMIT_EXCEEDED.
+  Retry CAPTURED платежа → PAYMENT_NOT_FAILED.
+  Лимит попыток = 3 (retry_count >= 3 → 409).
+
+business_goals:
+  - "Система позволяет повторно списать средства после FAILED платежа"
+  - "Количество попыток ограничено (MAX_RETRY_ATTEMPTS = 3)"
+  - "Каждая попытка увеличивает retry_count"
+  - "Retry по не-FAILED платежу запрещён"
+
+preconditions:
+  setup_call: "POST /mock/reset"
+  seed_state:
+    payment_failed:
+      id: "payment-failed"
+      status: FAILED
+      rentalId: "rental-for-retry"
+      amount: 360.0
+      retry_count: 0
+      failure_reason: "PROVIDER_TIMEOUT"
+    rental_for_retry:
+      id: "rental-for-retry"
+      status: PAYMENT_FAILED
+    mock_config:
+      payment_provider_available: true
+
+mock_controls_required:
+  - "POST /mock/services/payment/disable — для теста retry при недоступном провайдере"
+  - "POST /mock/services/payment/enable — восстановить провайдера"
+
+api_chain:
+  - step: 1
+    name: "Проверить начальное состояние — rental PAYMENT_FAILED, payment FAILED, retry_count=0"
+    method: GET
+    path: /v1/rentals/rental-for-retry
+    expected_status: 200
+    assert:
+      - "response.status == 'PAYMENT_FAILED'"
+
+  - step: 1b
+    name: "Проверить payment-failed"
+    method: GET
+    path: /v1/payments/payment-failed
+    expected_status: 200
+    assert:
+      - "response.status == 'FAILED'"
+      - "response.retry_count == 0"
+
+  - step: 2
+    name: "Выключить провайдера для первого retry"
+    method: POST
+    path: /mock/services/payment/disable
+    expected_status: 200
+
+  - step: 3
+    name: "Retry при недоступном провайдере → FAILED, retry_count увеличился"
+    method: POST
+    path: /v1/payments/payment-failed/retry
+    expected_status: 200
+    assert:
+      - "response.status == 'FAILED'"
+      - "response.retry_count == 1"
+
+  - step: 4
+    name: "Включить провайдера"
+    method: POST
+    path: /mock/services/payment/enable
+    expected_status: 200
+
+  - step: 5
+    name: "Retry при доступном провайдере → CAPTURED, retry_count=2"
+    method: POST
+    path: /v1/payments/payment-failed/retry
+    expected_status: 200
+    assert:
+      - "response.status == 'CAPTURED'"
+      - "response.retry_count == 2"
+
+  - step: 6
+    name: "Rental перешёл в PAID"
+    method: GET
+    path: /v1/rentals/rental-for-retry
+    expected_status: 200
+    assert:
+      - "response.status == 'PAID'"
+
+  - step: 7
+    name: "Повторный retry по уже CAPTURED платежу → 409 PAYMENT_NOT_FAILED"
+    method: POST
+    path: /v1/payments/payment-failed/retry
+    expected_status: 409
+    assert:
+      - "response.error == 'PAYMENT_NOT_FAILED'"
+
+  - step: 8
+    name: "Outbox содержит PAYMENT_CAPTURED"
+    method: GET
+    path: "/mock/outbox?type=PAYMENT_CAPTURED"
+    expected_status: 200
+    assert:
+      - "count >= 1"
+
+# ─── Тест лимита попыток ─────────────────────────────────────────────
+retry_limit_test:
+  description: "Тест PAYMENT_RETRY_LIMIT_EXCEEDED — требует нового FAILED платежа с retry_count близким к лимиту"
+  setup:
+    1: "POST /mock/reset"
+    2: "POST /mock/services/payment/disable"
+    3: "POST /v1/payments {rentalId: 'rental-for-retry', amount: 360.0} — создать FAILED платёж (новый paymentId)"
+    4: "POST /v1/payments/{newPaymentId}/retry → FAILED, retry_count=1"
+    5: "POST /v1/payments/{newPaymentId}/retry → FAILED, retry_count=2"
+    6: "POST /v1/payments/{newPaymentId}/retry → FAILED, retry_count=3"
+    7: "POST /v1/payments/{newPaymentId}/retry → 409 PAYMENT_RETRY_LIMIT_EXCEEDED (retry_count >= 3)"
+  boundary: "retry_count = 2 → ok; retry_count = 3 → PAYMENT_RETRY_LIMIT_EXCEEDED"
+
+# ─── ФЛК-правила ─────────────────────────────────────────────────────
+flk_rules:
+  - id: FLK-PAYMENT-NOT-FAILED
+    endpoint: POST /v1/payments/{paymentId}/retry
+    condition: "payment.status != FAILED (напр. CAPTURED)"
+    note: "После успешного retry payment-failed становится CAPTURED"
+    test_seed: "payment-failed (после успешного retry)"
+    expected_status: 409
+    expected_error_code: PAYMENT_NOT_FAILED
+
+  - id: FLK-RETRY-LIMIT
+    endpoint: POST /v1/payments/{paymentId}/retry
+    condition: "payment.retry_count >= 3"
+    setup: ["3 неудачных retry с выключенным провайдером"]
+    expected_status: 409
+    expected_error_code: PAYMENT_RETRY_LIMIT_EXCEEDED
+
+  - id: FLK-PAYMENT-NOT-FOUND-RETRY
+    endpoint: POST /v1/payments/{paymentId}/retry
+    condition: "paymentId не существует"
+    test_input: "payment-nonexistent"
+    expected_status: 404
+    expected_error_code: PAYMENT_NOT_FOUND
+
+# ─── Переходы статусов ─────────────────────────────────────────────────
+status_transitions:
+  - entity: payment
+    transitions:
+      - {from: FAILED, to: FAILED, trigger: "retry при недоступном провайдере (retry_count++)"}
+      - {from: FAILED, to: CAPTURED, trigger: "retry при доступном провайдере"}
+  - entity: rental
+    transitions:
+      - {from: PAYMENT_FAILED, to: PAYMENT_FAILED, trigger: "retry → FAILED (остаётся)"}
+      - {from: PAYMENT_FAILED, to: PAID, trigger: "retry → CAPTURED"}
+
+expected_outbox_events:
+  on_retry_fail:
+    - {event_type: PAYMENT_FAILED}
+  on_retry_success:
+    - {event_type: PAYMENT_CAPTURED}
+    - {event_type: NOTIFICATION_REQUESTED}
+
+# ─── Граничные значения ─────────────────────────────────────────────────
+boundary_value_analysis:
+  - field: "payment retry_count"
+    cases:
+      - {value: "0", expected: "retry разрешён"}
+      - {value: "1", expected: "retry разрешён"}
+      - {value: "2", expected: "retry разрешён (последний)"}
+      - {value: "3", expected: "409 PAYMENT_RETRY_LIMIT_EXCEEDED"}
+    limit: "MAX_RETRY_ATTEMPTS = 3"
+
+# ─── Техники тест-дизайна ─────────────────────────────────────────────
+test_design_techniques:
+  equivalence_partitioning:
+    valid_class:
+      - "payment.status=FAILED + retry_count<3 + провайдер доступен → 200 CAPTURED"
+    invalid_classes:
+      - "payment.status=CAPTURED → 409 PAYMENT_NOT_FAILED"
+      - "payment.status=FAILED + retry_count>=3 → 409 PAYMENT_RETRY_LIMIT_EXCEEDED"
+      - "payment не существует → 404 PAYMENT_NOT_FOUND"
+      - "провайдер недоступен → 200 но FAILED (retry_count++)"
+
+  boundary_value:
+    retry_count: "2→ok, 3→LIMIT_EXCEEDED"
+
+coverage_checklist:
+  positive:
+    - "[ ] retry при недоступном провайдере → FAILED + retry_count=1"
+    - "[ ] retry при доступном провайдере → CAPTURED + retry_count=2"
+    - "[ ] rental статус = PAID после CAPTURED retry"
+    - "[ ] PAYMENT_CAPTURED в outbox"
+  negative:
+    - "[ ] PAYMENT_NOT_FAILED — retry по CAPTURED платежу"
+    - "[ ] PAYMENT_RETRY_LIMIT_EXCEEDED — retry_count >= 3"
+    - "[ ] PAYMENT_NOT_FOUND"
+  boundary:
+    - "[ ] retry_count = 2 → разрешён"
+    - "[ ] retry_count = 3 → PAYMENT_RETRY_LIMIT_EXCEEDED"

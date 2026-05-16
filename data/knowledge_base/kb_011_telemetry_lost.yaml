@@ -1,0 +1,256 @@
+# ═══════════════════════════════════════════════════════════════════════
+# KB-011 — Потеря телеметрии во время аренды
+# ═══════════════════════════════════════════════════════════════════════
+
+card_id: KB-011
+title: "Обработка потери телеметрии и проверки условий завершения аренды"
+type: negative
+category: telemetry
+chain_id: NEG-011
+
+source_files:
+  business_requirements: "data/cases/case_011_telemetry_lost_during_rental/01_business_requirements.md"
+  system_analysis: "data/cases/case_011_telemetry_lost_during_rental/02_system_analysis.md"
+  openapi: "data/cases/case_011_telemetry_lost_during_rental/03_openapi.yaml"
+  flk_rules: "data/cases/case_011_telemetry_lost_during_rental/04_flk_rules.yaml"
+  status_matrix: "data/cases/case_011_telemetry_lost_during_rental/05_status_transition_matrix.yaml"
+
+summary: >
+  Три состояния телеметрии:
+  (A) Нормальная — GET /telemetry → 200 {available:true, stale:false}
+  (B) Сигнал потерян — GET /telemetry → 200 {available:false, stale:true, last_known:{...}}
+  (C) Сервис выключен — GET /telemetry → 503 TELEMETRY_SERVICE_UNAVAILABLE
+  Условия завершения аренды (finish): engine_on=false, doors_closed=true, speed_kmh=0.
+  Каждое нарушение условия → соответствующий 409.
+  Проверки выполняются по last_known при потере сигнала.
+  Успешное завершение только когда все условия выполнены.
+
+business_goals:
+  - "Аренду нельзя завершить с включённым двигателем"
+  - "Аренду нельзя завершить с открытыми дверями"
+  - "Аренду нельзя завершить при движении авто"
+  - "Потеря телеметрии не блокирует завершение если last_known удовлетворяет условиям"
+  - "Недоступность сервиса телеметрии не должна вечно блокировать завершение"
+
+preconditions:
+  setup_call: "POST /mock/reset"
+  seed_state:
+    rental_started:
+      id: "rental-started"
+      status: STARTED
+      vehicleId: "vehicle-in-use"
+    vehicle_in_use:
+      id: "vehicle-in-use"
+      status: IN_USE
+    telemetry_vehicle_in_use:
+      engine_on: false
+      doors_closed: true
+      speed_kmh: 0
+      stale: false
+    mock_config:
+      telemetry_service_available: true
+      telemetry_lost_vehicles: []
+
+mock_controls_required:
+  - "POST /mock/telemetry/vehicle-in-use/set-lost — симуляция потери сигнала"
+  - "POST /mock/telemetry/vehicle-in-use/set-restored — восстановить сигнал"
+  - "POST /mock/services/telemetry/disable — выключить сервис телеметрии"
+  - "POST /mock/services/telemetry/enable — включить сервис"
+  - "PUT /v1/vehicles/vehicle-in-use/telemetry — установить значения телеметрии"
+
+api_chain:
+  - step: 1
+    name: "Нормальная телеметрия — available=true, stale=false"
+    method: GET
+    path: /v1/vehicles/vehicle-in-use/telemetry
+    expected_status: 200
+    assert:
+      - "response.available == true"
+      - "response.stale == false"
+      - "response.engine_on == false"
+      - "response.doors_closed == true"
+      - "response.speed_kmh == 0"
+
+  - step: 2
+    name: "Симулировать потерю телеметрии"
+    method: POST
+    path: /mock/telemetry/vehicle-in-use/set-lost
+    expected_status: 200
+
+  - step: 3
+    name: "Телеметрия с потерей сигнала — available=false, stale=true, last_known существует"
+    method: GET
+    path: /v1/vehicles/vehicle-in-use/telemetry
+    expected_status: 200
+    assert:
+      - "response.available == false"
+      - "response.stale == true"
+      - "response.last_known содержит данные"
+
+  - step: 4
+    name: "Завершить аренду при потере телеметрии (last_known: engine=off, doors=closed, speed=0) → 200"
+    method: POST
+    path: /v1/rentals/rental-started/finish
+    expected_status: 200
+    assert:
+      - "response.status == 'FINISHED'"
+    note: "Система использует last_known — условия выполнены → завершение разрешено"
+
+  - step: "4a — Альтернативно: тест завершения при плохих last_known значениях"
+    note: >
+      Для тестирования ENGINE_NOT_OFF/DOORS_NOT_CLOSED/VEHICLE_MOVING при потере сигнала:
+      1. POST /mock/reset
+      2. PUT /v1/vehicles/vehicle-in-use/telemetry {engine_on: true}
+      3. POST /mock/telemetry/vehicle-in-use/set-lost (запомнит engine_on=true как last_known)
+      4. POST /v1/rentals/rental-started/finish → 409 ENGINE_NOT_OFF
+
+  - step: 5
+    name: "Выключить сервис телеметрии"
+    setup: ["POST /mock/reset"]
+    method: POST
+    path: /mock/services/telemetry/disable
+    expected_status: 200
+
+  - step: 6
+    name: "GET телеметрии при выключенном сервисе → 503"
+    method: GET
+    path: /v1/vehicles/vehicle-in-use/telemetry
+    expected_status: 503
+    assert:
+      - "response.error == 'TELEMETRY_SERVICE_UNAVAILABLE'"
+
+  - step: 7
+    name: "Включить сервис телеметрии"
+    method: POST
+    path: /mock/services/telemetry/enable
+    expected_status: 200
+
+  - step: 8
+    name: "Тест ENGINE_NOT_OFF — двигатель включён"
+    setup: ["POST /mock/reset"]
+    substeps:
+      - "PUT /v1/vehicles/vehicle-in-use/telemetry {engine_on: true}"
+      - "POST /v1/rentals/rental-started/finish → 409 ENGINE_NOT_OFF"
+
+  - step: 9
+    name: "Тест DOORS_NOT_CLOSED — двери открыты"
+    setup: ["POST /mock/reset"]
+    substeps:
+      - "PUT /v1/vehicles/vehicle-in-use/telemetry {engine_on: false, doors_closed: false}"
+      - "POST /v1/rentals/rental-started/finish → 409 DOORS_NOT_CLOSED"
+
+  - step: 10
+    name: "Тест VEHICLE_MOVING — авто движется"
+    setup: ["POST /mock/reset"]
+    substeps:
+      - "PUT /v1/vehicles/vehicle-in-use/telemetry {engine_on: false, doors_closed: true, speed_kmh: 15}"
+      - "POST /v1/rentals/rental-started/finish → 409 VEHICLE_MOVING"
+
+  - step: 11
+    name: "Успешное завершение после исправления всех условий телеметрии"
+    setup: ["POST /mock/reset"]
+    substeps:
+      - "PUT /v1/vehicles/vehicle-in-use/telemetry {engine_on: false, doors_closed: true, speed_kmh: 0}"
+      - "POST /v1/rentals/rental-started/finish → 200 FINISHED"
+
+# ─── ФЛК-правила ─────────────────────────────────────────────────────
+flk_rules:
+  - id: FLK-ENGINE-NOT-OFF
+    endpoint: POST /v1/rentals/{rentalId}/finish
+    condition: "vehicle_telemetry.engine_on == true"
+    setup: ["PUT /v1/vehicles/vehicle-in-use/telemetry {engine_on: true}"]
+    test_seed: "rental-started"
+    expected_status: 409
+    expected_error_code: ENGINE_NOT_OFF
+    teardown: ["PUT /v1/vehicles/vehicle-in-use/telemetry {engine_on: false}"]
+
+  - id: FLK-DOORS-NOT-CLOSED
+    endpoint: POST /v1/rentals/{rentalId}/finish
+    condition: "vehicle_telemetry.doors_closed == false"
+    setup: ["PUT /v1/vehicles/vehicle-in-use/telemetry {doors_closed: false}"]
+    test_seed: "rental-started"
+    expected_status: 409
+    expected_error_code: DOORS_NOT_CLOSED
+    teardown: ["PUT /v1/vehicles/vehicle-in-use/telemetry {doors_closed: true}"]
+
+  - id: FLK-VEHICLE-MOVING
+    endpoint: POST /v1/rentals/{rentalId}/finish
+    condition: "vehicle_telemetry.speed_kmh != 0"
+    setup: ["PUT /v1/vehicles/vehicle-in-use/telemetry {speed_kmh: 15}"]
+    test_seed: "rental-started"
+    expected_status: 409
+    expected_error_code: VEHICLE_MOVING
+    teardown: ["PUT /v1/vehicles/vehicle-in-use/telemetry {speed_kmh: 0}"]
+
+  - id: FLK-TELEMETRY-UNAVAILABLE
+    endpoint: GET /v1/vehicles/{vehicleId}/telemetry
+    condition: "mock_config.telemetry_service_available == false"
+    setup: ["POST /mock/services/telemetry/disable"]
+    expected_status: 503
+    expected_error_code: TELEMETRY_SERVICE_UNAVAILABLE
+    teardown: ["POST /mock/services/telemetry/enable"]
+
+# ─── Граничные значения ─────────────────────────────────────────────────
+boundary_value_analysis:
+  - field: "speed_kmh"
+    cases:
+      - {value: 0, expected: "ok — авто стоит"}
+      - {value: 1, expected: "409 VEHICLE_MOVING"}
+      - {value: 15, expected: "409 VEHICLE_MOVING"}
+  - field: "engine_on"
+    cases:
+      - {value: false, expected: "ok — двигатель выключен"}
+      - {value: true, expected: "409 ENGINE_NOT_OFF"}
+  - field: "doors_closed"
+    cases:
+      - {value: true, expected: "ok — двери закрыты"}
+      - {value: false, expected: "409 DOORS_NOT_CLOSED"}
+
+# ─── Техники тест-дизайна ─────────────────────────────────────────────
+test_design_techniques:
+  equivalence_partitioning:
+    valid_class: "engine_on=false + doors_closed=true + speed_kmh=0 → 200 FINISHED"
+    invalid_classes:
+      - "engine_on=true → 409 ENGINE_NOT_OFF"
+      - "doors_closed=false → 409 DOORS_NOT_CLOSED"
+      - "speed_kmh>0 → 409 VEHICLE_MOVING"
+      - "телеметрия недоступна (503) → не даёт завершить"
+
+  decision_table:
+    title: "Условия завершения аренды по телеметрии"
+    conditions:
+      C1_engine_on: [false, true]
+      C2_doors_closed: [true, false]
+      C3_speed_kmh_zero: [true, false]
+    outcomes:
+      - "false + true + true → 200 FINISHED"
+      - "true + any + any → 409 ENGINE_NOT_OFF"
+      - "false + false + any → 409 DOORS_NOT_CLOSED"
+      - "false + true + false → 409 VEHICLE_MOVING"
+
+  pairwise_testing:
+    description: "Комбинации нарушений телеметрии"
+    pairs:
+      - {engine_on: true, doors_closed: true, speed_kmh: 0, expected: "ENGINE_NOT_OFF"}
+      - {engine_on: false, doors_closed: false, speed_kmh: 0, expected: "DOORS_NOT_CLOSED"}
+      - {engine_on: false, doors_closed: true, speed_kmh: 30, expected: "VEHICLE_MOVING"}
+      - {engine_on: true, doors_closed: false, speed_kmh: 0, expected: "ENGINE_NOT_OFF (первый)"}
+
+coverage_checklist:
+  positive:
+    - "[ ] GET telemetry — нормальное (available=true, stale=false)"
+    - "[ ] Завершение при нормальной телеметрии → 200"
+    - "[ ] Завершение при потере сигнала (last_known: ok) → 200"
+  negative:
+    - "[ ] ENGINE_NOT_OFF — engine_on=true"
+    - "[ ] DOORS_NOT_CLOSED — doors_closed=false"
+    - "[ ] VEHICLE_MOVING — speed_kmh=1 (граница)"
+    - "[ ] VEHICLE_MOVING — speed_kmh=15"
+    - "[ ] TELEMETRY_SERVICE_UNAVAILABLE — сервис выключен (503)"
+  telemetry_states:
+    - "[ ] GET telemetry: available=true, stale=false"
+    - "[ ] GET telemetry при signal_lost: available=false, stale=true, last_known присутствует"
+    - "[ ] GET telemetry при сервисе off: 503"
+  boundary:
+    - "[ ] speed_kmh = 0 → ok"
+    - "[ ] speed_kmh = 1 → VEHICLE_MOVING"

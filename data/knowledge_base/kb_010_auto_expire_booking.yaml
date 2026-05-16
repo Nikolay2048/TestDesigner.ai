@@ -1,0 +1,195 @@
+# ═══════════════════════════════════════════════════════════════════════
+# KB-010 — Автоматическое истечение бронирования (системный планировщик)
+# ═══════════════════════════════════════════════════════════════════════
+
+card_id: KB-010
+title: "Системное истечение бронирования по TTL — планировщик expire"
+type: positive
+category: booking_auto_expire
+chain_id: POS-010
+
+source_files:
+  business_requirements: "data/cases/case_010_system_auto_cancel_booking/01_business_requirements.md"
+  system_analysis: "data/cases/case_010_system_auto_cancel_booking/02_system_analysis.md"
+  openapi: "data/cases/case_010_system_auto_cancel_booking/03_openapi.yaml"
+  flk_rules: "data/cases/case_010_system_auto_cancel_booking/04_flk_rules.yaml"
+  status_matrix: "data/cases/case_010_system_auto_cancel_booking/05_status_transition_matrix.yaml"
+
+summary: >
+  Системный планировщик вызывает POST /bookings/{id}/expire для бронирований с истёкшим TTL.
+  После expire: booking → EXPIRED, vehicle → AVAILABLE, BOOKING_EXPIRED в outbox.
+  Повторный expire → 409 BOOKING_STATUS_INVALID.
+  Попытка старта аренды по EXPIRED → 409 BOOKING_STATUS_INVALID.
+  Seed: booking-to-expire (CONFIRMED, expires_at в прошлом) + vehicle-available-3 (RESERVED).
+  Действующее бронирование (booking-confirmed) НЕ должно экспайриться при expire-команде — нет.
+  booking-confirmed имеет expires_at в будущем — expire принудительно всё равно работает.
+
+business_goals:
+  - "Бронирование автоматически истекает по TTL, авто немедленно освобождается"
+  - "Планировщик должен обрабатывать истёкшие бронирования без вмешательства пользователя"
+  - "Повторный expire не должен ломать систему"
+  - "Освобождение авто не зависит от доступности Notification Service"
+
+preconditions:
+  setup_call: "POST /mock/reset"
+  seed_state:
+    booking_to_expire:
+      id: "booking-to-expire"
+      status: CONFIRMED
+      userId: "user-auto-cancel"
+      vehicleId: "vehicle-available-3"
+      expires_at: "в прошлом (-5 min)"
+      note: "TTL уже истёк — готово к expire"
+    vehicle_available_3: {status: RESERVED}
+    booking_confirmed:
+      id: "booking-confirmed"
+      status: CONFIRMED
+      expires_at: "+5 min"
+      note: "для теста принудительного expire"
+
+api_chain:
+  - step: 1
+    name: "Проверить booking-to-expire — CONFIRMED, TTL в прошлом"
+    method: GET
+    path: /v1/bookings/booking-to-expire
+    expected_status: 200
+    assert:
+      - "response.status == 'CONFIRMED'"
+      - "response.expires_at — в прошлом"
+
+  - step: 2
+    name: "Проверить авто — RESERVED"
+    method: GET
+    path: /v1/vehicles/vehicle-available-3
+    expected_status: 200
+    assert:
+      - "response.status == 'RESERVED'"
+
+  - step: 3
+    name: "Вызов планировщика — expire бронирования"
+    method: POST
+    path: /v1/bookings/booking-to-expire/expire
+    expected_status: 200
+    assert:
+      - "response.status == 'EXPIRED'"
+      - "response.expired_at не пустой"
+
+  - step: 4
+    name: "Авто вернулось в AVAILABLE"
+    method: GET
+    path: /v1/vehicles/vehicle-available-3
+    expected_status: 200
+    assert:
+      - "response.status == 'AVAILABLE'"
+
+  - step: 5
+    name: "Попытка старта аренды по истёкшему бронированию → 409"
+    method: POST
+    path: /v1/rentals/start
+    request_body: {bookingId: "booking-to-expire"}
+    expected_status: 409
+    assert:
+      - "response.error == 'BOOKING_STATUS_INVALID'"
+
+  - step: 6
+    name: "Повторный expire → 409 BOOKING_STATUS_INVALID"
+    method: POST
+    path: /v1/bookings/booking-to-expire/expire
+    expected_status: 409
+    assert:
+      - "response.error == 'BOOKING_STATUS_INVALID'"
+
+  - step: 7
+    name: "Принудительный expire действующего бронирования (booking-confirmed)"
+    method: POST
+    path: /v1/bookings/booking-confirmed/expire
+    expected_status: 200
+    assert:
+      - "response.status == 'EXPIRED'"
+      - "note: expire работает даже если TTL ещё не истёк"
+
+  - step: 8
+    name: "vehicle-available-1 вернулся в AVAILABLE после принудительного expire"
+    method: GET
+    path: /v1/vehicles/vehicle-available-1
+    expected_status: 200
+    assert:
+      - "response.status == 'AVAILABLE'"
+
+  - step: 9
+    name: "BOOKING_EXPIRED в outbox"
+    method: GET
+    path: "/mock/outbox?type=BOOKING_EXPIRED"
+    expected_status: 200
+    assert:
+      - "count >= 2"
+
+# ─── ФЛК-правила ─────────────────────────────────────────────────────
+flk_rules:
+  - id: FLK-EXPIRE-ALREADY-EXPIRED
+    endpoint: POST /v1/bookings/{bookingId}/expire
+    condition: "booking.status == EXPIRED (повторный вызов)"
+    test_seed: "booking-to-expire (после expire)"
+    expected_status: 409
+    expected_error_code: BOOKING_STATUS_INVALID
+
+  - id: FLK-EXPIRE-CANCELLED
+    endpoint: POST /v1/bookings/{bookingId}/expire
+    condition: "booking.status == CANCELLED"
+    setup: ["POST /v1/bookings/booking-to-cancel/cancel"]
+    test_seed: "booking-to-cancel (после cancel)"
+    expected_status: 409
+    expected_error_code: BOOKING_STATUS_INVALID
+
+  - id: FLK-EXPIRE-NOT-FOUND
+    endpoint: POST /v1/bookings/{bookingId}/expire
+    condition: "bookingId не существует"
+    test_input: "booking-nonexistent"
+    expected_status: 404
+    expected_error_code: BOOKING_NOT_FOUND
+
+# ─── Переходы статусов ─────────────────────────────────────────────────
+status_transitions:
+  - entity: booking
+    transitions:
+      - {from: CONFIRMED, to: EXPIRED, trigger: "POST /v1/bookings/{id}/expire → 200"}
+    note: "expire разрешён только для CONFIRMED/CREATED бронирований"
+    forbidden:
+      - {from: EXPIRED, to: EXPIRED, reason: "Повторный expire → 409"}
+      - {from: CANCELLED, to: EXPIRED}
+
+  - entity: vehicle
+    transitions:
+      - {from: RESERVED, to: AVAILABLE, trigger: "booking expire → 200"}
+
+expected_outbox_events:
+  on_expire:
+    - {event_type: BOOKING_EXPIRED, verify: "GET /mock/outbox?type=BOOKING_EXPIRED"}
+  must_not_appear:
+    - "RENTAL_STARTED"
+
+# ─── Техники тест-дизайна ─────────────────────────────────────────────
+test_design_techniques:
+  equivalence_partitioning:
+    valid_class: "booking.status == CONFIRMED → 200 EXPIRED"
+    invalid_classes:
+      - "booking.status == EXPIRED → 409 BOOKING_STATUS_INVALID"
+      - "booking.status == CANCELLED → 409 BOOKING_STATUS_INVALID"
+      - "booking не существует → 404 BOOKING_NOT_FOUND"
+
+  state_transition:
+    expire_flow:
+      - "CONFIRMED (TTL истёк) → expire → EXPIRED → авто AVAILABLE"
+      - "CONFIRMED (TTL не истёк) → expire (принудительно) → EXPIRED → авто AVAILABLE"
+
+coverage_checklist:
+  positive:
+    - "[ ] Expire бронирования с истёкшим TTL → 200 EXPIRED"
+    - "[ ] Принудительный expire CONFIRMED (TTL ещё не истёк) → 200 EXPIRED"
+    - "[ ] vehicle.status = AVAILABLE после expire"
+    - "[ ] BOOKING_EXPIRED в outbox"
+  negative:
+    - "[ ] Повторный expire (EXPIRED) → BOOKING_STATUS_INVALID"
+    - "[ ] Expire CANCELLED бронирования → BOOKING_STATUS_INVALID"
+    - "[ ] BOOKING_NOT_FOUND"
+    - "[ ] Старт аренды по EXPIRED → BOOKING_STATUS_INVALID"
