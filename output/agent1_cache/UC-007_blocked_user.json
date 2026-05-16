@@ -1,0 +1,47 @@
+{
+  "scenario_name": "UC-007 Попытка создания бронирования заблокированным пользователем",
+  "description": "Проверка отклонения запроса на создание бронирования, если инициирующий пользователь заблокирован в системе.",
+  "steps": [
+    {
+      "step_num": 1,
+      "name": "Получение списка доступных автомобилей",
+      "description": "Заблокированный пользователь инициирует запрос на получение доступных автомобилей в указанном городе.",
+      "method": "GET",
+      "path": "/v1/vehicles/available",
+      "path_params": {},
+      "query_params": {
+        "city": "{{city}}"
+      },
+      "body": null,
+      "expected_status_code": 200,
+      "extract_vars": {
+        "vehicleId": "$.items[0].vehicleId"
+      },
+      "assertions": []
+    },
+    {
+      "step_num": 2,
+      "name": "Попытка создания бронирования от имени заблокированного пользователя",
+      "description": "Заблокированный пользователь отправляет запрос на создание бронирования.",
+      "method": "POST",
+      "path": "/v1/bookings",
+      "path_params": {},
+      "query_params": null,
+      "body": {
+        "userId": "user-blocked",
+        "vehicleId": "{{vehicleId}}",
+        "startDate": "{{startDate}}"
+      },
+      "expected_status_code": 403,
+      "extract_vars": {},
+      "assertions": [
+        {
+          "description": "Проверка кода ошибки USER_BLOCKED в теле ответа.",
+          "path": "$.code",
+          "operator": "eq",
+          "expected": "USER_BLOCKED"
+        }
+      ]
+    }
+  ]
+}

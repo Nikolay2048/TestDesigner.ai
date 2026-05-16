@@ -1,0 +1,111 @@
+{
+  "scenario_name": "UC-002",
+  "overall_status": "passed",
+  "total_steps": 3,
+  "passed_steps": 3,
+  "failed_steps": 0,
+  "steps": [
+    {
+      "step_num": 1,
+      "name": "Получение списка доступных автомобилей",
+      "status": "passed",
+      "attempts": 1,
+      "method": "GET",
+      "url": "http://localhost:8080/v1/vehicles/available",
+      "request_params": {
+        "city": "Moscow"
+      },
+      "request_body": null,
+      "response_status": 200,
+      "response_body": {
+        "count": 2,
+        "items": [
+          {
+            "brand": "Toyota",
+            "model": "Camry",
+            "status": "AVAILABLE",
+            "vehicleId": "vehicle-1"
+          },
+          {
+            "brand": "BMW",
+            "model": "X5",
+            "status": "AVAILABLE",
+            "vehicleId": "vehicle-2"
+          }
+        ]
+      },
+      "extracted_vars": {
+        "vehicleId": "vehicle-1"
+      },
+      "assertion_results": [],
+      "error": null
+    },
+    {
+      "step_num": 2,
+      "name": "Создание первого бронирования",
+      "status": "passed",
+      "attempts": 1,
+      "method": "POST",
+      "url": "http://localhost:8080/v1/bookings",
+      "request_params": null,
+      "request_body": {
+        "userId": "user-1",
+        "vehicleId": "vehicle-1",
+        "startDate": "2026-05-17T21:18:09Z"
+      },
+      "response_status": 201,
+      "response_body": {
+        "bookingId": "booking-1",
+        "startDate": "2026-05-17T21:18:09Z",
+        "status": "CREATED",
+        "userId": "user-1",
+        "vehicleId": "vehicle-1"
+      },
+      "extracted_vars": {
+        "bookingId": "booking-1"
+      },
+      "assertion_results": [],
+      "error": null
+    },
+    {
+      "step_num": 3,
+      "name": "Попытка повторного бронирования того же автомобиля",
+      "status": "passed",
+      "attempts": 1,
+      "method": "POST",
+      "url": "http://localhost:8080/v1/bookings",
+      "request_params": null,
+      "request_body": {
+        "userId": "user-1",
+        "vehicleId": "vehicle-1",
+        "startDate": "2026-05-17T21:18:11Z"
+      },
+      "response_status": 409,
+      "response_body": {
+        "code": "VEHICLE_NOT_AVAILABLE",
+        "message": "Vehicle vehicle-1 is not available for booking"
+      },
+      "extracted_vars": {},
+      "assertion_results": [
+        {
+          "description": "Ожидаемый код ошибки в теле ответа: VEHICLE_NOT_AVAILABLE.",
+          "path": "$.code",
+          "operator": "eq",
+          "expected": "VEHICLE_NOT_AVAILABLE",
+          "actual": "VEHICLE_NOT_AVAILABLE",
+          "passed": true,
+          "error": null
+        }
+      ],
+      "error": null
+    }
+  ],
+  "final_context": {
+    "base_url": "http://localhost:8080",
+    "user_id": "user-1",
+    "city": "Moscow",
+    "booking_duration_days": 1,
+    "vehicleId": "vehicle-1",
+    "bookingId": "booking-1"
+  }
+}

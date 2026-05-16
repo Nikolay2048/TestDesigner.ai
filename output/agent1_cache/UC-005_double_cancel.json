@@ -1,0 +1,86 @@
+{
+  "scenario_name": "UC-005. Повторная отмена уже отменённого бронирования",
+  "description": "Проверка защиты от повторной отмены бронирования, которое уже находится в статусе CANCELLED.",
+  "steps": [
+    {
+      "step_num": 1,
+      "name": "Получение списка доступных автомобилей",
+      "description": "Пользователь выполняет запрос на получение доступных автомобилей в указанном городе.",
+      "method": "GET",
+      "path": "/v1/vehicles/available",
+      "path_params": {},
+      "query_params": {
+        "city": "{{city}}"
+      },
+      "body": null,
+      "expected_status_code": 200,
+      "extract_vars": {
+        "vehicleId": "$.items[0].vehicleId"
+      },
+      "assertions": []
+    },
+    {
+      "step_num": 2,
+      "name": "Создание бронирования",
+      "description": "Пользователь отправляет запрос на бронирование выбранного автомобиля.",
+      "method": "POST",
+      "path": "/v1/bookings",
+      "path_params": {},
+      "query_params": null,
+      "body": {
+        "userId": "{{user_id}}",
+        "vehicleId": "{{vehicleId}}",
+        "startDate": "{{startDate}}"
+      },
+      "expected_status_code": 201,
+      "extract_vars": {
+        "bookingId": "$.bookingId"
+      },
+      "assertions": []
+    },
+    {
+      "step_num": 3,
+      "name": "Первичная отмена бронирования",
+      "description": "Пользователь отправляет запрос на отмену ранее созданного бронирования.",
+      "method": "POST",
+      "path": "/v1/bookings/{bookingId}/cancel",
+      "path_params": {
+        "bookingId": "{{bookingId}}"
+      },
+      "query_params": null,
+      "body": null,
+      "expected_status_code": 200,
+      "extract_vars": {},
+      "assertions": [
+        {
+          "description": "Booking status is CANCELLED",
+          "path": "$.status",
+          "operator": "eq",
+          "expected": "CANCELLED"
+        }
+      ]
+    },
+    {
+      "step_num": 4,
+      "name": "Повторная попытка отмены уже отменённого бронирования",
+      "description": "Пользователь повторно отправляет запрос на отмену того же бронирования, которое уже находится в статусе CANCELLED.",
+      "method": "POST",
+      "path": "/v1/bookings/{bookingId}/cancel",
+      "path_params": {
+        "bookingId": "{{bookingId}}"
+      },
+      "query_params": null,
+      "body": null,
+      "expected_status_code": 409,
+      "extract_vars": {},
+      "assertions": [
+        {
+          "description": "Error code is BOOKING_ALREADY_CANCELLED",
+          "path": "$.code",
+          "operator": "eq",
+          "expected": "BOOKING_ALREADY_CANCELLED"
+        }
+      ]
+    }
+  ]
+}

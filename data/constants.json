@@ -1,0 +1,6 @@
+{
+  "base_url": "http://localhost:8080",
+  "user_id": "user-1",
+  "city": "Moscow",
+  "booking_duration_days": 1
+}

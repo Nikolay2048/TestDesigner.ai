@@ -1,0 +1,25 @@
+llm:
+  # Provider to use: "ollama" or "openai"
+  provider: ollama
+
+  ollama:
+    base_url: http://localhost:11434
+    model: qwen2.5:14b-instruct
+    temperature: 0
+
+  openai:
+    # Set OPENAI_API_KEY env variable or provide key directly
+    api_key: ${OPENAI_API_KEY}
+    model: gpt-4o
+    temperature: 0
+
+paths:
+  constants: data/constants.json
+
+agent2:
+  # Maximum number of data regeneration attempts per step before giving up
+  max_retries_per_step: 3
+
+logging:
+  level: INFO  # DEBUG | INFO | WARNING | ERROR
+  format: rich  # rich | json | plain

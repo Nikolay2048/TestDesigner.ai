@@ -1,0 +1,83 @@
+{
+  "scenario_name": "UC-007 Попытка создания бронирования заблокированным пользователем",
+  "overall_status": "passed",
+  "total_steps": 2,
+  "passed_steps": 2,
+  "failed_steps": 0,
+  "steps": [
+    {
+      "step_num": 1,
+      "name": "Получение списка доступных автомобилей",
+      "status": "passed",
+      "attempts": 1,
+      "method": "GET",
+      "url": "http://localhost:8080/v1/vehicles/available",
+      "request_params": {
+        "city": "Moscow"
+      },
+      "request_body": null,
+      "response_status": 200,
+      "response_body": {
+        "count": 2,
+        "items": [
+          {
+            "brand": "Toyota",
+            "model": "Camry",
+            "status": "AVAILABLE",
+            "vehicleId": "vehicle-1"
+          },
+          {
+            "brand": "BMW",
+            "model": "X5",
+            "status": "AVAILABLE",
+            "vehicleId": "vehicle-2"
+          }
+        ]
+      },
+      "extracted_vars": {
+        "vehicleId": "vehicle-1"
+      },
+      "assertion_results": [],
+      "error": null
+    },
+    {
+      "step_num": 2,
+      "name": "Попытка создания бронирования от имени заблокированного пользователя",
+      "status": "passed",
+      "attempts": 1,
+      "method": "POST",
+      "url": "http://localhost:8080/v1/bookings",
+      "request_params": null,
+      "request_body": {
+        "userId": "user-blocked",
+        "vehicleId": "vehicle-1",
+        "startDate": "2026-05-17T21:19:56Z"
+      },
+      "response_status": 403,
+      "response_body": {
+        "code": "USER_BLOCKED",
+        "message": "User 'user-blocked' is blocked and cannot create bookings"
+      },
+      "extracted_vars": {},
+      "assertion_results": [
+        {
+          "description": "Проверка кода ошибки USER_BLOCKED в теле ответа.",
+          "path": "$.code",
+          "operator": "eq",
+          "expected": "USER_BLOCKED",
+          "actual": "USER_BLOCKED",
+          "passed": true,
+          "error": null
+        }
+      ],
+      "error": null
+    }
+  ],
+  "final_context": {
+    "base_url": "http://localhost:8080",
+    "user_id": "user-1",
+    "city": "Moscow",
+    "booking_duration_days": 1,
+    "vehicleId": "vehicle-1"
+  }
+}

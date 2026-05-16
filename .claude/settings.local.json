@@ -20,7 +20,16 @@
       "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\('vehicle-in-use', d\\), indent=2\\)\\)\")",
       "PowerShell(Get-Process *)",
       "Bash(curl *)",
-      "Bash(pkill -f \"run_mock_server.*8082\")"
+      "Bash(pkill -f \"run_mock_server.*8082\")",
+      "Bash(Get-ChildItem -Recurse -Force)",
+      "Bash(Select-Object FullName)",
+      "Bash(ConvertTo-Csv -NoTypeInformation)",
+      "Bash(Write-Output)",
+      "Bash(dir C:\\\\Users\\\\Admin\\\\PycharmProjects\\\\TestDesignerAI\\\\data\\\\schemas *)",
+      "Bash(dir /s /b \"C:\\\\Users\\\\Admin\\\\PycharmProjects\")",
+      "Bash(findstr \"run_mock\")",
+      "Bash(python3 -c \"import sys,json; print\\(json.load\\(sys.stdin\\)\\)\")",
+      "Bash(pkill -f \"mock.py\")"
     ]
   }
 }

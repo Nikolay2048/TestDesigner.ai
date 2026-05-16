@@ -1,0 +1,30 @@
+{
+  "scenario_name": "UC-004. Бронирование несуществующего автомобиля",
+  "description": "Проверка отклонения запроса на бронирование автомобиля, идентификатор которого отсутствует в системе.",
+  "steps": [
+    {
+      "step_num": 1,
+      "name": "Попытка создания бронирования для несуществующего автомобиля",
+      "description": "Пользователь отправляет запрос на бронирование, указывая идентификатор автомобиля, которого нет в системе.",
+      "method": "POST",
+      "path": "/v1/bookings",
+      "path_params": {},
+      "query_params": null,
+      "body": {
+        "userId": "{{user_id}}",
+        "vehicleId": "vehicle-nonexistent",
+        "startDate": "{{startDate}}"
+      },
+      "expected_status_code": 404,
+      "extract_vars": {},
+      "assertions": [
+        {
+          "description": "Ожидаемый код ошибки в теле ответа: VEHICLE_NOT_FOUND.",
+          "path": "$.code",
+          "operator": "eq",
+          "expected": "VEHICLE_NOT_FOUND"
+        }
+      ]
+    }
+  ]
+}
