@@ -1,13 +1,11 @@
 import re
-import uuid
-import random
+from datetime import date
+
 import requests
-
-from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Optional, Literal
-
 from langchain_core.tools import tool
 
+from src.agents.data_generation_agent import ask_data_generation_agent
+from src.agents.utils import log_tool_execution
 from src.models.executor import *
 
 
@@ -45,28 +43,9 @@ def _extract_value(data: Any, expression: str) -> Any:
     return current
 
 
-@tool
-def resolve_templates(data: Any, context: Dict[str, Any]) -> Any:
+def _resolve_templates(data: Any, context: Dict[str, Any]) -> Any:
     """
     Resolve all {{ variables }} using execution context.
-
-    Use this tool before every request.
-
-    Examples:
-    {{ userId }}
-    {{ bookingId }}
-
-    You can resolve variables inside:
-    - strings
-    - JSON bodies
-    - query params
-    - headers
-    - lists
-
-    If variable is missing:
-    - return error
-    - do not guess value
-    - do not remove template
     """
 
     context_model = ExecutionContext.model_validate(context)
@@ -101,6 +80,7 @@ def resolve_templates(data: Any, context: Dict[str, Any]) -> Any:
 
 
 @tool
+@log_tool_execution
 def execute_rest_request(
         method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"],
         url: str,
@@ -112,24 +92,23 @@ def execute_rest_request(
     """
 Execute REST API request.
 
-Steps:
-1. Take Base URL from scenario
-2. Take path from current step
-3. Combine them into full URL
-4. Send HTTP request
+This tool automatically resolves all {{ variables }} using execution context before sending request.
+Do not manually replace {{ variables }} before calling this tool.
 
-Example:
-Base URL:
-http://localhost:8080
-
-Path:
-/v1/bookings
-
-Final URL:
-http://localhost:8080/v1/bookings
+You may pass templates in:
+    - url
+    - headers
+    - query_params
+    - request_body
 
 This tool only executes request.
 Do not validate response here.
+
+ Example request body:
+    {
+      "vehicleId": "{{ availableVehicleId }}",
+      "startDate": "{{ startDate }}"
+    }
 
 Return:
 - status_code
@@ -138,6 +117,27 @@ Return:
 - response_headers
 - error
 """
+    try:
+        resolved_url = _resolve_templates(url, context)
+        resolved_headers = _resolve_templates(headers, context)
+        resolved_query_params = _resolve_templates(query_params, context)
+        resolved_request_body = _resolve_templates(request_body, context)
+
+    except Exception as exc:
+        return {
+            "request": {
+                "method": method,
+                "url": url,
+                "headers": headers,
+                "query_params": query_params,
+                "request_body": request_body,
+            },
+            "status_code": None,
+            "response_json": None,
+            "response_text": None,
+            "response_headers": {},
+            "error": f"Template resolution failed: {exc}",
+        }
     try:
         response = requests.request(
             method=method,
@@ -174,6 +174,7 @@ Return:
 
 
 @tool
+@log_tool_execution
 def extract_response_value(response_json: Any, extraction_expression: str) -> Dict[str, Any]:
     """
     Extract value from API response JSON.
@@ -202,6 +203,7 @@ def extract_response_value(response_json: Any, extraction_expression: str) -> Di
 
 
 @tool
+@log_tool_execution
 def save_extracted_variable_to_context(
         context: Dict[str, Any],
         variable_name: str,
@@ -239,6 +241,7 @@ def save_extracted_variable_to_context(
 
 
 @tool
+@log_tool_execution
 def save_generated_variable_to_context(
         context: Dict[str, Any],
         variable_name: str,
@@ -276,6 +279,7 @@ def save_generated_variable_to_context(
 
 
 @tool
+@log_tool_execution
 def compare_status_code(expected_status: int, actual_status: Optional[int]) -> Dict[str, Any]:
     """
     Compare actual HTTP status code with expected status code.
@@ -328,6 +332,7 @@ def _parse_literal(raw_value: str) -> Any:
 
 
 @tool
+@log_tool_execution
 def validate_assertions(assertions: List[str], response_json: Any) -> Dict[str, Any]:
     """Validate simple assertions against response JSON. Supports ==, !=, >, >=, <, <= for response paths."""
 
@@ -395,94 +400,95 @@ def validate_assertions(assertions: List[str], response_json: Any) -> Dict[str, 
     }
 
 
-@tool
-def ask_data_generation_agent(
-        field_name: str,
-        field_schema: Dict[str, Any],
-        business_context: str,
-        generation_goal: str,
-) -> Dict[str, Any]:
-    """
-Generate valid test data.
-
-Use only when required value does not exist yet.
-
-Examples:
-- future datetime
-- email
-- UUID
-- username
-- phone number
-
-Generated data must:
-- be realistic
-- match expected format
-- be valid for API
-"""
-
-    field_lower = field_name.lower()
-    field_type = field_schema.get("type")
-    field_format = field_schema.get("format")
-
-    if "email" in field_lower:
-        value = f"test.{uuid.uuid4().hex[:8]}@example.com"
-        generator_name = "generate_email"
-        generator_params = {"strategy": "unique_email"}
-
-    elif "firstname" in field_lower or "first_name" in field_lower:
-        value = "Ivan"
-        generator_name = "generate_string"
-        generator_params = {"strategy": "first_name"}
-
-    elif "lastname" in field_lower or "last_name" in field_lower:
-        value = "Petrov"
-        generator_name = "generate_string"
-        generator_params = {"strategy": "last_name"}
-
-    elif "uuid" in field_lower or field_format == "uuid":
-        value = str(uuid.uuid4())
-        generator_name = "generate_uuid"
-        generator_params = {"strategy": "random_uuid"}
-
-    elif "birth" in field_lower or "age" in business_context.lower():
-        value = (date.today() - timedelta(days=365 * 25)).isoformat()
-        generator_name = "generate_date"
-        generator_params = {"strategy": "adult_birth_date", "age_years": 25}
-
-    elif field_format == "date":
-        value = (date.today() + timedelta(days=1)).isoformat()
-        generator_name = "generate_date"
-        generator_params = {"strategy": "today_plus_days", "days": 1}
-
-    elif field_format == "date-time":
-        value = (datetime.now() + timedelta(hours=1)).replace(microsecond=0).isoformat()
-        generator_name = "generate_datetime"
-        generator_params = {"strategy": "now_plus_hours", "hours": 1}
-
-    elif field_type in ["integer", "number"]:
-        minimum = field_schema.get("minimum", 1)
-        maximum = field_schema.get("maximum", 100)
-        value = random.randint(int(minimum), int(maximum))
-        generator_name = "generate_number"
-        generator_params = {"minimum": minimum, "maximum": maximum}
-
-    elif "enum" in field_schema:
-        value = field_schema["enum"][0]
-        generator_name = "generate_enum"
-        generator_params = {"strategy": "first_enum_value"}
-
-    else:
-        value = f"test-{uuid.uuid4().hex[:8]}"
-        generator_name = "generate_string"
-        generator_params = {"strategy": "unique_plain_string"}
-
-    return {
-        "value": value,
-        "source_type": "generated",
-        "generator_name": generator_name,
-        "generator_params": generator_params,
-        "reason": f"Generated value for field '{field_name}'. Goal: {generation_goal}",
-    }
+# @tool
+# @log_tool_execution
+# def ask_data_generation_agent(
+#         field_name: str,
+#         field_schema: Dict[str, Any],
+#         business_context: str,
+#         generation_goal: str,
+# ) -> Dict[str, Any]:
+#     """
+# Generate valid test data.
+#
+# Use only when required value does not exist yet.
+#
+# Examples:
+# - future datetime
+# - email
+# - UUID
+# - username
+# - phone number
+#
+# Generated data must:
+# - be realistic
+# - match expected format
+# - be valid for API
+# """
+#
+#     field_lower = field_name.lower()
+#     field_type = field_schema.get("type")
+#     field_format = field_schema.get("format")
+#
+#     if "email" in field_lower:
+#         value = f"test.{uuid.uuid4().hex[:8]}@example.com"
+#         generator_name = "generate_email"
+#         generator_params = {"strategy": "unique_email"}
+#
+#     elif "firstname" in field_lower or "first_name" in field_lower:
+#         value = "Ivan"
+#         generator_name = "generate_string"
+#         generator_params = {"strategy": "first_name"}
+#
+#     elif "lastname" in field_lower or "last_name" in field_lower:
+#         value = "Petrov"
+#         generator_name = "generate_string"
+#         generator_params = {"strategy": "last_name"}
+#
+#     elif "uuid" in field_lower or field_format == "uuid":
+#         value = str(uuid.uuid4())
+#         generator_name = "generate_uuid"
+#         generator_params = {"strategy": "random_uuid"}
+#
+#     elif "birth" in field_lower or "age" in business_context.lower():
+#         value = (date.today() - timedelta(days=365 * 25)).isoformat()
+#         generator_name = "generate_date"
+#         generator_params = {"strategy": "adult_birth_date", "age_years": 25}
+#
+#     elif field_format == "date":
+#         value = (date.today() + timedelta(days=1)).isoformat()
+#         generator_name = "generate_date"
+#         generator_params = {"strategy": "today_plus_days", "days": 1}
+#
+#     elif field_format == "date-time":
+#         value = (datetime.now() + timedelta(hours=1)).replace(microsecond=0).isoformat()
+#         generator_name = "generate_datetime"
+#         generator_params = {"strategy": "now_plus_hours", "hours": 1}
+#
+#     elif field_type in ["integer", "number"]:
+#         minimum = field_schema.get("minimum", 1)
+#         maximum = field_schema.get("maximum", 100)
+#         value = random.randint(int(minimum), int(maximum))
+#         generator_name = "generate_number"
+#         generator_params = {"minimum": minimum, "maximum": maximum}
+#
+#     elif "enum" in field_schema:
+#         value = field_schema["enum"][0]
+#         generator_name = "generate_enum"
+#         generator_params = {"strategy": "first_enum_value"}
+#
+#     else:
+#         value = f"test-{uuid.uuid4().hex[:8]}"
+#         generator_name = "generate_string"
+#         generator_params = {"strategy": "unique_plain_string"}
+#
+#     return {
+#         "value": value,
+#         "source_type": "generated",
+#         "generator_name": generator_name,
+#         "generator_params": generator_params,
+#         "reason": f"Generated value for field '{field_name}'. Goal: {generation_goal}",
+#     }
 
 
 SCENARIO_STABILIZATION_TOOLS = [

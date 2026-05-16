@@ -75,8 +75,10 @@ class GeneratedVariable(BaseModel):
 
 
 class ExecutionContext(BaseModel):
-    variables: Dict[str, ExtractedVariable] = Field(default_factory=dict, description="Variables extracted from previous responses.")
-    generated_variables: Dict[str, GeneratedVariable] = Field(default_factory=dict, description="Variables generated independently from previous responses.")
+    variables: Dict[str, ExtractedVariable] = Field(default_factory=dict,
+                                                    description="Variables extracted from previous responses.")
+    generated_variables: Dict[str, GeneratedVariable] = Field(default_factory=dict,
+                                                              description="Variables generated independently from previous responses.")
 
 
 # === SCENARIO ===
@@ -84,23 +86,21 @@ class ScenarioExecutionReport(BaseModel):
     """Final execution report for the full API scenario."""
 
     scenario_name: str = Field(description="Human-readable scenario name.")
-
     passed: bool = Field(description="True if all scenario steps passed successfully.")
-
     total_steps: int = Field(description="Total number of executed scenario steps.")
-
     passed_steps: int = Field(description="Number of successfully passed steps.")
-
     failed_step: Optional[int] = Field(default=None,
                                        description="First failed step number if scenario execution failed.")
-
     step_reports: List[StepExecutionReport] = Field(default_factory=list,
                                                     description="Execution reports for all scenario steps.")
-
     execution_context: ExecutionContext = Field(description="Final execution context with extracted runtime variables.")
-
     scenario_update_required: bool = Field(default=False,
                                            description="True if agent proposes updates to the original scenario.")
-
     scenario_update_proposals: List[str] = Field(default_factory=list,
                                                  description="List of proposed scenario updates generated during execution.")
+
+class ScenarioStabilizationInput(BaseModel):
+    scenario_name: str = Field(description="Human-readable scenario name.")
+    base_url: str = Field(description="Base API URL, for example http://localhost:8080.")
+    steps: List[TestStep] = Field(description="Scenario steps from knowledge base.")
+    execution_context: ExecutionContext = Field(default_factory=ExecutionContext)

@@ -13,7 +13,11 @@ llm = ChatOllama(model=MODEL_NAME, temperature=0)
 
 check_llm_connection(llm)
 
-agent = ScenarioStabilizationAgent(llm)
+agent = ScenarioStabilizationAgent(
+    llm=llm,
+    max_iterations=50,
+    verbose=True,
+)
 
 result = agent.run(
     ScenarioStabilizationInput(
