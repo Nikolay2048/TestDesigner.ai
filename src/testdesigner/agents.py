@@ -186,7 +186,7 @@ class ScenarioBuilderAgent:
                 continue
             endpoint = max(candidates, key=lambda item: self._endpoint_block_score(item, block["text"], block["expected_status"]))
             step = self._step_from_endpoint(
-                idx=block["step"],
+                idx=len(steps) + 1,
                 endpoint=endpoint,
                 constants=constants,
                 scenario_text=block["text"],
@@ -212,21 +212,37 @@ class ScenarioBuilderAgent:
         for match in pattern.finditer(text):
             header = match.group("header")
             body = match.group("body")
-            status_match = re.search(r"\b(20\d|40\d|50\d)\b", header)
-            blocks.append(
-                {
-                    "step": int(match.group("step")),
-                    "method": match.group("method").upper(),
-                    "expected_status": int(status_match.group(1)) if status_match else None,
-                    "text": f"{header}\n{body}".strip(),
-                }
-            )
+            header_line = header.splitlines()[0]
+            methods = [item.upper() for item in re.findall(r"\b(?:HTTP\s*)?(GET|POST|PUT|PATCH|DELETE)\b", header_line, flags=re.IGNORECASE)]
+            statuses = [int(item) for item in re.findall(r"\b(20\d|40\d|50\d)\b", header_line)]
+            if not methods:
+                methods = [match.group("method").upper()]
+            if len(methods) == 1:
+                status_match = re.search(r"\b(20\d|40\d|50\d)\b", header)
+                blocks.append(
+                    {
+                        "step": int(match.group("step")),
+                        "method": methods[0],
+                        "expected_status": int(status_match.group(1)) if status_match else None,
+                        "text": f"{header}\n{body}".strip(),
+                    }
+                )
+                continue
+            section_text = f"{header}\n{body}".strip()
+            for idx, method in enumerate(methods):
+                blocks.append(
+                    {
+                        "step": int(match.group("step")),
+                        "method": method,
+                        "expected_status": statuses[idx] if idx < len(statuses) else None,
+                        "text": f"{section_text}\n\nCurrent HTTP subcall: {method}",
+                    }
+                )
         return blocks
 
     def _apply_block_extraction_aliases(self, step: TestStep, block_text: str) -> None:
-        # Example: "save participant1Id from field participantId". The response
-        # JSONPath stays canonical, but the runtime variable gets the scenario
-        # alias so later explicit mentions can resolve.
+        # The response JSONPath stays canonical, but the runtime variable gets
+        # the scenario alias so later explicit mentions can resolve.
         for alias, field in re.findall(r"\b([A-Za-z][A-Za-z0-9_]*Id)\b[^`\n]{0,80}`([A-Za-z][A-Za-z0-9_]*Id)`", block_text):
             for rule in step.extract:
                 if rule.name == field:
@@ -457,10 +473,7 @@ class ScenarioBuilderAgent:
         response = self._response_for_status(endpoint, status)
         example = response.example if response else None
         assertions: List[Assertion] = []
-        target_status = self._target_status_for_endpoint(endpoint, scenario_text)
         if isinstance(example, dict):
-            if target_status and "status" in example:
-                assertions.append(Assertion(description=f"status is {target_status}", path="$.status", operator="eq", expected=target_status))
             for name, path in self._id_paths(example).items():
                 assertions.append(Assertion(description=f"{name} is present", path=path, operator="not_null"))
                 break
@@ -491,38 +504,6 @@ class ScenarioBuilderAgent:
             if response.status_code.startswith("2"):
                 return response
         return endpoint.responses[0] if endpoint.responses else None
-
-    @staticmethod
-    def _target_status_for_endpoint(endpoint: EndpointInfo, scenario_text: str) -> Optional[str]:
-        if endpoint.method == "GET":
-            return None
-        text = f"{scenario_text} {endpoint.summary} {endpoint.path}".upper()
-        action = endpoint.path.rstrip("/").split("/")[-1].upper()
-        ignored = {"GET", "POST", "PUT", "PATCH", "DELETE", "REST", "API", "JSON", "HTTP", "ID", "URL"}
-        scenario_candidates = [
-            item for item in re.findall(r"\b[A-Z][A-Z0-9_]{2,}\b", scenario_text.upper())
-            if item not in ignored and not item.endswith("ID")
-        ]
-        path_params_count = len(re.findall(r"\{(\w+)\}", endpoint.path))
-        action_depth = max(0, len(endpoint.path.strip("/").split("/")) - path_params_count - 2)
-        if action_depth > 0:
-            for candidate in scenario_candidates:
-                if candidate.startswith(action) or action.startswith(candidate):
-                    return candidate
-        response_statuses: list[str] = []
-        for response in endpoint.responses:
-            example = response.example
-            if isinstance(example, dict) and isinstance(example.get("status"), str):
-                response_statuses.append(example["status"].upper())
-        for status in response_statuses:
-            if status in text:
-                return status
-        for status in response_statuses:
-            if status.startswith(action) or action.startswith(status):
-                return status
-        if endpoint.method == "POST" and not re.findall(r"\{(\w+)\}", endpoint.path):
-            return response_statuses[0] if response_statuses else None
-        return None
 
     def _normalize(
         self,
@@ -701,7 +682,41 @@ class ExecutorAgent:
     def execute(self, card: ScenarioCard, base_url: str, max_attempts: Optional[int] = None) -> ExecutionReport:
         logger.info("Agent2: execute scenario %s", card.scenario_name)
         attempts_limit = max_attempts or self.config.runtime.max_attempts_per_step
-        context = VariableContext(
+        reasoning: List[str] = []
+        traces: List[ToolTrace] = []
+        corrections: List[ScenarioCorrection] = []
+        active_steps = [step.model_copy(deep=True) for step in card.steps]
+        final_context = self._initial_context(card)
+        step_reports: List[StepExecution] = []
+        successful: List[RequestRecord] = []
+
+        context = self._initial_context(card)
+        reasoning.append(f"Loaded constants: {sorted(context.constants)}")
+        for step in active_steps:
+            report = self._execute_step(step, card, context, base_url, attempts_limit, reasoning, traces, corrections)
+            step_reports.append(report)
+            if report.status == "passed" and report.final_request:
+                successful.append(report.final_request)
+                continue
+            remaining = [item for item in active_steps if item.step > step.step]
+            for skipped in remaining:
+                step_reports.append(StepExecution(step=skipped.step, name=skipped.name, status="skipped", error="Previous step failed"))
+            break
+        final_context = context
+
+        return ExecutionReport(
+            scenario_name=card.scenario_name,
+            status="passed" if len(successful) == len(active_steps) else "failed",
+            reasoning=reasoning,
+            steps=step_reports,
+            successful_requests=successful,
+            variables=final_context,
+            corrections=corrections,
+            traces=traces,
+        )
+
+    def _initial_context(self, card: ScenarioCard) -> VariableContext:
+        return VariableContext(
             constants={
                 name: ConstantVariable(
                     name=name,
@@ -710,32 +725,6 @@ class ExecutorAgent:
                 )
                 for name, value in card.constant_variables.items()
             }
-        )
-        reasoning = [f"Loaded constants: {sorted(context.constants)}"]
-        traces: List[ToolTrace] = []
-        corrections: List[ScenarioCorrection] = []
-        step_reports: List[StepExecution] = []
-        successful: List[RequestRecord] = []
-
-        for step in card.steps:
-            report = self._execute_step(step, card, context, base_url, attempts_limit, reasoning, traces, corrections)
-            step_reports.append(report)
-            if report.status == "passed" and report.final_request:
-                successful.append(report.final_request)
-                continue
-            for skipped in card.steps[step.step:]:
-                step_reports.append(StepExecution(step=skipped.step, name=skipped.name, status="skipped", error="Previous step failed"))
-            break
-
-        return ExecutionReport(
-            scenario_name=card.scenario_name,
-            status="passed" if len(successful) == len(card.steps) else "failed",
-            reasoning=reasoning,
-            steps=step_reports,
-            successful_requests=successful,
-            variables=context,
-            corrections=corrections,
-            traces=traces,
         )
 
     def _execute_step(

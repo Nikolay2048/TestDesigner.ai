@@ -19,6 +19,7 @@ CorrectionType = Literal[
     "extraction_expression_patch",
     "expected_status_patch",
     "assertion_patch",
+    "step_skip",
 ]
 CorrectionConfidence = Literal["low", "medium", "high"]
 
