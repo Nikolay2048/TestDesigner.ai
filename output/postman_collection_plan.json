@@ -1,0 +1,561 @@
+{
+  "info": {
+    "_postman_id": "b1c69aec-35ba-4f08-b39c-e7c9ff05cdc0",
+    "name": "# UC-011. Попытка создать дублирующую выплату по страховому делу",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "# UC-011. Попытка создать дублирующую выплату по страховому делу",
+      "description": "# UC-011. Попытка создать дублирующую выплату по страховому делу\n\n## Описание\nПроверка защиты от дублирования выплат. После того как выплата по страховому делу создана и подтверждена, повторная попытка создать выплату по тому же делу должна вернуть ошибку 409 с кодом PAYMENT_ALREADY_EXISTS.\n\n## Предусловия\n- Система ДТП доступна\n- base_url настроен\n- Переменные {{startDate}}, {{startDate}} доступны в контексте\n\n## Переменные сценария\n\n| Переменная     | Источник       | Описание                               |\n|---------------|----------------|----------------------------------------|\n| accidentId     | Шаг 1          | ID записи о ДТП                        |\n| participant1Id | Шаг 2          | ID виновника                           |\n| participant2Id | Шаг 3          | ID пострадавшего                       |\n| claimId        | Шаг 4          | ID страхового дела                     |\n| assessmentId   | Шаг 5 (часть 1)| ID экспертизы                          |\n| paymentId      | Шаг 6          | ID первой (успешной) выплаты           |\n\n## Шаги сценария\n\n### Шаг 1 — HTTP POST, ожидаемый статус 201\nСоздать запись о ДТП. Передать: дату ({{startDate}}), адрес («ул. Горького, 3»), описание («Боковое столкновение»). Сохранить accidentId из поля `accidentId` ответа.\n\n### Шаг 2 — HTTP POST, ожидаемый статус 201\nДобавить первого участника — виновника. Передать: accidentId, имя («Орлов Денис Михайлович»), телефон, номер страхового полиса, role=CULPRIT, faultPercentage=100. Сохранить participant1Id из поля `participantId` ответа.\n\n### Шаг 3 — HTTP POST, ожидаемый статус 201\nДобавить второго участника — пострадавшего. Передать: accidentId, имя («Зайцева Наталья Павловна»), телефон, номер страхового полиса, role=VICTIM, faultPercentage=0. Сохранить participant2Id из поля `participantId` ответа.\n\n### Шаг 4 — HTTP POST, ожидаемый статус 201\nСоздать страховое дело от имени пострадавшего. Передать: accidentId, claimantParticipantId=participant2Id, claimedAmount=30000. Сохранить claimId из поля `claimId` ответа.\n\n### Шаг 5 — HTTP POST + HTTP PATCH, ожидаемый статус 201 затем 200\nСоздать запрос на экспертизу (POST, статус 201): передать accidentId, claimId, expertName=«Федотов Юрий Анатольевич», scheduledDate={{startDate}}. Сохранить assessmentId из поля `assessmentId` ответа.\nЗатем завершить экспертизу (PATCH, статус 200): передать accidentId, claimId, assessmentId. Тело: assessedAmount=30000, report=«Ущерб подтверждён. Стоимость ремонта 30 000 руб.», status=COMPLETED. После этого claim переходит в статус UNDER_REVIEW с approvedAmount=30000.\n\n### Шаг 6 — HTTP POST, ожидаемый статус 201\nСоздать первую выплату по страховому делу. Передать: accidentId, claimId, amount=30000, recipientParticipantId=participant2Id. Сохранить paymentId из поля `paymentId` ответа. Статус выплаты — PENDING.\n\n### Шаг 7 — HTTP POST, ожидаемый статус 200\nПодтвердить выплату. Передать: accidentId, claimId, paymentId. Проверить: статус стал CONFIRMED, amount=30000.\n\n### Шаг 8 — HTTP POST, о",
+      "item": [
+        {
+          "name": "Step 1: Зарегистрировать ДТП",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/accidents",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "accidents"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"{{date}}\",\n  \"location\": \"ул. Ленина 42, Москва\",\n  \"description\": \"Столкновение на перекрёстке\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const startDate = new Date(Date.now() + 24*60*60*1000).toISOString().replace(/\\.\\d{3}Z$/, 'Z');",
+                  "pm.collectionVariables.set('startDate', startDate);",
+                  ""
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.response.to.have.status(201);",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('accidentId', json.accidentId);",
+                  "pm.collectionVariables.set('accidentId', json.accidentId);",
+                  "pm.expect(String(json.status)).to.equal(String(\"REGISTERED\"));",
+                  "pm.expect(json.accidentId).to.not.be.null;"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Step 2: Добавить участника ДТП",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/accidents/{{accidentId}}/participants",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "accidents",
+                "{{accidentId}}",
+                "participants"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role\": \"CULPRIT\",\n  \"name\": \"Иван Иванов\",\n  \"phone\": \"+79161234567\",\n  \"insurancePolicy\": \"POL-001-2026\",\n  \"faultPercentage\": 100\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('accidentId', 'accidentId-' + pm.variables.replaceIn('{$guid}').slice(0, 8));",
+                  ""
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.response.to.have.status(201);",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('participantId', json.participantId);",
+                  "pm.collectionVariables.set('accidentId', json.accidentId);",
+                  "pm.collectionVariables.set('participant1Id', json.participantId);",
+                  "pm.expect(json.participantId).to.not.be.null;"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Step 3: Добавить участника ДТП",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/accidents/{{accidentId}}/participants",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "accidents",
+                "{{accidentId}}",
+                "participants"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role\": \"VICTIM\",\n  \"name\": \"Иван Иванов\",\n  \"phone\": \"+79161234567\",\n  \"insurancePolicy\": \"POL-001-2026\",\n  \"faultPercentage\": 0\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('accidentId', 'accidentId-' + pm.variables.replaceIn('{$guid}').slice(0, 8));",
+                  ""
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.response.to.have.status(201);",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('participantId', json.participantId);",
+                  "pm.collectionVariables.set('accidentId', json.accidentId);",
+                  "pm.collectionVariables.set('participant2Id', json.participantId);",
+                  "pm.expect(json.participantId).to.not.be.null;"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Step 4: Создать страховое требование по ДТП",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/accidents/{{accidentId}}/claims",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "accidents",
+                "{{accidentId}}",
+                "claims"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"claimantParticipantId\": \"{{participant2Id}}\",\n  \"claimedAmount\": 30000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('accidentId', 'accidentId-' + pm.variables.replaceIn('{$guid}').slice(0, 8));",
+                  "",
+                  "pm.collectionVariables.set('participant2Id', 'participant2Id-' + pm.variables.replaceIn('{$guid}').slice(0, 8));",
+                  ""
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.response.to.have.status(201);",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('claimId', json.claimId);",
+                  "pm.collectionVariables.set('accidentId', json.accidentId);",
+                  "pm.collectionVariables.set('claimantParticipantId', json.claimantParticipantId);",
+                  "pm.collectionVariables.set('claimantParticipantId', json.claimId);",
+                  "pm.expect(json.claimId).to.not.be.null;"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Step 5: Создать экспертную оценку по требованию",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/accidents/{{accidentId}}/claims/{{claimId}}/assessments",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "accidents",
+                "{{accidentId}}",
+                "claims",
+                "{{claimId}}",
+                "assessments"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"expertName\": \"Сергей Оценщиков\",\n  \"scheduledDate\": \"{{scheduledDate}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('accidentId', 'accidentId-' + pm.variables.replaceIn('{$guid}').slice(0, 8));",
+                  "",
+                  "pm.collectionVariables.set('claimId', 'claimId-' + pm.variables.replaceIn('{$guid}').slice(0, 8));",
+                  "",
+                  "const startDate = new Date(Date.now() + 24*60*60*1000).toISOString().replace(/\\.\\d{3}Z$/, 'Z');",
+                  "pm.collectionVariables.set('startDate', startDate);",
+                  ""
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.response.to.have.status(201);",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('assessmentId', json.assessmentId);",
+                  "pm.collectionVariables.set('claimId', json.claimId);",
+                  "pm.collectionVariables.set('assessmentId', json.assessmentId);",
+                  "pm.expect(String(json.status)).to.equal(String(\"SCHEDULED\"));",
+                  "pm.expect(json.assessmentId).to.not.be.null;"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Step 6: Создать страховую выплату по требованию",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/accidents/{{accidentId}}/claims/{{claimId}}/payments",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "accidents",
+                "{{accidentId}}",
+                "claims",
+                "{{claimId}}",
+                "payments"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 30000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('accidentId', 'accidentId-' + pm.variables.replaceIn('{$guid}').slice(0, 8));",
+                  "",
+                  "pm.collectionVariables.set('claimId', 'claimId-' + pm.variables.replaceIn('{$guid}').slice(0, 8));",
+                  ""
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.response.to.have.status(201);",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('paymentId', json.paymentId);",
+                  "pm.collectionVariables.set('claimId', json.claimId);",
+                  "pm.collectionVariables.set('claimantParticipantId', json.claimantParticipantId);",
+                  "pm.collectionVariables.set('recipientParticipantId', json.paymentId);",
+                  "pm.expect(String(json.status)).to.equal(String(\"PENDING\"));",
+                  "pm.expect(json.paymentId).to.not.be.null;"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Step 7: Подтвердить страховую выплату (PENDING → CONFIRMED)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/accidents/{{accidentId}}/claims/{{claimId}}/payments/{{paymentId}}/confirm",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "accidents",
+                "{{accidentId}}",
+                "claims",
+                "{{claimId}}",
+                "payments",
+                "{{paymentId}}",
+                "confirm"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('accidentId', 'accidentId-' + pm.variables.replaceIn('{$guid}').slice(0, 8));",
+                  "",
+                  "pm.collectionVariables.set('claimId', 'claimId-' + pm.variables.replaceIn('{$guid}').slice(0, 8));",
+                  "",
+                  "pm.collectionVariables.set('paymentId', 'paymentId-' + pm.variables.replaceIn('{$guid}').slice(0, 8));",
+                  ""
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.response.to.have.status(200);",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('paymentId', json.paymentId);",
+                  "pm.collectionVariables.set('claimId', json.claimId);",
+                  "pm.collectionVariables.set('claimantParticipantId', json.claimantParticipantId);",
+                  "pm.expect(String(json.status)).to.equal(String(\"CONFIRMED\"));",
+                  "pm.expect(json.paymentId).to.not.be.null;"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Step 8: Создать страховую выплату по требованию",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/accidents/{{accidentId}}/claims/{{claimId}}/payments",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "accidents",
+                "{{accidentId}}",
+                "claims",
+                "{{claimId}}",
+                "payments"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 30000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('accidentId', 'accidentId-' + pm.variables.replaceIn('{$guid}').slice(0, 8));",
+                  "",
+                  "pm.collectionVariables.set('claimId', 'claimId-' + pm.variables.replaceIn('{$guid}').slice(0, 8));",
+                  ""
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.response.to.have.status(409);",
+                  "const json = pm.response.json();"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8080",
+      "type": "any"
+    },
+    {
+      "key": "user_id",
+      "value": "user-1",
+      "type": "any"
+    },
+    {
+      "key": "city",
+      "value": "Moscow",
+      "type": "any"
+    },
+    {
+      "key": "booking_duration_days",
+      "value": "1",
+      "type": "any"
+    }
+  ]
+}
