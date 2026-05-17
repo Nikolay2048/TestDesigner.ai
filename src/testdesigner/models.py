@@ -199,6 +199,14 @@ class OpenApiCatalog(BaseModel):
         return None
 
 
+class RequestBodyPatch(BaseModel):
+    """Suggested correction from Agent 2 LLM error analysis."""
+
+    fixable: bool
+    reasoning: str
+    body_patch: Dict[str, Any] = Field(default_factory=dict)
+
+
 class ToolTrace(BaseModel):
     agent: str
     tool: str

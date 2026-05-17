@@ -20,20 +20,24 @@ class Pipeline:
         self.config = config
 
     def run(self, scenario_path: Path, openapi_path: Path, constants_path: Path, execute: bool = True) -> int:
-        out_dir = Path(self.config.runtime.output_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
+        base_out = Path(self.config.runtime.output_dir)
+        base_out.mkdir(parents=True, exist_ok=True)
+
+        # Per-scenario subdirectory keeps results from different scenarios separate.
+        scenario_dir = base_out / scenario_path.stem
+        scenario_dir.mkdir(parents=True, exist_ok=True)
 
         constants, constant_descriptions = self._load_constants(constants_path)
         scenario_text = scenario_path.read_text(encoding="utf-8")
 
         catalog = OpenApiParser(openapi_path).parse()
-        (out_dir / "openapi_catalog.json").write_text(catalog.model_dump_json(indent=2, by_alias=True), encoding="utf-8")
+        (scenario_dir / "openapi_catalog.json").write_text(catalog.model_dump_json(indent=2, by_alias=True), encoding="utf-8")
 
         card = ScenarioBuilderAgent(self.config).build(scenario_text, catalog, constants, constant_descriptions)
-        (out_dir / "scenario_card.json").write_text(card.model_dump_json(indent=2), encoding="utf-8")
+        (scenario_dir / "scenario_card.json").write_text(card.model_dump_json(indent=2), encoding="utf-8")
 
         postman = PostmanGenerator()
-        (out_dir / "postman_collection_plan.json").write_text(json.dumps(postman.from_plan(card), ensure_ascii=False, indent=2), encoding="utf-8")
+        (scenario_dir / "postman_collection_plan.json").write_text(json.dumps(postman.from_plan(card), ensure_ascii=False, indent=2), encoding="utf-8")
 
         if not execute:
             logger.info("Pipeline: plan-only complete")
@@ -42,13 +46,13 @@ class Pipeline:
         base_url = constants.get("base_url") or catalog.base_url
         executor = ExecutorAgent(self.config)
         try:
-            report = executor.execute(card, base_url)
+            report = executor.execute(card, base_url, catalog=catalog)
         finally:
             executor.close()
 
-        (out_dir / "execution_report.json").write_text(report.model_dump_json(indent=2), encoding="utf-8")
-        (out_dir / "postman_collection_execution.json").write_text(json.dumps(postman.from_execution(report), ensure_ascii=False, indent=2), encoding="utf-8")
-        (out_dir / "postman_environment.json").write_text(json.dumps(postman.environment(report.variables), ensure_ascii=False, indent=2), encoding="utf-8")
+        (scenario_dir / "execution_report.json").write_text(report.model_dump_json(indent=2), encoding="utf-8")
+        (scenario_dir / "postman_collection_execution.json").write_text(json.dumps(postman.from_execution(report), ensure_ascii=False, indent=2), encoding="utf-8")
+        (scenario_dir / "postman_environment.json").write_text(json.dumps(postman.environment(report.variables), ensure_ascii=False, indent=2), encoding="utf-8")
         logger.info("Pipeline: complete status=%s", report.status)
         return 0 if report.status == "passed" else 2
 

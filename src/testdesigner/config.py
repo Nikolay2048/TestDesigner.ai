@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field
@@ -16,6 +16,7 @@ class LlmConfig(BaseModel):
     base_url: str = "http://localhost:11434"
     temperature: float = 0
     api_key_env: str = "OPENAI_API_KEY"
+    think: bool = False
 
 
 class RuntimeConfig(BaseModel):
@@ -32,6 +33,9 @@ class PathsConfig(BaseModel):
 
 class AppConfig(BaseModel):
     llm: LlmConfig = Field(default_factory=LlmConfig)
+    llm_agent1: Optional[LlmConfig] = None
+    llm_agent2: Optional[LlmConfig] = None
+    llm_agent3: Optional[LlmConfig] = None
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
 
@@ -64,7 +68,13 @@ def create_llm(config: LlmConfig):
     if config.provider == "ollama":
         from langchain_ollama import ChatOllama  # type: ignore
 
-        return ChatOllama(model=config.model, base_url=config.base_url, temperature=config.temperature)
+        kwargs: dict = {"model": config.model, "base_url": config.base_url, "temperature": config.temperature}
+        if config.think:
+            try:
+                return ChatOllama(think=True, **kwargs)
+            except TypeError:
+                pass
+        return ChatOllama(**kwargs)
     if config.provider == "openai":
         from langchain_openai import ChatOpenAI  # type: ignore
 

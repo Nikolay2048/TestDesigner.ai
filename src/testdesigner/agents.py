@@ -20,6 +20,7 @@ from src.testdesigner.models import (
     ExtractionRule,
     GeneratedVariable,
     OpenApiCatalog,
+    RequestBodyPatch,
     RequestRecord,
     ScenarioCorrection,
     ScenarioCard,
@@ -42,19 +43,73 @@ from src.testdesigner.tools import (
 
 logger = logging.getLogger(__name__)
 
-AGENT1_SYSTEM_PROMPT = """You are Agent 1, a scenario analyst.
+AGENT1_SYSTEM_PROMPT = """You are Agent 1, a scenario analyst. Think step-by-step before building the ScenarioCard.
+
+Reasoning steps you MUST follow:
+1. Read the scenario carefully — identify each step's endpoint, expected HTTP status, and business role.
+2. Identify all participants and their roles (e.g. CULPRIT, VICTIM). Give each participant a distinct variable
+   name (e.g. culpritParticipantId, victimParticipantId) when the same endpoint is called multiple times.
+3. Trace data dependencies: which step produces each ID needed by a later step.
+4. For negative/validation steps (expected 4xx), set expected_status correctly and mark extractions as not required.
+5. Ensure request_body fields match the scenario description — use enum values from the scenario text, not just
+   the first OpenAPI example value.
+6. When a scenario step lists multiple "Endpoint:" lines (e.g. POST then PATCH for the same business step),
+   generate ONE ScenarioCard step per endpoint call — do NOT merge them into a single step. Each call gets its
+   own sequential step number and must extract/pass any IDs needed by the next call.
+
+CRITICAL — Endpoint paths:
+- The "path" field of every step MUST be copied EXACTLY from one of the endpoint paths listed in the
+  openapi.endpoints array (the "path" field of each endpoint object).
+- DO NOT paraphrase, abbreviate, or invent paths. If the catalog says "/v1/vehicles/available", write
+  "/v1/vehicles/available" — never "/cars/available", "/vehicles", or any other variation.
+- Before writing each step, scan the openapi.endpoints list and identify the matching entry by its summary
+  and description, then copy its path verbatim.
+
+CRITICAL — Template variable syntax:
+- In the path STRING itself, use OpenAPI single-brace format: /v1/accidents/{accidentId}/participants
+- In request_body VALUES, path_params VALUES, query_params, and headers, use DOUBLE curly braces: {{variableName}}
+- Example path: "/v1/accidents/{accidentId}/participants/{participantId}/vehicles"
+- Example path_params: {"accidentId": "{{accidentId}}", "participantId": "{{victimParticipantId}}"}
+- Example body: {"claimantParticipantId": "{{victimParticipantId}}"}
+- NEVER use double braces {{...}} inside the path string itself.
+
 Build a ScenarioCard from system-analysis text and an OpenAPI catalog.
-Use only listed endpoints. Build request templates from OpenAPI examples and
-the scenario text. Mark constants, extracted variables, and generated variables
-explicitly through variable_sources and per-step variable_bindings. For every
-variable needed by later requests, add extraction rules from earlier responses
-when the value should come from the server. Return only valid JSON matching the
-ScenarioCard schema."""
+Use only listed endpoints. Build request templates from OpenAPI examples and the scenario text.
+Mark constants, extracted variables, and generated variables explicitly through variable_sources
+and per-step variable_bindings. For every variable needed by later requests, add extraction rules
+from earlier responses when the value should come from the server.
+Return only valid JSON matching the ScenarioCard schema."""
 
 AGENT2_SYSTEM_PROMPT = """You are Agent 2, an execution orchestrator.
 Execute steps until success or bounded attempts are exhausted. Resolve
 variables, call Agent 3 for generated values, extract response variables, and
 record reasoning for every data change."""
+
+AGENT2_ERROR_ANALYSIS_PROMPT = """You are Agent 2, an API test execution analyst.
+A request has failed with a server error. Analyze the error and suggest the minimal
+correction to the request body that would fix it.
+
+Think through:
+1. What does the error code and message tell you about which field is wrong or missing?
+2. What is the correct field name and value? Use the exact field name from the error message.
+3. Are there other extracted values in context that would satisfy the constraint?
+4. If the request body was empty (null), use the openapi_context example as a template and
+   the step_name to infer correct field values (e.g. step "Add victim participant" implies role=VICTIM).
+
+Rules for body_patch:
+- Keys must be TOP-LEVEL field names only (no nesting, no dot-notation).
+- The field name in body_patch must be the CORRECT name expected by the server
+  (e.g. if the error says "Field phone is required", use "phone" as the key).
+- Values must be scalar (string, number, bool) or a flat list — never a nested dict.
+- When the body was null/empty, return ALL required fields from the OpenAPI example,
+  adjusting enum values (like role) based on the step_name context.
+- Only include the field(s) needed to fix THIS specific error when patching an existing body.
+
+Return a RequestBodyPatch with:
+- fixable=true and body_patch={{field: corrected_value}} when the fix is a simple value change.
+- fixable=false and reasoning explaining why when the error requires upstream data changes
+  (e.g. a prerequisite resource must be created first).
+"""
 
 AGENT3_SYSTEM_PROMPT = """You are Agent 3, a data-generation specialist.
 Return generation policies that satisfy format and business constraints. Prefer
@@ -72,7 +127,7 @@ class ScenarioBuilderAgent:
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
-        self.llm = create_llm(config.llm)
+        self.llm = create_llm(config.llm_agent1 or config.llm)
 
     def build(
         self,
@@ -97,6 +152,25 @@ class ScenarioBuilderAgent:
                 logger.warning("Agent1: LLM build failed, using generic deterministic fallback: %s", exc)
         return self._deterministic_card(scenario_text, catalog, constants, constant_descriptions)
 
+    @staticmethod
+    def _filter_catalog_for_scenario(scenario_text: str, catalog: OpenApiCatalog):
+        """Return only catalog endpoints that are referenced in the scenario text."""
+        pattern = re.compile(r"Endpoint:\s+(GET|POST|PUT|PATCH|DELETE)\s+(/[^\s\n]+)", re.IGNORECASE)
+        mentioned = [(m.upper(), p.strip()) for m, p in pattern.findall(scenario_text)]
+        if not mentioned:
+            return catalog.endpoints
+
+        def _norm(path: str) -> str:
+            path = path.split("?")[0]  # strip query string
+            return re.sub(r"\{[^}]+\}", "{p}", path)
+
+        needed = {(method, _norm(path)) for method, path in mentioned}
+        filtered = [e for e in catalog.endpoints if (e.method.upper(), _norm(e.path)) in needed]
+        if not filtered:
+            return catalog.endpoints
+        logger.info("Agent1: using %d/%d endpoints from catalog (filtered by scenario)", len(filtered), len(catalog.endpoints))
+        return filtered
+
     def _prompt(
         self,
         scenario_text: str,
@@ -104,6 +178,7 @@ class ScenarioBuilderAgent:
         constants: Dict[str, Any],
         constant_descriptions: Dict[str, str],
     ) -> str:
+        relevant = self._filter_catalog_for_scenario(scenario_text, catalog)
         endpoints = [
             {
                 "method": e.method,
@@ -113,10 +188,12 @@ class ScenarioBuilderAgent:
                 "request_example": e.request_example.model_dump(),
                 "responses": [r.model_dump(by_alias=True) for r in e.responses],
             }
-            for e in catalog.endpoints
+            for e in relevant
         ]
+        valid_paths = [{"method": e.method, "path": e.path, "summary": e.summary} for e in relevant]
         return json.dumps(
             {
+                "RULE_use_only_these_paths": valid_paths,
                 "constants": {
                     name: {"value": value, "description": constant_descriptions.get(name, "")}
                     for name, value in constants.items()
@@ -556,7 +633,9 @@ class ScenarioBuilderAgent:
         extracted: Dict[str, tuple[int, str]] = {}
         refs: Dict[str, set[str]] = {}
         for step in card.steps:
-            endpoint = catalog.find(step.method, step.path)
+            # Paths use OpenAPI {param} convention; LLM may emit {{param}} — normalize back.
+            step.path = re.sub(r"\{\{(\w+)\}\}", r"{\1}", step.path)
+            endpoint = self._find_or_repair_endpoint(step, catalog)
             if endpoint and step.headers is None:
                 step.headers = endpoint.request_example.headers
             if endpoint:
@@ -566,6 +645,7 @@ class ScenarioBuilderAgent:
                     "description": endpoint.description,
                     "comments": endpoint.request_example.comments,
                 }
+                self._repair_body_nested(step, endpoint)
             for param in re.findall(r"\{(\w+)\}", step.path):
                 step.path_params.setdefault(param, f"{{{{{param}}}}}")
             for rule in step.extract:
@@ -573,6 +653,9 @@ class ScenarioBuilderAgent:
             refs_for_step = self._refs_by_location(step)
             for name, locations in refs_for_step.items():
                 refs.setdefault(name, set()).update(locations)
+
+        self._fix_single_brace_refs(card)
+        self._auto_repair_extractions(card, catalog, refs, extracted, constants)
 
         card.variable_sources = {}
         for name in sorted(refs):
@@ -610,6 +693,141 @@ class ScenarioBuilderAgent:
         for step in card.steps:
             step.variable_bindings = self._bindings_for_step(step, card.variable_sources)
         return card
+
+    def _auto_repair_extractions(
+        self,
+        card: ScenarioCard,
+        catalog: OpenApiCatalog,
+        refs: Dict[str, set[str]],
+        extracted: Dict[str, tuple[int, str]],
+        constants: Dict[str, Any],
+    ) -> None:
+        """Add missing extraction rules when Agent 1 omitted them."""
+        needs = {
+            name for name in refs
+            if name not in extracted and name not in constants and name.lower().endswith("id")
+        }
+        if not needs:
+            return
+        # Collect first usage step for each variable to anchor the repair to the right producer step.
+        first_usage: Dict[str, int] = {}
+        for step in card.steps:
+            for name in collect_refs([step.path, step.path_params, step.query_params, step.request_body, step.headers]):
+                first_usage.setdefault(name, step.step)
+
+        for var_name in sorted(needs):
+            var_lower = var_name.lower()
+            first_use = first_usage.get(var_name, len(card.steps) + 1)
+            # Only look at steps BEFORE first usage (producer must precede consumer).
+            candidate_steps = [s for s in sorted(card.steps, key=lambda s: s.step) if s.step < first_use]
+            for step in candidate_steps:
+                endpoint = catalog.find(step.method, step.path)
+                if endpoint is None or step.method not in ("GET", "POST", "PUT", "PATCH"):
+                    continue
+                for response in endpoint.responses:
+                    if not response.status_code.startswith("2"):
+                        continue
+                    id_paths = self._id_paths(response.example or {})
+                    # Exact match first; then suffix match (e.g. victimParticipantId -> participantId).
+                    matched = id_paths.get(var_name)
+                    if matched is None:
+                        for field, path in id_paths.items():
+                            if var_lower.endswith(field.lower()) and len(field) < len(var_name):
+                                matched = path
+                                break
+                    if matched is not None:
+                        if not any(r.name == var_name for r in step.extract):
+                            step.extract.append(ExtractionRule(
+                                name=var_name,
+                                expression=matched,
+                                required=True,
+                                description=f"Auto-repaired extraction for {var_name}",
+                            ))
+                            extracted[var_name] = (step.step, matched)
+                            logger.info("Normalize: auto-repaired extraction %s from step %d (%s)", var_name, step.step, matched)
+                        break
+
+    def _find_or_repair_endpoint(self, step: TestStep, catalog: OpenApiCatalog) -> Optional[EndpointInfo]:
+        """Return the catalog endpoint for this step, repairing the path if necessary."""
+        endpoint = catalog.find(step.method, step.path)
+        if endpoint is not None:
+            return endpoint
+
+        def strip_prefix(p: str) -> str:
+            p = p.strip("/")
+            for pfx in ("v1/", "v2/", "v3/", "api/v1/", "api/"):
+                if p.startswith(pfx):
+                    return p[len(pfx):]
+            return p
+
+        # Tier 2: exact match after stripping version prefixes from both sides.
+        step_bare = strip_prefix(step.path)
+        for candidate in catalog.endpoints:
+            if candidate.method != step.method:
+                continue
+            if strip_prefix(candidate.path) == step_bare:
+                old = step.path
+                step.path = candidate.path
+                logger.info("Normalize: repaired path %r -> %r in step %d", old, step.path, step.step)
+                return candidate
+
+        return None
+
+    def _fix_single_brace_refs(self, card: ScenarioCard) -> None:
+        """Convert {varname} -> {{varname}} in body/param values when it looks like a variable reference.
+
+        LLMs sometimes emit single-brace syntax instead of the required double-brace syntax.
+        Only converts whole-string values of the form exactly "{word}" to avoid corrupting
+        description strings that contain curly braces for other purposes.
+        """
+        _single_re = re.compile(r"^\{(\w+)\}$")
+        known = set(card.constant_variables) | set(card.variable_sources)
+
+        def fix_value(v: Any) -> Any:
+            if isinstance(v, str):
+                m = _single_re.match(v.strip())
+                if m:
+                    name = m.group(1)
+                    if name in known or name.lower().endswith("id"):
+                        return "{{" + name + "}}"
+                return v
+            if isinstance(v, dict):
+                return {k: fix_value(val) for k, val in v.items()}
+            if isinstance(v, list):
+                return [fix_value(item) for item in v]
+            return v
+
+        for step in card.steps:
+            if step.request_body:
+                step.request_body = fix_value(step.request_body)
+            if step.path_params:
+                step.path_params = {k: fix_value(v) for k, v in step.path_params.items()}
+            if step.query_params:
+                step.query_params = fix_value(step.query_params)
+            if step.headers:
+                step.headers = fix_value(step.headers)
+
+    def _repair_body_nested(self, step: TestStep, endpoint: EndpointInfo) -> None:
+        """Flatten nested objects whose keys match top-level OpenAPI example fields.
+
+        E.g. if the LLM generated {"contact_info": {"phone": "..."}} but the spec
+        example has a flat {"phone": "..."}, extract phone to the top level.
+        """
+        if not step.request_body or not isinstance(endpoint.request_example.json_body, dict):
+            return
+        openapi_fields = set(endpoint.request_example.json_body.keys())
+        for field in list(step.request_body.keys()):
+            if field in openapi_fields:
+                continue
+            value = step.request_body[field]
+            if not isinstance(value, dict):
+                continue
+            hits = [k for k in value if k in openapi_fields]
+            if hits:
+                for k in hits:
+                    step.request_body[k] = value[k]
+                    logger.info("Normalize: extracted nested field %r.%r -> %r in step %d", field, k, k, step.step)
+                del step.request_body[field]
 
     @staticmethod
     def _refs_by_location(step: TestStep) -> Dict[str, set[str]]:
@@ -682,7 +900,7 @@ class DataGeneratorAgent:
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
-        self.llm = create_llm(config.llm)
+        self.llm = create_llm(config.llm_agent3 or config.llm)
 
     def generate(
         self,
@@ -711,13 +929,76 @@ class ExecutorAgent:
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
+        self.llm = create_llm(config.llm_agent2 or config.llm)
         self.generator = DataGeneratorAgent(config)
         self.http = HttpTool(timeout_seconds=config.runtime.request_timeout_seconds)
 
     def close(self) -> None:
         self.http.close()
 
-    def execute(self, card: ScenarioCard, base_url: str, max_attempts: Optional[int] = None) -> ExecutionReport:
+    def _analyze_error_with_llm(
+        self,
+        step: TestStep,
+        response_body: Any,
+        status_code: Optional[int],
+        context: VariableContext,
+        endpoint_info: Optional[Any] = None,
+    ) -> tuple[Optional[Dict[str, Any]], bool, Optional[str]]:
+        """Analyze a request error and suggest a body patch.
+
+        Returns (patch_dict, stop_retrying, llm_reasoning):
+        - patch_dict: fields to merge into request body, or None
+        - stop_retrying: True when LLM determined the error cannot be fixed by body changes
+        - llm_reasoning: the model's reasoning text, or None
+        """
+        if self.llm is None or status_code is None or status_code >= 500:
+            return None, False, None
+        values = context.values()
+        resolved_body = resolve_templates(step.request_body, values) if step.request_body else None
+        extracted_summary = {name: var.extracted_value for name, var in context.extracted.items()}
+        openapi_ctx: Dict[str, Any] = {}
+        if endpoint_info is not None:
+            if endpoint_info.request_example and endpoint_info.request_example.json_body:
+                openapi_ctx["expected_request_example"] = endpoint_info.request_example.json_body
+            if endpoint_info.responses:
+                openapi_ctx["response_examples"] = {
+                    r.status_code: r.example for r in endpoint_info.responses if r.example
+                }
+        human_msg = json.dumps(
+            {
+                "step_name": step.name,
+                "step_notes": step.notes or step.swagger_notes.get("summary", ""),
+                "method": step.method,
+                "path": step.path,
+                "resolved_request_body": resolved_body,
+                "body_was_null": step.request_body is None,
+                "server_error_status": status_code,
+                "server_error_response": response_body,
+                "extracted_context": extracted_summary,
+                "openapi_context": openapi_ctx,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        try:
+            structured = self.llm.with_structured_output(RequestBodyPatch)
+            result = structured.invoke([("system", AGENT2_ERROR_ANALYSIS_PROMPT), ("human", human_msg)])
+            logger.info("Agent2: error analysis reasoning: %s", result.reasoning)
+            if result.fixable and result.body_patch:
+                return result.body_patch, False, result.reasoning
+            logger.info("Agent2: error not fixable by body patch: %s", result.reasoning)
+            return None, True, result.reasoning
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Agent2: LLM error analysis failed: %s", exc)
+        return None, False, None
+
+    def execute(
+        self,
+        card: ScenarioCard,
+        base_url: str,
+        catalog: Optional[Any] = None,
+        max_attempts: Optional[int] = None,
+    ) -> ExecutionReport:
         logger.info("Agent2: execute scenario %s", card.scenario_name)
         attempts_limit = max_attempts or self.config.runtime.max_attempts_per_step
         reasoning: List[str] = []
@@ -731,7 +1012,7 @@ class ExecutorAgent:
         context = self._initial_context(card)
         reasoning.append(f"Loaded constants: {sorted(context.constants)}")
         for step in active_steps:
-            report = self._execute_step(step, card, context, base_url, attempts_limit, reasoning, traces, corrections)
+            report = self._execute_step(step, card, context, base_url, attempts_limit, reasoning, traces, corrections, catalog=catalog)
             step_reports.append(report)
             if report.status == "passed" and report.final_request:
                 successful.append(report.final_request)
@@ -775,9 +1056,25 @@ class ExecutorAgent:
         reasoning: List[str],
         traces: List[ToolTrace],
         corrections: List[ScenarioCorrection],
+        catalog: Optional[Any] = None,
     ) -> StepExecution:
         history: List[RequestRecord] = []
         previous_error: Optional[str] = None
+        analyzed_error_keys: set = set()
+        endpoint_info = catalog.find(step.method, step.path) if catalog is not None else None
+
+        # Proactively generate body for null-body PATCH/PUT steps.
+        # A PATCH/PUT with null body silently succeeds (200 OK) but does nothing,
+        # causing downstream steps to fail. Fire LLM before the first attempt.
+        if step.request_body is None and step.method in ("PATCH", "PUT") and endpoint_info is not None:
+            synthetic_error = {"code": "BODY_REQUIRED", "message": "Specify which fields to update."}
+            patch, _, llm_reasoning = self._analyze_error_with_llm(step, synthetic_error, 400, context, endpoint_info=endpoint_info)
+            if patch:
+                step.request_body = patch
+                reasoning.append(f"Step {step.step}: proactively generated body for null-body {step.method}")
+                if llm_reasoning:
+                    reasoning.append(f"Step {step.step} Agent2 reasoning: {llm_reasoning}")
+
         for attempt in range(1, attempts_limit + 1):
             values = context.values()
             unresolved = unresolved_refs([step.path, step.path_params, step.query_params, step.request_body, step.headers], values)
@@ -833,6 +1130,35 @@ class ExecutorAgent:
 
             passed = request_error is None and all(check.passed for check in checks) and not extraction_errors
             error = None if passed else "; ".join([request_error or "", *[c.error or "" for c in checks if not c.passed], *extraction_errors]).strip("; ")
+
+            stop_retrying = False
+            if not passed and status_code is not None and 400 <= status_code < 500:
+                error_code = response_body.get("code", "") if isinstance(response_body, dict) else ""
+                error_key = f"{status_code}:{error_code}"
+                if error_key not in analyzed_error_keys:
+                    analyzed_error_keys.add(error_key)
+                    patch, stop_retrying, llm_reasoning = self._analyze_error_with_llm(step, response_body, status_code, context, endpoint_info=endpoint_info)
+                    if llm_reasoning:
+                        reasoning.append(f"Step {step.step} attempt {attempt} Agent2 reasoning: {llm_reasoning}")
+                    if not stop_retrying and patch:
+                        if step.request_body is None:
+                            step.request_body = {}
+                        for field, new_value in patch.items():
+                            old_value = step.request_body.get(field)
+                            step.request_body[field] = new_value
+                            reasoning.append(f"Step {step.step} attempt {attempt}: LLM patched body.{field}: {old_value!r} -> {new_value!r}")
+                            corrections.append(ScenarioCorrection(
+                                step=step.step,
+                                correction_type="request_body_patch",
+                                target=field,
+                                before=old_value,
+                                after=new_value,
+                                reason="Agent 2 LLM error analysis suggested body correction based on server error response.",
+                                evidence={"server_status": status_code, "server_response": response_body},
+                                confidence="medium",
+                                applied=True,
+                            ))
+
             record = RequestRecord(
                 step=step.step,
                 attempt=attempt,
@@ -858,6 +1184,10 @@ class ExecutorAgent:
             if passed:
                 reasoning.append(f"Step {step.step} passed on attempt {attempt}")
                 return StepExecution(step=step.step, name=step.name, status="passed", attempts=attempt, final_request=record, attempt_history=history)
+
+            if stop_retrying:
+                reasoning.append(f"Step {step.step} attempt {attempt} failed: LLM determined error is not fixable by body changes — stopping retries")
+                break
 
             previous_error = error
             self._clear_generated_refs(step, context)

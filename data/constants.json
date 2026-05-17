@@ -3,7 +3,7 @@
     "value": "http://localhost:8080",
     "description": "Base URL целевого API."
   },
-  "user_id": {
+  "userId": {
     "value": "user-1",
     "description": "Существующий пользователь для позитивных сценариев."
   },

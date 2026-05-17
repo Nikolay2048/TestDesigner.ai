@@ -1,12 +1,23 @@
 llm:
-  provider: none       # none | ollama | openai
+  provider: ollama
   model: qwen2.5:14b-instruct
   base_url: http://localhost:11434
   temperature: 0
   api_key_env: OPENAI_API_KEY
+  think: false
+
+# Agent1 uses a larger model for better scenario card quality.
+# To switch to GPT-4o-mini: set provider: openai, model: gpt-4o-mini, api_key_env: OPENAI_API_KEY
+llm_agent1:
+  provider: ollama
+  model: qwen3:32b
+  base_url: http://localhost:11434
+  temperature: 0
+  api_key_env: OPENAI_API_KEY
+  think: true
 
 runtime:
-  max_attempts_per_step: 15
+  max_attempts_per_step: 20
   request_timeout_seconds: 30
   output_dir: output
 
