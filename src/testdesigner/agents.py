@@ -674,8 +674,8 @@ class DataGeneratorAgent:
         previous_error: Optional[str] = None,
     ) -> GeneratedVariable:
         logger.info("Agent3: generate %s", variable_name)
-        policy = policy_for(variable_name)
-        value = execute_policy(policy, context.values())
+        policy = policy_for(variable_name, previous_error)
+        value = execute_policy(policy, context.values(), previous_error)
         return GeneratedVariable(
             name=variable_name,
             generated_value=value,
@@ -683,7 +683,7 @@ class DataGeneratorAgent:
             generator_params=(source.generation_requires if source else {}) | ({"previous_error": previous_error} if previous_error else {}),
             reason=source.generation_goal if source else f"Needed for {variable_name}",
             overwrite_reason="Regenerated after failed attempt" if previous_error else None,
-            generator_function=policy.python_expr,
+            generator_function=policy.generator_function,
         )
 
 

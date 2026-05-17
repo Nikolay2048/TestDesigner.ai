@@ -13,4 +13,4 @@ runtime:
 paths:
   constants: data/constants.json
   openapi: data/openapi.yaml
-  scenario: data/scenario.md
+  scenario: data/scenarios/UC-001_create_and_cancel.md
