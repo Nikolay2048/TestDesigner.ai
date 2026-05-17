@@ -57,53 +57,64 @@ logger = logging.getLogger(__name__)
 
 PLANNER_PROMPT = """You are Agent 1. Convert a scenario description into a ScenarioCard JSON.
 
-━━━ STEP 1 — COUNT STEPS ━━━
-Count every "Endpoint:" line in the scenario text. Each line becomes exactly ONE ScenarioCard step.
-- Two "Endpoint:" lines under one business step → two ScenarioCard steps, sequential numbers.
-- Same endpoint (same method + path) in multiple business steps → ALL steps generated, never deduplicated.
+━━━ STEP 1 — COUNT STEPS (STRICT) ━━━
+Count every "Endpoint:" line in the scenario text. Output EXACTLY that many steps — no more, no fewer.
+- Two "Endpoint:" lines under one business step → two ScenarioCard steps.
+- Same endpoint in multiple business steps → ALL steps generated, never deduplicated.
   Example: POST /v1/bookings → 201 in step 2 AND POST /v1/bookings → 409 in step 3 = two separate steps.
+- Do NOT invent extra steps not present as "Endpoint:" lines.
+- Do NOT merge steps.
 
 ━━━ STEP 2 — ASSIGN PATHS ━━━
-For each step, find the matching entry in openapi.endpoints by reading its summary and description.
-Copy the "path" field VERBATIM. No abbreviations, no paraphrasing, no invented paths.
+For each step copy the "path" field from openapi.endpoints VERBATIM.
   ✓ "/v1/accidents/{accidentId}/claims/{claimId}/assessments"
-  ✗ "/accidents/claims/assessments"  ← wrong
-  ✗ "/v1/accidents/claims"           ← wrong
+  ✗ "/accidents/claims/assessments"  ← abbreviated — wrong
+  ✗ "/v1/accidents/claims"           ← truncated — wrong
 
 ━━━ STEP 3 — TEMPLATE SYNTAX (CRITICAL) ━━━
-Two different syntaxes — never mix them:
+Two syntaxes — never mix:
+  path string   → single braces:  "/v1/bookings/{bookingId}/cancel"
+  everywhere else → double braces: {"bookingId": "{{bookingId}}"}
+Every {param} in path must have a matching key in path_params with a {{variable}} value.
+NEVER write {{...}} inside the path string itself.
 
-  path string      → single braces for OpenAPI placeholders:
-                     "/v1/bookings/{bookingId}/cancel"
+━━━ STEP 4 — REQUEST BODY VALUES ━━━
+PRIORITY RULE — explicit scenario body:
+  If the scenario text shows an explicit JSON body for this step (inside a code block or indented block),
+  copy those field values VERBATIM:
+  - String literals like "user-blocked", "vehicle-nonexistent" → keep as-is (do NOT replace with {{userId}}).
+  - Template placeholders like {{vehicleId}}, {{startDate}} → keep as-is.
+  Do NOT replace literal values with {{constantName}} just because a constant with that name exists.
 
-  everywhere else  → double braces for runtime variables:
-                     path_params : {"bookingId": "{{bookingId}}"}
-                     request_body: {"userId": "{{user_id}}", "vehicleId": "{{vehicleId}}"}
-                     query_params: {"city": "{{city}}"}
+Only when the scenario does NOT provide an explicit body, infer it from the OpenAPI example using these rules:
 
-  Every {placeholder} in path must have a matching key in path_params with a {{variable}} value.
-  NEVER write {{...}} inside the path string itself.
+  Rule 1 — constant: look at the "constants" dict in the input.
+    If a constant exists whose value or name corresponds to what the scenario needs → use {{constantName}}.
+    Example: constants has "userId": "user-1" → write "userId": "{{userId}}" (never copy "user-1" literally).
 
-━━━ STEP 4 — REQUEST BODY ━━━
-- Use field names from the OpenAPI example (openapi.endpoints[].request_example), not from scenario text.
-- Use enum values stated in the scenario (e.g. role=CULPRIT, role=VICTIM), not the OpenAPI example default.
-- LITERAL values written in the scenario stay as plain strings — do NOT wrap in {{}}:
-    "userId": "user-blocked"
-    "startDate": "2020-01-01T00:00:00Z"
-    "vehicleId": "vehicle-nonexistent"
-- Values from previous responses or constants → {{variableName}}.
+  Rule 2 — extracted: value must come from a previous response → use {{variableName}}.
+    Example: vehicleId from step 1's response → "vehicleId": "{{vehicleId}}"
+
+  Rule 3 — generated: value must be computed at runtime (future dates, unique IDs) → use {{variableName}}.
+    Example: booking start date must be in the future → "startDate": "{{startDate}}"
+
+  Rule 4 — scenario literal: the scenario specifies a hardcoded test-specific value that is NOT in constants
+    and is NOT meant to be dynamic (e.g., "user-blocked", "vehicle-nonexistent", "non-existent-booking",
+    "2020-01-01T00:00:00Z"). Use the literal string exactly as written in the scenario.
+
+  NEVER invent values. NEVER copy OpenAPI example values (like "user-1", "vehicle-1", "2026-05-20T10:00:00Z")
+  as string literals — those are placeholders in the spec, not real test values.
+  Use enum values stated in the scenario (e.g. role=CULPRIT) instead of the OpenAPI default.
 
 ━━━ STEP 5 — PARTICIPANTS & VARIABLE NAMES ━━━
-When the same endpoint is called for different roles, give each participant a distinct variable name:
+When the same endpoint is called for different roles, use distinct variable names:
   culpritParticipantId  — step that adds CULPRIT
   victimParticipantId   — step that adds VICTIM
-Use those distinct names in all downstream path_params and request_body references.
 
 ━━━ STEP 6 — EXTRACTIONS & DATA FLOW ━━━
 - Add an extraction rule for every value a later step needs (IDs, tokens, etc.).
 - expression must be a valid JSONPath: "$.id", "$.bookingId", "$.assessmentId".
-- For steps with expected_status >= 400: the request is expected to FAIL.
-  Set required=false on all extract rules in that step.
+- For steps with expected_status >= 400: set required=false on all extract rules.
 - Do NOT add extraction rules for fields that no later step references.
 
 Return only valid JSON matching the ScenarioCard schema."""
@@ -270,8 +281,10 @@ class PlannerAgent:
         constants: Dict[str, Any],
         constant_descriptions: Dict[str, str],
     ) -> ScenarioCard:
-        card.constant_variables = {**constants, **card.constant_variables}
-        card.constant_descriptions = {**constant_descriptions, **card.constant_descriptions}
+        # system constants are the only source of truth — discard any LLM-invented
+        # constants (they are either wrong values or values that should be generated).
+        card.constant_variables = dict(constants)
+        card.constant_descriptions = dict(constant_descriptions)
         extracted: Dict[str, tuple[int, str]] = {}
         refs: Dict[str, set[str]] = {}
 
@@ -411,15 +424,32 @@ class PlannerAgent:
             if strip_prefix(candidate.path) == step_bare:
                 old = step.path
                 step.path = candidate.path
-                logger.info("Planner: repaired path %r → %r in step %d", old, step.path, step.step)
+                logger.info("Planner: repaired path %r -> %r in step %d", old, step.path, step.step)
                 return candidate
 
         return None
 
     def _repair_body_nested(self, step: TestStep, endpoint: EndpointInfo) -> None:
-        if not step.request_body or not isinstance(endpoint.request_example.json_body, dict):
+        if not isinstance(endpoint.request_example.json_body, dict):
             return
-        openapi_fields = set(endpoint.request_example.json_body.keys())
+        example = endpoint.request_example.json_body
+
+        # Build missing body from schema only for successful write steps.
+        # Error steps (4xx/5xx) need test-specific values that only the planner knows from the scenario.
+        if (
+            not step.request_body
+            and step.method.upper() in ("POST", "PUT", "PATCH")
+            and step.expected_status < 400
+        ):
+            step.request_body = {field: f"{{{{{field}}}}}" for field in example}
+            logger.info("Planner: built missing request body for step %d from schema", step.step)
+            return
+
+        if not step.request_body:
+            return
+
+        # Flatten nested fields that should be top-level.
+        openapi_fields = set(example.keys())
         for field in list(step.request_body.keys()):
             if field in openapi_fields:
                 continue
@@ -430,7 +460,7 @@ class PlannerAgent:
             if hits:
                 for k in hits:
                     step.request_body[k] = value[k]
-                    logger.info("Planner: flattened nested field %r.%r → %r in step %d", field, k, k, step.step)
+                    logger.info("Planner: flattened nested field %r.%r -> %r in step %d", field, k, k, step.step)
                 del step.request_body[field]
 
     def _fix_single_brace_refs(self, card: ScenarioCard) -> None:
@@ -861,7 +891,7 @@ class ExecutorAgent:
         tools = self._make_tools(step, context, base_url, endpoint_info, outcome)
         initial_msg = self._build_step_message(step, context, base_url)
 
-        agent = create_react_agent(self.llm, tools)
+        agent = create_react_agent(self.llm, tools, prompt=EXECUTOR_PROMPT)
         try:
             agent.invoke(
                 {"messages": [HumanMessage(content=initial_msg)]},
@@ -986,7 +1016,7 @@ class ExecutorAgent:
                 "response_body": response,
                 "error": err,
             })
-            logger.info("Executor tool: %s %s → %s (expected %s)", step.method, url, status, expected)
+            logger.info("Executor tool: %s %s -> %s (expected %s)", step.method, url, status, expected)
 
             return {
                 "status": status,
@@ -1063,16 +1093,26 @@ class ExecutorAgent:
         errors: List[str],
     ) -> Dict[str, Any]:
         """Try to find correct JSONPath when Agent 1's expression didn't match."""
+        from jsonpath_ng import parse as jsonpath_parse  # already a project dep
+
         failed_names = {err.split(":")[0].strip() for err in errors if ":" in err}
         for rule in step.extract:
             if rule.name not in failed_names:
                 continue
             candidates = find_jsonpath_candidates(response_body, rule.name)
-            if candidates:
-                old = rule.expression
-                rule.expression = candidates[0]
-                extracted[rule.name] = candidates[0]
-                logger.info("Executor: repaired extraction %s: %r → %r", rule.name, old, candidates[0])
+            if not candidates:
+                continue
+            old = rule.expression
+            for path in candidates:
+                try:
+                    matches = jsonpath_parse(path).find(response_body)
+                    if matches:
+                        rule.expression = path
+                        extracted[rule.name] = matches[0].value
+                        logger.info("Executor: repaired extraction %s: %r -> %r (value=%r)", rule.name, old, path, matches[0].value)
+                        break
+                except Exception:  # noqa: BLE001
+                    continue
         return extracted
 
     def _build_step_execution(self, step: TestStep, outcome: _StepOutcome) -> StepExecution:

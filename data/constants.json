@@ -7,6 +7,10 @@
     "value": "user-1",
     "description": "Существующий пользователь для позитивных сценариев."
   },
+  "user_id": {
+    "value": "user-1",
+    "description": "Alias for userId (snake_case variant used in scenario templates)."
+  },
   "city": {
     "value": "Moscow",
     "description": "Город, используемый для фильтрации доступных объектов в примерах."
