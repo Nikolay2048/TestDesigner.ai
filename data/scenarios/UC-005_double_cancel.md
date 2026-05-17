@@ -30,7 +30,7 @@ Vehicle Service	Обновляет статус автомобиля при от
 
 Пользователь выполняет запрос на получение доступных автомобилей в указанном городе.
 
-Метод и URL: GET /v1/vehicles/available?city={{city}}
+Endpoint: GET /v1/vehicles/available
 
 Ожидаемый HTTP-статус ответа: 200 OK.
 
@@ -45,7 +45,7 @@ Vehicle Service	Обновляет статус автомобиля при от
 
 Пользователь отправляет запрос на бронирование выбранного автомобиля.
 
-Метод и URL: POST /v1/bookings
+Endpoint: POST /v1/bookings
 
 Тело запроса:
 {
@@ -68,7 +68,7 @@ Vehicle Service	Обновляет статус автомобиля при от
 
 Пользователь отправляет запрос на отмену ранее созданного бронирования.
 
-Метод и URL: POST /v1/bookings/{{bookingId}}/cancel
+Endpoint: POST /v1/bookings/{bookingId}/cancel
 
 Тело запроса: отсутствует.
 
@@ -88,7 +88,7 @@ Vehicle Service	Обновляет статус автомобиля при от
 
 Пользователь повторно отправляет запрос на отмену того же бронирования, которое уже находится в статусе CANCELLED.
 
-Метод и URL: POST /v1/bookings/{{bookingId}}/cancel
+Endpoint: POST /v1/bookings/{bookingId}/cancel
 
 Тело запроса: отсутствует.
 
