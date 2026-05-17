@@ -20,7 +20,7 @@ class PostmanGenerator:
             "item": [
                 {
                     "name": report.scenario_name,
-                    "description": "\n".join(report.reasoning),
+                    "description": self._execution_description(report),
                     "item": [self._item_from_record(record) for record in report.successful_requests],
                 }
             ],
@@ -34,10 +34,10 @@ class PostmanGenerator:
                 {
                     "name": card.scenario_name,
                     "description": card.business_context,
-                    "item": [self._item_from_step(step) for step in card.steps],
+                    "item": [self._item_from_step(step, card) for step in card.steps],
                 }
             ],
-            "variable": [{"key": k, "value": self._string(v), "type": "any"} for k, v in card.constant_variables.items()],
+            "variable": self._plan_variables(card),
         }
 
     def environment(self, context: VariableContext, name: str = "Generated Environment") -> Dict[str, Any]:
@@ -55,12 +55,12 @@ class PostmanGenerator:
     def _info(name: str) -> Dict[str, Any]:
         return {"_postman_id": str(uuid.uuid4()), "name": name, "schema": POSTMAN_SCHEMA}
 
-    def _item_from_step(self, step: TestStep) -> Dict[str, Any]:
+    def _item_from_step(self, step: TestStep, card: ScenarioCard) -> Dict[str, Any]:
         return {
             "name": f"Step {step.step}: {step.name}",
             "request": self._request(step.method, self._path(step), step.headers, step.query_params, step.request_body),
             "event": [
-                {"listen": "prerequest", "script": {"type": "text/javascript", "exec": self._pre_request(step)}},
+                {"listen": "prerequest", "script": {"type": "text/javascript", "exec": self._pre_request(step, card)}},
                 {"listen": "test", "script": {"type": "text/javascript", "exec": self._tests(step)}},
             ],
             "response": [],
@@ -71,7 +71,7 @@ class PostmanGenerator:
         return {
             "name": f"Step {record.step}: {record.name}",
             "request": request,
-            "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": [f"pm.response.to.have.status({record.response_status});"]}}],
+            "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": self._record_tests(record)}}],
             "response": [
                 {
                     "name": "Successful response",
@@ -108,13 +108,15 @@ class PostmanGenerator:
             path = path.replace("{" + name + "}", str(value))
         return path
 
-    def _pre_request(self, step: TestStep) -> List[str]:
+    def _pre_request(self, step: TestStep, card: ScenarioCard) -> List[str]:
         lines: List[str] = []
         for ref in sorted(collect_refs([step.path, step.path_params, step.query_params, step.request_body])):
+            source = card.variable_sources.get(ref)
+            if source is None or source.kind != "generated":
+                continue
             policy = policy_for(ref)
-            if ref == policy.name or "date" in ref.lower():
-                lines.extend(policy.js_snippet.splitlines())
-                lines.append("")
+            lines.extend(policy.js_snippet.splitlines())
+            lines.append("")
         return lines
 
     def _tests(self, step: TestStep) -> List[str]:
@@ -128,6 +130,44 @@ class PostmanGenerator:
             elif assertion.operator == "eq":
                 lines.append(f"pm.expect(String({expr})).to.equal(String({json.dumps(assertion.expected, ensure_ascii=False)}));")
         return lines
+
+    def _record_tests(self, record) -> List[str]:
+        lines = [f"pm.response.to.have.status({record.response_status});", "const json = pm.response.json();"]
+        for rule in record.extract:
+            lines.append(f"pm.collectionVariables.set('{rule.name}', {self._jsonpath_to_js(rule.expression)});")
+        for assertion in record.assertions:
+            expr = self._jsonpath_to_js(assertion.path)
+            if assertion.operator == "not_null":
+                lines.append(f"pm.expect({expr}).to.not.be.null;")
+            elif assertion.operator == "eq":
+                lines.append(f"pm.expect(String({expr})).to.equal(String({json.dumps(assertion.expected, ensure_ascii=False)}));")
+        return lines
+
+    def _execution_description(self, report: ExecutionReport) -> str:
+        parts = ["Reasoning:", *report.reasoning]
+        if report.corrections:
+            parts.append("")
+            parts.append("Corrections:")
+            parts.extend(
+                f"Step {item.step}: {item.correction_type} {item.target}: {item.before!r} -> {item.after!r}. {item.reason}"
+                for item in report.corrections
+            )
+        return "\n".join(parts)
+
+    def _plan_variables(self, card: ScenarioCard) -> List[Dict[str, Any]]:
+        variables = [
+            {
+                "key": key,
+                "value": self._string(value),
+                "type": "any",
+                "description": card.constant_descriptions.get(key, ""),
+            }
+            for key, value in sorted(card.constant_variables.items())
+        ]
+        for name, source in sorted(card.variable_sources.items()):
+            if source.kind != "constant":
+                variables.append({"key": name, "value": "", "type": "any"})
+        return variables
 
     @staticmethod
     def _jsonpath_to_js(path: str) -> str:

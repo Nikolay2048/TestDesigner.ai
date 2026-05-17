@@ -214,6 +214,8 @@ class OpenApiParser:
         query: Dict[str, Any] = {}
         path_values: Dict[str, Any] = {}
         comments = [text for text in (operation.get("summary"), operation.get("description")) if text]
+        if isinstance(request_body, dict):
+            comments.extend(self._schema_comments(operation.get("requestBody"), prefix="body"))
         for p in params:
             if p.description:
                 comments.append(f"{p.location} {p.name}: {p.description}")
@@ -233,6 +235,28 @@ class OpenApiParser:
             json_body=request_body,
             comments=comments,
         )
+
+    def _schema_comments(self, request_body: Dict[str, Any] | None, prefix: str) -> List[str]:
+        if not request_body:
+            return []
+        content = request_body.get("content") or {}
+        media = content.get("application/json") or next(iter(content.values()), {})
+        schema = media.get("schema") if isinstance(media, dict) else None
+        comments: List[str] = []
+
+        def visit(node: Any, path: str) -> None:
+            if not isinstance(node, dict):
+                return
+            description = node.get("description") or node.get("title")
+            if description:
+                comments.append(f"{path}: {description}")
+            for name, prop in (node.get("properties") or {}).items():
+                visit(prop, f"{path}.{name}")
+            if node.get("items"):
+                visit(node["items"], f"{path}[]")
+
+        visit(schema, prefix)
+        return comments
 
     def _schema_example(self, schema: Dict[str, Any] | None, depth: int = 0) -> Any:
         if not schema or depth > 10:

@@ -9,6 +9,18 @@ from pydantic import BaseModel, ConfigDict, Field
 HttpMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
 VarKind = Literal["constant", "generated", "extracted"]
 AssertionOperator = Literal["eq", "ne", "exists", "not_null", "contains"]
+CorrectionType = Literal[
+    "request_body_patch",
+    "query_params_patch",
+    "headers_patch",
+    "path_patch",
+    "variable_source_change",
+    "generation_constraints_patch",
+    "extraction_expression_patch",
+    "expected_status_patch",
+    "assertion_patch",
+]
+CorrectionConfidence = Literal["low", "medium", "high"]
 
 
 class ConstantVariable(BaseModel):
@@ -42,10 +54,27 @@ class VariableSource(BaseModel):
     name: str
     kind: VarKind
     description: str = ""
+    locations: List[str] = Field(default_factory=list)
     source_step: Optional[int] = None
     extraction_expression: Optional[str] = None
     generation_goal: Optional[str] = None
     generation_requires: Dict[str, Any] = Field(default_factory=dict)
+    reason: Optional[str] = None
+
+
+class VariableBinding(BaseModel):
+    """Planned usage of one template variable in a concrete request location."""
+
+    name: str
+    source: VarKind
+    location: Literal["path", "path_param", "query", "header", "body"]
+    field_path: str
+    description: str = ""
+    generation_goal: Optional[str] = None
+    constraints: Dict[str, Any] = Field(default_factory=dict)
+    source_step: Optional[int] = None
+    extraction_expression: Optional[str] = None
+    reason: Optional[str] = None
 
 
 class VariableContext(BaseModel):
@@ -80,6 +109,7 @@ class ExtractionRule(BaseModel):
     expression: str
     required: bool = True
     description: str = ""
+    source: Literal["agent1", "agent2"] = "agent1"
 
 
 class TestStep(BaseModel):
@@ -97,8 +127,11 @@ class TestStep(BaseModel):
     path_params: Dict[str, Any] = Field(default_factory=dict)
     expected_status: int
     success_criteria: List[str] = Field(default_factory=list)
+    variable_bindings: List[VariableBinding] = Field(default_factory=list)
     extract: List[ExtractionRule] = Field(default_factory=list)
     assertions: List[Assertion] = Field(default_factory=list)
+    swagger_operation_id: Optional[str] = None
+    swagger_notes: Dict[str, Any] = Field(default_factory=dict)
     notes: str = ""
 
 
@@ -107,6 +140,7 @@ class ScenarioCard(BaseModel):
     business_context: str
     business_rules: List[BusinessRule] = Field(default_factory=list)
     constant_variables: Dict[str, Any] = Field(default_factory=dict)
+    constant_descriptions: Dict[str, str] = Field(default_factory=dict)
     variable_sources: Dict[str, VariableSource] = Field(default_factory=dict)
     steps: List[TestStep]
 
@@ -198,8 +232,22 @@ class RequestRecord(BaseModel):
     response_status: Optional[int] = None
     response_body: Any = None
     checks: List[CheckResult] = Field(default_factory=list)
+    extract: List[ExtractionRule] = Field(default_factory=list)
+    assertions: List[Assertion] = Field(default_factory=list)
     status: Literal["passed", "failed"] = "failed"
     error: Optional[str] = None
+
+
+class ScenarioCorrection(BaseModel):
+    step: int
+    correction_type: CorrectionType
+    target: str
+    before: Any = None
+    after: Any = None
+    reason: str
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+    confidence: CorrectionConfidence = "medium"
+    applied: bool = True
 
 
 class StepExecution(BaseModel):
@@ -219,4 +267,5 @@ class ExecutionReport(BaseModel):
     steps: List[StepExecution] = Field(default_factory=list)
     successful_requests: List[RequestRecord] = Field(default_factory=list)
     variables: VariableContext
+    corrections: List[ScenarioCorrection] = Field(default_factory=list)
     traces: List[ToolTrace] = Field(default_factory=list)

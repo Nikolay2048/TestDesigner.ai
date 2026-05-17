@@ -21,10 +21,12 @@ from src.testdesigner.models import (
     GeneratedVariable,
     OpenApiCatalog,
     RequestRecord,
+    ScenarioCorrection,
     ScenarioCard,
     StepExecution,
     TestStep,
     ToolTrace,
+    VariableBinding,
     VariableContext,
     VariableSource,
 )
@@ -33,6 +35,7 @@ from src.testdesigner.tools import (
     collect_refs,
     evaluate_assertions,
     extract_jsonpath,
+    find_jsonpath_candidates,
     resolve_templates,
     unresolved_refs,
 )
@@ -41,8 +44,12 @@ logger = logging.getLogger(__name__)
 
 AGENT1_SYSTEM_PROMPT = """You are Agent 1, a scenario analyst.
 Build a ScenarioCard from system-analysis text and an OpenAPI catalog.
-Use only listed endpoints. Mark constants, extracted variables, and generated
-variables explicitly. Return only valid JSON matching the ScenarioCard schema."""
+Use only listed endpoints. Build request templates from OpenAPI examples and
+the scenario text. Mark constants, extracted variables, and generated variables
+explicitly through variable_sources and per-step variable_bindings. For every
+variable needed by later requests, add extraction rules from earlier responses
+when the value should come from the server. Return only valid JSON matching the
+ScenarioCard schema."""
 
 AGENT2_SYSTEM_PROMPT = """You are Agent 2, an execution orchestrator.
 Execute steps until success or bounded attempts are exhausted. Resolve
@@ -67,23 +74,36 @@ class ScenarioBuilderAgent:
         self.config = config
         self.llm = create_llm(config.llm)
 
-    def build(self, scenario_text: str, catalog: OpenApiCatalog, constants: Dict[str, Any]) -> ScenarioCard:
+    def build(
+        self,
+        scenario_text: str,
+        catalog: OpenApiCatalog,
+        constants: Dict[str, Any],
+        constant_descriptions: Optional[Dict[str, str]] = None,
+    ) -> ScenarioCard:
         logger.info("Agent1: build scenario card")
+        constant_descriptions = constant_descriptions or {}
         if self.llm is not None:
             try:
                 structured = self.llm.with_structured_output(ScenarioCard)
                 card = structured.invoke(
                     [
                         ("system", AGENT1_SYSTEM_PROMPT),
-                        ("human", self._prompt(scenario_text, catalog, constants)),
+                        ("human", self._prompt(scenario_text, catalog, constants, constant_descriptions)),
                     ]
                 )
-                return self._normalize(card, catalog, constants)
+                return self._normalize(card, catalog, constants, constant_descriptions)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Agent1: LLM build failed, using generic deterministic fallback: %s", exc)
-        return self._deterministic_card(scenario_text, catalog, constants)
+        return self._deterministic_card(scenario_text, catalog, constants, constant_descriptions)
 
-    def _prompt(self, scenario_text: str, catalog: OpenApiCatalog, constants: Dict[str, Any]) -> str:
+    def _prompt(
+        self,
+        scenario_text: str,
+        catalog: OpenApiCatalog,
+        constants: Dict[str, Any],
+        constant_descriptions: Dict[str, str],
+    ) -> str:
         endpoints = [
             {
                 "method": e.method,
@@ -96,21 +116,35 @@ class ScenarioBuilderAgent:
             for e in catalog.endpoints
         ]
         return json.dumps(
-            {"constants": constants, "openapi": endpoints, "scenario_text": scenario_text},
+            {
+                "constants": {
+                    name: {"value": value, "description": constant_descriptions.get(name, "")}
+                    for name, value in constants.items()
+                },
+                "openapi": endpoints,
+                "scenario_text": scenario_text,
+            },
             ensure_ascii=False,
             indent=2,
         )
 
-    def _deterministic_card(self, scenario_text: str, catalog: OpenApiCatalog, constants: Dict[str, Any]) -> ScenarioCard:
+    def _deterministic_card(
+        self,
+        scenario_text: str,
+        catalog: OpenApiCatalog,
+        constants: Dict[str, Any],
+        constant_descriptions: Dict[str, str],
+    ) -> ScenarioCard:
         steps = self._generic_steps(scenario_text, catalog, constants)
         card = ScenarioCard(
             scenario_name=self._scenario_name(scenario_text),
             business_context=scenario_text[:3000],
             business_rules=self._infer_business_rules(scenario_text),
             constant_variables=constants,
+            constant_descriptions=constant_descriptions,
             steps=steps,
         )
-        return self._normalize(card, catalog, constants)
+        return self._normalize(card, catalog, constants, constant_descriptions)
 
     def _generic_steps(self, scenario_text: str, catalog: OpenApiCatalog, constants: Dict[str, Any]) -> List[TestStep]:
         explicit_steps = self._steps_from_explicit_http_blocks(scenario_text, catalog, constants)
@@ -382,6 +416,12 @@ class ScenarioBuilderAgent:
             success_criteria=[endpoint.summary or "request completed"],
             extract=self._infer_extractions(endpoint, status),
             assertions=self._infer_assertions(endpoint, status, scenario_text),
+            swagger_operation_id=endpoint.operation_id,
+            swagger_notes={
+                "summary": endpoint.summary,
+                "description": endpoint.description,
+                "comments": endpoint.request_example.comments,
+            },
         )
 
     @staticmethod
@@ -484,33 +524,126 @@ class ScenarioBuilderAgent:
             return response_statuses[0] if response_statuses else None
         return None
 
-    def _normalize(self, card: ScenarioCard, catalog: OpenApiCatalog, constants: Dict[str, Any]) -> ScenarioCard:
+    def _normalize(
+        self,
+        card: ScenarioCard,
+        catalog: OpenApiCatalog,
+        constants: Dict[str, Any],
+        constant_descriptions: Optional[Dict[str, str]] = None,
+    ) -> ScenarioCard:
+        constant_descriptions = constant_descriptions or {}
         card.constant_variables = {**constants, **card.constant_variables}
+        card.constant_descriptions = {**constant_descriptions, **card.constant_descriptions}
         extracted: Dict[str, tuple[int, str]] = {}
-        refs: set[str] = set()
+        refs: Dict[str, set[str]] = {}
         for step in card.steps:
             endpoint = catalog.find(step.method, step.path)
             if endpoint and step.headers is None:
                 step.headers = endpoint.request_example.headers
+            if endpoint:
+                step.swagger_operation_id = step.swagger_operation_id or endpoint.operation_id
+                step.swagger_notes = step.swagger_notes or {
+                    "summary": endpoint.summary,
+                    "description": endpoint.description,
+                    "comments": endpoint.request_example.comments,
+                }
             for param in re.findall(r"\{(\w+)\}", step.path):
                 step.path_params.setdefault(param, f"{{{{{param}}}}}")
             for rule in step.extract:
-                extracted[rule.name] = (step.step, rule.expression)
-            refs |= collect_refs([step.path, step.path_params, step.query_params, step.request_body, step.headers])
+                extracted.setdefault(rule.name, (step.step, rule.expression))
+            refs_for_step = self._refs_by_location(step)
+            for name, locations in refs_for_step.items():
+                refs.setdefault(name, set()).update(locations)
 
         card.variable_sources = {}
         for name in sorted(refs):
             if name in card.constant_variables:
-                card.variable_sources[name] = VariableSource(name=name, kind="constant", description="Loaded from constants JSON")
+                description = card.constant_descriptions.get(name) or "Loaded from constants JSON"
+                card.variable_sources[name] = VariableSource(
+                    name=name,
+                    kind="constant",
+                    description=description,
+                    locations=sorted(refs[name]),
+                    reason="Reference value supplied by constants file.",
+                )
             elif name in extracted:
                 source_step, expr = extracted[name]
-                card.variable_sources[name] = VariableSource(name=name, kind="extracted", source_step=source_step, extraction_expression=expr)
+                card.variable_sources[name] = VariableSource(
+                    name=name,
+                    kind="extracted",
+                    locations=sorted(refs[name]),
+                    source_step=source_step,
+                    extraction_expression=expr,
+                    reason="Variable is consumed by a later request and is available in a previous response.",
+                )
             else:
                 requires: Dict[str, Any] = {}
                 if "date" in name.lower():
                     requires = {"format": "iso-date-time", "must_be_future": True}
-                card.variable_sources[name] = VariableSource(name=name, kind="generated", generation_goal=f"Generate {name}", generation_requires=requires)
+                card.variable_sources[name] = VariableSource(
+                    name=name,
+                    kind="generated",
+                    locations=sorted(refs[name]),
+                    generation_goal=f"Generate valid value for {name}",
+                    generation_requires=requires,
+                    reason="No constant or prior response extraction is available.",
+                )
+        for step in card.steps:
+            step.variable_bindings = self._bindings_for_step(step, card.variable_sources)
         return card
+
+    @staticmethod
+    def _refs_by_location(step: TestStep) -> Dict[str, set[str]]:
+        refs: Dict[str, set[str]] = {}
+
+        def add(value: Any, location: str) -> None:
+            for ref in collect_refs(value):
+                refs.setdefault(ref, set()).add(location)
+
+        add(step.path, "path")
+        add(step.path_params, "path_param")
+        add(step.query_params, "query")
+        add(step.headers, "header")
+        add(step.request_body, "body")
+        return refs
+
+    @staticmethod
+    def _bindings_for_step(step: TestStep, sources: Dict[str, VariableSource]) -> List[VariableBinding]:
+        bindings: List[VariableBinding] = []
+
+        def visit(node: Any, location: str, field_path: str) -> None:
+            if isinstance(node, str):
+                for ref in collect_refs(node):
+                    source = sources.get(ref)
+                    if source is None:
+                        continue
+                    bindings.append(
+                        VariableBinding(
+                            name=ref,
+                            source=source.kind,
+                            location=location,  # type: ignore[arg-type]
+                            field_path=field_path,
+                            description=source.description,
+                            generation_goal=source.generation_goal,
+                            constraints=source.generation_requires,
+                            source_step=source.source_step,
+                            extraction_expression=source.extraction_expression,
+                            reason=source.reason,
+                        )
+                    )
+            elif isinstance(node, dict):
+                for key, value in node.items():
+                    visit(value, location, f"{field_path}.{key}" if field_path else str(key))
+            elif isinstance(node, list):
+                for idx, value in enumerate(node):
+                    visit(value, location, f"{field_path}[{idx}]")
+
+        visit(step.path, "path", "$path")
+        visit(step.path_params, "path_param", "$path_params")
+        visit(step.query_params, "query", "$query")
+        visit(step.headers, "header", "$headers")
+        visit(step.request_body, "body", "$body")
+        return bindings
 
     @staticmethod
     def _infer_business_rules(text: str) -> List[BusinessRule]:
@@ -570,17 +703,22 @@ class ExecutorAgent:
         attempts_limit = max_attempts or self.config.runtime.max_attempts_per_step
         context = VariableContext(
             constants={
-                name: ConstantVariable(name=name, value=value, description="Loaded from constants JSON")
+                name: ConstantVariable(
+                    name=name,
+                    value=value,
+                    description=card.constant_descriptions.get(name) or "Loaded from constants JSON",
+                )
                 for name, value in card.constant_variables.items()
             }
         )
         reasoning = [f"Loaded constants: {sorted(context.constants)}"]
         traces: List[ToolTrace] = []
+        corrections: List[ScenarioCorrection] = []
         step_reports: List[StepExecution] = []
         successful: List[RequestRecord] = []
 
         for step in card.steps:
-            report = self._execute_step(step, card, context, base_url, attempts_limit, reasoning, traces)
+            report = self._execute_step(step, card, context, base_url, attempts_limit, reasoning, traces, corrections)
             step_reports.append(report)
             if report.status == "passed" and report.final_request:
                 successful.append(report.final_request)
@@ -596,6 +734,7 @@ class ExecutorAgent:
             steps=step_reports,
             successful_requests=successful,
             variables=context,
+            corrections=corrections,
             traces=traces,
         )
 
@@ -608,6 +747,7 @@ class ExecutorAgent:
         attempts_limit: int,
         reasoning: List[str],
         traces: List[ToolTrace],
+        corrections: List[ScenarioCorrection],
     ) -> StepExecution:
         history: List[RequestRecord] = []
         previous_error: Optional[str] = None
@@ -648,6 +788,10 @@ class ExecutorAgent:
             extracted, extraction_errors = ({}, [])
             if all(check.passed for check in checks):
                 extracted, extraction_errors = extract_jsonpath(response_body, step.extract)
+                if extraction_errors:
+                    repaired = self._repair_extractions(step, response_body, extraction_errors, corrections, reasoning)
+                    if repaired:
+                        extracted, extraction_errors = extract_jsonpath(response_body, step.extract)
                 for rule in step.extract:
                     if rule.name in extracted:
                         old = context.extracted.get(rule.name)
@@ -678,6 +822,8 @@ class ExecutorAgent:
                 response_status=status_code,
                 response_body=response_body,
                 checks=checks,
+                extract=step.extract,
+                assertions=step.assertions,
                 status="passed" if passed else "failed",
                 error=error,
             )
@@ -701,3 +847,48 @@ class ExecutorAgent:
         refs = collect_refs([step.path, step.path_params, step.query_params, step.request_body, step.headers])
         for name in refs:
             context.generated.pop(name, None)
+
+    def _repair_extractions(
+        self,
+        step: TestStep,
+        response_body: Any,
+        extraction_errors: List[str],
+        corrections: List[ScenarioCorrection],
+        reasoning: List[str],
+    ) -> bool:
+        repaired = False
+        failed_names = {
+            error.split(":", 1)[0].strip()
+            for error in extraction_errors
+            if ":" in error
+        }
+        for rule in step.extract:
+            if rule.name not in failed_names:
+                continue
+            candidates = find_jsonpath_candidates(response_body, rule.name)
+            if not candidates:
+                continue
+            before = rule.expression
+            after = candidates[0]
+            if before == after:
+                continue
+            rule.expression = after
+            rule.source = "agent2"
+            correction = ScenarioCorrection(
+                step=step.step,
+                correction_type="extraction_expression_patch",
+                target=rule.name,
+                before=before,
+                after=after,
+                reason="Original extraction JSONPath did not match response; Agent 2 selected the closest response field for this variable.",
+                evidence={
+                    "extraction_errors": extraction_errors,
+                    "candidates": candidates[:5],
+                },
+                confidence="high" if after.lower().endswith("." + rule.name.lower()) else "medium",
+                applied=True,
+            )
+            corrections.append(correction)
+            reasoning.append(f"Step {step.step}: corrected extraction for {rule.name}: {before} -> {after}")
+            repaired = True
+        return repaired

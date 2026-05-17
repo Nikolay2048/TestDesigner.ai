@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 from src.testdesigner.agents import ExecutorAgent, ScenarioBuilderAgent
 from src.testdesigner.config import AppConfig
@@ -22,13 +23,13 @@ class Pipeline:
         out_dir = Path(self.config.runtime.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        constants = json.loads(constants_path.read_text(encoding="utf-8"))
+        constants, constant_descriptions = self._load_constants(constants_path)
         scenario_text = scenario_path.read_text(encoding="utf-8")
 
         catalog = OpenApiParser(openapi_path).parse()
         (out_dir / "openapi_catalog.json").write_text(catalog.model_dump_json(indent=2, by_alias=True), encoding="utf-8")
 
-        card = ScenarioBuilderAgent(self.config).build(scenario_text, catalog, constants)
+        card = ScenarioBuilderAgent(self.config).build(scenario_text, catalog, constants, constant_descriptions)
         (out_dir / "scenario_card.json").write_text(card.model_dump_json(indent=2), encoding="utf-8")
 
         postman = PostmanGenerator()
@@ -50,3 +51,17 @@ class Pipeline:
         (out_dir / "postman_environment.json").write_text(json.dumps(postman.environment(report.variables), ensure_ascii=False, indent=2), encoding="utf-8")
         logger.info("Pipeline: complete status=%s", report.status)
         return 0 if report.status == "passed" else 2
+
+    @staticmethod
+    def _load_constants(path: Path) -> tuple[dict[str, Any], dict[str, str]]:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        constants: dict[str, Any] = {}
+        descriptions: dict[str, str] = {}
+        for name, value in raw.items():
+            if isinstance(value, dict) and "value" in value:
+                constants[name] = value["value"]
+                descriptions[name] = str(value.get("description") or "")
+            else:
+                constants[name] = value
+                descriptions[name] = ""
+        return constants, descriptions

@@ -43,6 +43,18 @@ POLICIES: Dict[str, GeneratorPolicy] = {
         python_expr="'+79' + ''.join(random.choice(string.digits) for _ in range(9))",
         js_snippet="pm.collectionVariables.set('phone', '+79' + Math.floor(100000000 + Math.random()*900000000));",
     ),
+    "email": GeneratorPolicy(
+        name="email",
+        description="Synthetic unique email address.",
+        python_expr="'user_' + uuid.uuid4().hex[:10] + '@example.test'",
+        js_snippet="pm.collectionVariables.set('email', 'user_' + pm.variables.replaceIn('{{$guid}}').replace(/-/g, '').slice(0, 10) + '@example.test');",
+    ),
+    "amount": GeneratorPolicy(
+        name="amount",
+        description="Positive decimal amount.",
+        python_expr="round(random.uniform(10, 1000), 2)",
+        js_snippet="pm.collectionVariables.set('amount', Number((10 + Math.random()*990).toFixed(2)));",
+    ),
 }
 
 
@@ -52,12 +64,18 @@ def policy_for(variable_name: str) -> GeneratorPolicy:
     lowered = variable_name.lower()
     if "date" in lowered:
         return POLICIES["startDate"].model_copy(update={"name": variable_name})
+    if "email" in lowered:
+        return POLICIES["email"].model_copy(update={"name": variable_name})
+    if "phone" in lowered:
+        return POLICIES["phone"].model_copy(update={"name": variable_name})
+    if any(token in lowered for token in ("amount", "price", "sum", "total", "cost")):
+        return POLICIES["amount"].model_copy(update={"name": variable_name})
     if lowered.endswith("id"):
         return GeneratorPolicy(
             name=variable_name,
-            description="Synthetic id for negative or standalone test data.",
-            python_expr="'" + variable_name + "-' + uuid.uuid4().hex[:8]",
-            js_snippet=f"pm.collectionVariables.set('{variable_name}', '{variable_name}-' + pm.variables.replaceIn('{{$guid}}').slice(0, 8));",
+            description="Synthetic stable identifier for standalone or negative test data.",
+            python_expr="'" + variable_name + "-' + uuid.uuid4().hex[:12]",
+            js_snippet=f"pm.collectionVariables.set('{variable_name}', '{variable_name}-' + pm.variables.replaceIn('{{$guid}}').replace(/-/g, '').slice(0, 12));",
         )
     return GeneratorPolicy(
         name=variable_name,
