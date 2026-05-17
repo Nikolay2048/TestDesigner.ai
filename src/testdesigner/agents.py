@@ -172,7 +172,7 @@ class ScenarioBuilderAgent:
         catalog: OpenApiCatalog,
         constants: Dict[str, Any],
     ) -> List[TestStep]:
-        blocks = self._http_step_blocks(scenario_text)
+        blocks = self._endpoint_step_blocks(scenario_text) or self._http_step_blocks(scenario_text)
         if not blocks:
             return []
         steps: List[TestStep] = []
@@ -180,8 +180,12 @@ class ScenarioBuilderAgent:
         for block in blocks:
             candidates = [
                 endpoint for endpoint in catalog.endpoints
-                if endpoint.method == block["method"] and "/debug/" not in endpoint.path
+                if (block.get("method") is None or endpoint.method == block["method"]) and "/debug/" not in endpoint.path
             ]
+            if block.get("path"):
+                exact = [endpoint for endpoint in candidates if endpoint.path == block["path"]]
+                if exact:
+                    candidates = exact
             if not candidates:
                 continue
             endpoint = max(candidates, key=lambda item: self._endpoint_block_score(item, block["text"], block["expected_status"]))
@@ -199,6 +203,40 @@ class ScenarioBuilderAgent:
                 produced_ids.add(rule.name)
             steps.append(step)
         return steps
+
+    @staticmethod
+    def _endpoint_step_blocks(text: str) -> List[Dict[str, Any]]:
+        step_start = re.compile(r"(?im)^(?:#{1,6}\s*)?(?:Шаг|Step)\s*(?P<step>\d+)[^\n]*$")
+        endpoint_hint = re.compile(
+            r"(?im)^\s*(?:Endpoint|Эндпоинт|API|Запрос)\s*:\s*"
+            r"(?:(?P<method>GET|POST|PUT|PATCH|DELETE)\s+)?(?P<path>/[^\s`]+)\s*$"
+        )
+        blocks: List[Dict[str, Any]] = []
+        matches = list(step_start.finditer(text))
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+            section = text[match.start():end].strip()
+            hints = [
+                {
+                    "method": hint.group("method").upper() if hint.group("method") else None,
+                    "path": hint.group("path"),
+                }
+                for hint in endpoint_hint.finditer(section)
+            ]
+            if not hints:
+                continue
+            statuses = [int(item) for item in re.findall(r"\b(20\d|40\d|50\d)\b", section)]
+            for idx, hint in enumerate(hints):
+                blocks.append(
+                    {
+                        "step": int(match.group("step")),
+                        "method": hint["method"],
+                        "path": hint["path"],
+                        "expected_status": statuses[idx] if idx < len(statuses) else None,
+                        "text": section,
+                    }
+                )
+        return blocks
 
     @staticmethod
     def _http_step_blocks(text: str) -> List[Dict[str, Any]]:
