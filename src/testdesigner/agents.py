@@ -8,6 +8,8 @@ import re
 from dataclasses import dataclass, field as dc_field
 from typing import Any, Dict, List, Optional
 
+from jsonpath_ng import parse as jsonpath_parse
+
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool as lc_tool
 from langgraph.graph import END, StateGraph
@@ -302,6 +304,7 @@ class PlannerAgent:
                     "comments": endpoint.request_example.comments,
                 }
                 self._repair_body_nested(step, endpoint)
+                self._repair_extraction_paths(step, endpoint)
             # Ensure every path placeholder has a matching path_param entry.
             for param in re.findall(r"\{(\w+)\}", step.path):
                 step.path_params.setdefault(param, f"{{{{{param}}}}}")
@@ -462,6 +465,37 @@ class PlannerAgent:
                     step.request_body[k] = value[k]
                     logger.info("Planner: flattened nested field %r.%r -> %r in step %d", field, k, k, step.step)
                 del step.request_body[field]
+
+    def _repair_extraction_paths(self, step: TestStep, endpoint: EndpointInfo) -> None:
+        """Validate each extraction rule's JSONPath against the OpenAPI response example.
+        If the path doesn't resolve, replace it with the correct path from _id_paths.
+        """
+        from jsonpath_ng import parse as jsonpath_parse
+        for response in endpoint.responses:
+            if not response.status_code.startswith("2") or not isinstance(response.example, dict):
+                continue
+            id_paths = self._id_paths(response.example)
+            for rule in step.extract:
+                try:
+                    matches = jsonpath_parse(rule.expression).find(response.example)
+                    if matches:
+                        continue  # path works fine
+                except Exception:  # noqa: BLE001
+                    pass
+                # Path doesn't work — look up correct path by variable name
+                correct = id_paths.get(rule.name)
+                if correct is None:
+                    rule_lower = rule.name.lower()
+                    for field, path in id_paths.items():
+                        if rule_lower.endswith(field.lower()):
+                            correct = path
+                            break
+                if correct and correct != rule.expression:
+                    logger.info(
+                        "Planner: repaired extraction path %s: %r -> %r in step %d",
+                        rule.name, rule.expression, correct, step.step,
+                    )
+                    rule.expression = correct
 
     def _fix_single_brace_refs(self, card: ScenarioCard) -> None:
         _single_re = re.compile(r"^\{(\w+)\}$")
@@ -1093,8 +1127,6 @@ class ExecutorAgent:
         errors: List[str],
     ) -> Dict[str, Any]:
         """Try to find correct JSONPath when Agent 1's expression didn't match."""
-        from jsonpath_ng import parse as jsonpath_parse  # already a project dep
-
         failed_names = {err.split(":")[0].strip() for err in errors if ":" in err}
         for rule in step.extract:
             if rule.name not in failed_names:
@@ -1138,6 +1170,11 @@ class ExecutorAgent:
             ))
 
         status = "passed" if outcome.success else ("failed" if outcome.done else "skipped")
+        # Attach extraction rules (with runtime-repaired expressions) and assertions to the
+        # final record so the Postman collection generator can build correct test scripts.
+        if history and outcome.success:
+            history[-1].extract = list(step.extract)
+            history[-1].assertions = list(step.assertions)
         return StepExecution(
             step=step.step,
             name=step.name,
