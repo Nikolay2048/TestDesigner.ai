@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -15,68 +14,32 @@ class LlmConfig(BaseModel):
     model: str = "qwen2.5:14b-instruct"
     base_url: str = "http://localhost:11434"
     temperature: float = 0
+    context_window: int = 8192
     api_key_env: str = "OPENAI_API_KEY"
-    think: bool = False
 
 
 class RuntimeConfig(BaseModel):
-    max_attempts_per_step: int = 5
-    request_timeout_seconds: float = 30
     output_dir: str = "output"
+    request_timeout_seconds: float = 30
+    max_execution_rounds: int = 2
+    max_attempts_per_step: int = 1
 
 
-class PathsConfig(BaseModel):
+class PathConfig(BaseModel):
     constants: str = "data/constants.json"
     openapi: str = "data/openapi.yaml"
-    scenario: str = "data/scenario.md"
+    scenario: str = "data/scenarios/UC-001_create_and_cancel.md"
 
 
 class AppConfig(BaseModel):
-    llm: LlmConfig = Field(default_factory=LlmConfig)
-    llm_agent1: Optional[LlmConfig] = None
-    llm_agent2: Optional[LlmConfig] = None
-    llm_agent3: Optional[LlmConfig] = None
+    llm: LlmConfig = Field(default_factory=lambda: LlmConfig(provider="ollama"))
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
-    paths: PathsConfig = Field(default_factory=PathsConfig)
+    paths: PathConfig = Field(default_factory=PathConfig)
 
 
-def load_config(path: str | Path = "config.yaml") -> AppConfig:
+def load_config(path: str | Path) -> AppConfig:
     config_path = Path(path)
     if not config_path.exists():
         return AppConfig()
-    with open(config_path, encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh) or {}
-    raw = _expand_env(raw)
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     return AppConfig.model_validate(raw)
-
-
-def _expand_env(value):
-    if isinstance(value, str):
-        for key, env_value in os.environ.items():
-            value = value.replace("${" + key + "}", env_value)
-        return value
-    if isinstance(value, dict):
-        return {k: _expand_env(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_expand_env(v) for v in value]
-    return value
-
-
-def create_llm(config: LlmConfig):
-    if config.provider == "none":
-        return None
-    if config.provider == "ollama":
-        from langchain_ollama import ChatOllama  # type: ignore
-
-        kwargs: dict = {"model": config.model, "base_url": config.base_url, "temperature": config.temperature}
-        if config.think:
-            try:
-                return ChatOllama(think=True, **kwargs)
-            except TypeError:
-                pass
-        return ChatOllama(**kwargs)
-    if config.provider == "openai":
-        from langchain_openai import ChatOpenAI  # type: ignore
-
-        return ChatOpenAI(model=config.model, api_key=os.environ.get(config.api_key_env), temperature=config.temperature)
-    raise ValueError(f"Unsupported LLM provider: {config.provider}")

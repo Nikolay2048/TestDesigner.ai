@@ -1,38 +1,52 @@
 # TestDesignerAI
 
-Новая мультиагентная система для генерации Postman коллекций из постановок системного анализа и OpenAPI.
+REST-only LLM agent system for generating, executing, repairing, and exporting API test scenarios.
 
-## Состав
+Input:
 
-- `src/mock.py` - сохраненный mock server.
-- `src/testdesigner/openapi_parser.py` - OpenAPI parser с разрешением `$ref`.
-- `src/testdesigner/agents.py` - Agent 1, Agent 2, Agent 3.
-- `src/testdesigner/tools.py` - deterministic tools для HTTP, шаблонов, JSONPath и проверок.
-- `src/testdesigner/postman.py` - генерация Postman collection/environment.
-- `src/testdesigner/pipeline.py` - полный pipeline.
+- system-analysis scenario markdown;
+- Swagger/OpenAPI specification;
+- constants JSON.
 
-## Запуск
+Output:
+
+- normalized scenario card with executable REST steps;
+- agent action log;
+- Postman collection;
+- optional execution report and Postman environment.
+
+## Agents
+
+- `ScenarioParser` extracts raw scenario facts from non-structured system-analysis text.
+- `OpenApiReader` resolves local and external `$ref` links and builds a compact REST contract.
+- `PlannerAgent` asks the LLM to create a scenario card from the scenario text and OpenAPI contract.
+- `DataAgent` asks the LLM to generate missing values, then stores constants, generated values, and extracted response values.
+- `ExecutorAgent` executes REST requests and checks only HTTP status plus required response extractions.
+- `CriticAgent` asks the LLM to repair failed steps from server responses and execution traces.
+- `RestTestDesigner` orchestrates planning, execution rounds, repair, and artifact writing.
+
+The generated Postman collection contains collection variables, request bodies, status checks, and response extraction scripts for chained requests. Business assertions are intentionally not generated yet.
+
+## LLM
+
+Default configuration uses Ollama:
+
+```powershell
+ollama pull qwen2.5:14b-instruct
+ollama serve
+```
+
+For a 16 GB GPU, start with `qwen2.5:14b-instruct`. If it is too slow, use `qwen2.5:7b-instruct` and update `config.yaml`.
+
+## Run
 
 ```powershell
 pip install -r requirements.txt
+ollama serve
 python main.py --plan-only
 python src/mock.py
 python main.py
+python main.py --scenario .\data\scenarios\UC-011_dtp_duplicate_payment.md
 ```
 
-Артефакты пишутся в `output/`:
-
-- `openapi_catalog.json`
-- `scenario_card.json`
-- `execution_report.json`
-- `postman_collection_plan.json`
-- `postman_collection_execution.json`
-- `postman_environment.json`
-
-## Архитектура
-
-Agent 1 строит сценарную карточку. Если LLM настроен, используется structured output; если нет, работает deterministic fallback для типовых сценариев из тестовых данных.
-
-Agent 2 исполняет сценарий итеративно: подставляет переменные, вызывает Agent 3, делает REST-запросы, проверяет статус и assertions, извлекает JSONPath-переменные и повторяет шаг до лимита попыток.
-
-Agent 3 генерирует данные по policy registry. Для дат, id, requestId и телефонов есть встроенные политики. Каждая generated variable сохраняет значение, имя генератора, параметры и код policy.
+Artifacts are written to `output/<scenario>/`.

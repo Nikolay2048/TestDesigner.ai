@@ -1,17 +1,12 @@
-"""Logging setup for CLI and agents."""
+"""Logging setup."""
 
 from __future__ import annotations
 
 import logging
 
-from rich.logging import RichHandler
 
-
-def setup_logging(level: str = "INFO") -> None:
+def setup_logging(verbose: bool = False) -> None:
     logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(message)s",
-        datefmt="[%X]",
-        handlers=[RichHandler(rich_tracebacks=True, markup=False)],
-        force=True,
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )

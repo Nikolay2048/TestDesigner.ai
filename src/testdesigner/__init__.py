@@ -1,5 +1,5 @@
-"""TestDesignerAI multi-agent API test designer."""
+"""REST API test designer agent system."""
 
 __all__ = ["__version__"]
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
