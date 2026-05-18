@@ -201,7 +201,9 @@ class PlannerAgent:
         available = {int(response.status_code) for response in endpoint.responses if response.status_code.isdigit()}
         text = re.split(r"\n\s*Шаг\s+\d+", text, maxsplit=1)[0]
         lowered = text.lower()
-        if any(token in lowered for token in ("дубл", "повтор", "уже существует", "already")) and 409 in available:
+        if "успеш" in lowered:
+            return None
+        if any(token in lowered for token in ("дубл", "уже существует", "already")) and 409 in available:
             return 409
         if any(token in lowered for token in ("несуществ", "не найден", "not found")) and 404 in available:
             return 404
@@ -292,7 +294,7 @@ class PlannerAgent:
             item.setdefault("query_params", {})
             item.setdefault("path_params", {})
             item.setdefault("extract", [])
-            item.setdefault("assertions", [])
+            item["assertions"] = []
 
     def _normalize(
         self,
