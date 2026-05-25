@@ -87,57 +87,40 @@ def execute_rest_request(
         headers: Optional[Dict[str, str]] = None,
         query_params: Optional[Dict[str, Any]] = None,
         request_body: Optional[Dict[str, Any]] = None,
-        timeout_seconds: int = 15,
 ) -> Dict[str, Any]:
     """
 Execute REST API request.
 
-This tool automatically resolves all {{ variables }} using execution context before sending request.
-Do not manually replace {{ variables }} before calling this tool.
+Args:
+    method: HTTP method (GET, POST, PUT, PATCH, DELETE).
+    url: Full target request URL.
+    headers: Optional HTTP headers.
+    query_params: Optional query string parameters.
+    request_body: Optional JSON request body.
 
-You may pass templates in:
-    - url
-    - headers
-    - query_params
-    - request_body
+The tool sends a single HTTP request and returns:
+- HTTP status code
+- Parsed JSON response if available
+- Raw response text for non-JSON responses
+- Response headers
+- Request execution error if request failed
 
-This tool only executes request.
-Do not validate response here.
+Rules:
+- Use GET requests without request_body unless API explicitly supports it.
+- Use request_body only for POST, PUT, or PATCH requests.
+- Always analyze returned status_code before continuing scenario execution.
+- If response_json is not null, use it for assertions and variable extraction.
+- If error is not null, request execution failed before receiving response.
 
- Example request body:
-    {
-      "vehicleId": "{{ availableVehicleId }}",
-      "startDate": "{{ startDate }}"
-    }
-
-Return:
-- status_code
-- response_json
-- response_text
-- response_headers
-- error
+Returns:
+{
+    "status_code": int | None,
+    "response_json": dict | list | None,
+    "response_text": str | None,
+    "response_headers": dict,
+    "error": str | None
+}
 """
-    try:
-        resolved_url = _resolve_templates(url, context)
-        resolved_headers = _resolve_templates(headers, context)
-        resolved_query_params = _resolve_templates(query_params, context)
-        resolved_request_body = _resolve_templates(request_body, context)
-
-    except Exception as exc:
-        return {
-            "request": {
-                "method": method,
-                "url": url,
-                "headers": headers,
-                "query_params": query_params,
-                "request_body": request_body,
-            },
-            "status_code": None,
-            "response_json": None,
-            "response_text": None,
-            "response_headers": {},
-            "error": f"Template resolution failed: {exc}",
-        }
     try:
         response = requests.request(
             method=method,
@@ -145,7 +128,6 @@ Return:
             headers=headers,
             params=query_params,
             json=request_body,
-            timeout=timeout_seconds,
         )
 
         try:
@@ -162,7 +144,6 @@ Return:
             "response_headers": dict(response.headers),
             "error": None,
         }
-
     except requests.RequestException as exc:
         return {
             "status_code": None,
@@ -183,9 +164,6 @@ def extract_response_value(response_json: Any, extraction_expression: str) -> Di
 
     Example:
     items[0].vehicleId
-
-    Expected result:
-    "vehicle-1"
 
     Use extracted values in next scenario steps.
 
@@ -491,8 +469,13 @@ def validate_assertions(assertions: List[str], response_json: Any) -> Dict[str, 
 #     }
 
 
+EXECUTOR_TOOLS = [
+    execute_rest_request,
+    extract_response_value
+]
+
 SCENARIO_STABILIZATION_TOOLS = [
-    resolve_templates,
+    # resolve_templates,
     execute_rest_request,
     extract_response_value,
     save_extracted_variable_to_context,

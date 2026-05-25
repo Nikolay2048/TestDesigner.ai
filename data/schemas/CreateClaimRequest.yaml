@@ -1,0 +1,10 @@
+type: object
+properties:
+  claimantParticipantId:
+    type: string
+    example: "participant-2"
+  claimedAmount:
+    type: number
+    format: double
+    example: 85000.0
+required: [claimantParticipantId]

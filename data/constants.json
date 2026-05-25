@@ -1,0 +1,38 @@
+{
+  "base_url": {
+    "value": "http://localhost:8080",
+    "description": "Base URL целевого API."
+  },
+  "userId": {
+    "value": "user-1",
+    "description": "Существующий пользователь для позитивных сценариев."
+  },
+  "user_id": {
+    "value": "user-1",
+    "description": "Alias for userId (snake_case variant used in scenario templates)."
+  },
+  "city": {
+    "value": "Moscow",
+    "description": "Город, используемый для фильтрации доступных объектов в примерах."
+  },
+  "booking_duration_days": {
+    "value": 1,
+    "description": "Типовая длительность бронирования в днях."
+  },
+  "country_codes": {
+    "value": [
+      "643",
+      "124",
+      "431"
+    ],
+    "description": "Справочный список допустимых кодов стран для сценариев, где требуется страна."
+  },
+  "regions": {
+    "value": [
+      39,
+      32,
+      54
+    ],
+    "description": "Справочный список допустимых регионов для сценариев, где требуется регион."
+  }
+}

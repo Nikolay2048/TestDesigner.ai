@@ -1,0 +1,19 @@
+type: object
+properties:
+  licensePlate:
+    type: string
+    example: "А123ВС77"
+  brand:
+    type: string
+    example: "Toyota"
+  model:
+    type: string
+    example: "Camry"
+  damageDescription:
+    type: string
+    example: "Повреждён передний бампер"
+  damageAmount:
+    type: number
+    format: double
+    example: 45000.0
+required: [licensePlate, brand, model]

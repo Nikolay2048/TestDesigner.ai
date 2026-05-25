@@ -1,0 +1,9 @@
+type: object
+properties:
+  claimedAmount:
+    type: number
+    format: double
+    example: 85000.0
+  description:
+    type: string
+    example: "Уточнённая сумма после оценки"

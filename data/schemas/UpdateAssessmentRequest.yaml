@@ -1,0 +1,13 @@
+type: object
+properties:
+  assessedAmount:
+    type: number
+    format: double
+    example: 78500.0
+  report:
+    type: string
+    example: "Задний бампер деформирован, замена боковой панели"
+  status:
+    type: string
+    enum: [SCHEDULED, IN_PROGRESS, COMPLETED]
+    example: "COMPLETED"

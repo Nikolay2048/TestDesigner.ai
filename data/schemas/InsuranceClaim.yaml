@@ -1,0 +1,27 @@
+type: object
+properties:
+  claimId:
+    type: string
+    example: "claim-1"
+  accidentId:
+    type: string
+    example: "accident-1"
+  claimantParticipantId:
+    type: string
+    example: "participant-2"
+  status:
+    type: string
+    enum: [DRAFT, SUBMITTED, UNDER_REVIEW, APPROVED, REJECTED, PAID]
+    example: "DRAFT"
+  claimedAmount:
+    type: number
+    format: double
+    example: 0.0
+  approvedAmount:
+    type: number
+    format: double
+    example: 0.0
+  rejectionReason:
+    type: string
+    example: null
+required: [claimId, accidentId, claimantParticipantId, status]
