@@ -15,9 +15,12 @@ import requests as http
 
 from src.config import CONFIG
 from src.executor import execute_step
+from src.logger import get_logger
 from src.models.flow import ScenarioStep, VariableBinding, VarSource
 from src.models.test_design import TestCase
 from src.state import GraphState
+
+log = get_logger("executor.run_all")
 
 
 def _reset_mock_server(base_url: str) -> None:
@@ -93,9 +96,9 @@ def executor_run_all(state: GraphState) -> dict:
                 })
                 setup_failed = True
                 break
-            log = execute_step(setup_step, ep, step_context, generated_cache, CONFIG.env_vars, CONFIG.base_url)
-            steps_log.append(log)
-            if not log["passed"]:
+            step_result = execute_step(setup_step, ep, step_context, generated_cache, CONFIG.env_vars, CONFIG.base_url)
+            steps_log.append(step_result)
+            if not step_result["passed"]:
                 setup_failed = True
                 break
 
@@ -143,11 +146,11 @@ def executor_run_all(state: GraphState) -> dict:
             inputs=tc.modified_inputs,
             produces=[],
         )
-        log = execute_step(target_step, ep, step_context, generated_cache, CONFIG.env_vars, CONFIG.base_url)
-        steps_log.append(log)
+        step_result = execute_step(target_step, ep, step_context, generated_cache, CONFIG.env_vars, CONFIG.base_url)
+        steps_log.append(step_result)
 
         # 3. Проверка assertions
-        actual_status = log.get("status_code")
+        actual_status = step_result.get("status_code")
         passed = _check_assertions(tc.assertions, actual_status)
         if passed:
             passed_count += 1
@@ -163,8 +166,13 @@ def executor_run_all(state: GraphState) -> dict:
         })
 
     total = len(results)
-    print(
-        f"[executor_run_all] {total} cases: "
-        f"{passed_count} passed, {total - passed_count} failed"
-    )
+    failed_count = total - passed_count
+    log.info("Phase 2 complete: %d/%d passed, %d failed", passed_count, total, failed_count)
+    for r in results:
+        if not r.get("passed"):
+            log.warning("  FAIL [%s] %s | actual=%s exp=%s",
+                        r.get("technique", "?"), r.get("title", "?"),
+                        r.get("actual_status"), r.get("expected_status"))
+        else:
+            log.debug("  PASS [%s] %s", r.get("technique", "?"), r.get("title", "?"))
     return {"exec_results": results, "trace": ["executor_run_all"]}

@@ -19,6 +19,7 @@ Diagnosis — определяет природу каждого падения/
 
 from typing import Any
 
+import jsonschema
 from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -99,13 +100,33 @@ def _layer1_check(
     original_log: dict,
     fixes: list[dict],
     constraints: dict,
+    request_schema: dict | None = None,
 ) -> tuple[DiagnosisCategory, float, list[str]]:
     """
-    Проверяет исходные значения (до фикса) против constraints.
+    Слой 1 — двойная проверка валидности исходных данных:
+
+    1. JSON Schema валидация тела запроса через jsonschema (Принцип CLAUDE.md §8).
+       Если тело не прошло схему → TEST_DATA_ISSUE.
+    2. Constraint-проверка отдельных полей (enum/min/max/maxLength).
+       Запасной вариант когда request_schema недоступна.
+
     Возвращает (category, confidence, evidence).
     """
     evidence: list[str] = []
+    body = original_log.get("request_body") or {}
 
+    # ── Слой 1a: полная валидация request_schema через jsonschema ─────────────
+    if request_schema and body:
+        try:
+            jsonschema.validate(instance=body, schema=request_schema)
+        except jsonschema.ValidationError as e:
+            # Данные не прошли схему — нормальная стабилизация данных
+            evidence.append(f"jsonschema violation: {e.message} (path: {list(e.absolute_path)})")
+            return DiagnosisCategory.TEST_DATA_ISSUE, 0.95, evidence
+        except jsonschema.SchemaError:
+            pass  # некорректная схема — пропускаем, идём к constraints
+
+    # ── Слой 1b: constraint-проверка по зафиксированным полям ─────────────────
     for fix in fixes:
         name = fix.get("name", "")
         original_value = _get_value_from_log(original_log, name)
@@ -127,14 +148,10 @@ def _layer1_check(
         try:
             val_num = float(str(original_value))
             if "minimum" in c and val_num < c["minimum"]:
-                evidence.append(
-                    f"{name}={original_value} < minimum {c['minimum']}"
-                )
+                evidence.append(f"{name}={original_value} < minimum {c['minimum']}")
                 return DiagnosisCategory.TEST_DATA_ISSUE, 0.9, evidence
             if "maximum" in c and val_num > c["maximum"]:
-                evidence.append(
-                    f"{name}={original_value} > maximum {c['maximum']}"
-                )
+                evidence.append(f"{name}={original_value} > maximum {c['maximum']}")
                 return DiagnosisCategory.TEST_DATA_ISSUE, 0.9, evidence
         except (ValueError, TypeError):
             pass
@@ -248,9 +265,10 @@ def diagnosis(state: GraphState) -> dict:
                 for f in fixes
             }
 
-            # Layer 1 — дешёвый constraint-check
+            # Layer 1 — jsonschema + constraint-check (Принцип CLAUDE.md §8)
+            request_schema = ep.get("request_schema")
             category, confidence, evidence = _layer1_check(
-                original_log, fixes, constraints
+                original_log, fixes, constraints, request_schema
             )
 
             reasoning = stab_entry.get("reasoning", "")

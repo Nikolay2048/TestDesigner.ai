@@ -15,9 +15,12 @@ from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
 
 from src.config import CONFIG
+from src.logger import get_logger
 from src.llm import create_llm
-from src.models.flow import FlowCard, ScenarioStep, VariableBinding
+from src.models.flow import FlowCard, ScenarioStep, VariableBinding, VarSource
 from src.state import GraphState
+
+log = get_logger("scenario_analyst")
 
 MAX_RETRIES = 3
 
@@ -38,6 +41,7 @@ RULES:
 2. Copy each operation_id EXACTLY from the VALID OPERATIONS list — letter for letter.
 3. Do NOT use HTTP methods (GET/POST), paths (/api/v1/...), or invented names.
 4. Return only the names from the list, nothing else.
+5. Do NOT repeat the same operation_id more than once unless the scenario explicitly calls the same endpoint twice (e.g. double-confirmation test).
 """
 
 HUMAN_SELECT = """\
@@ -87,11 +91,11 @@ Fill in request parameters for ONE API step in a test scenario.
   "header.<name>"   — HTTP request header (e.g. "header.Authorization")
 
 == AUTHORIZATION RULE ==
-If the endpoint has a required "Authorization" header parameter:
+ONLY include Authorization if the endpoint spec explicitly lists it as a required header parameter.
+Do NOT add Authorization to endpoints that don't have it in their spec.
+When Authorization IS required:
   - If an env var provides a token (e.g. sellerToken, buyerToken, authToken): use source="env", value=<token_var_name>, target_location="header.Authorization"
   - If a previous step produced a token ($.token from login): use source="from_step", source_ref=<login_step_id>, source_field="$.token", target_location="header.Authorization"
-  ALWAYS include Authorization in inputs when the spec lists it as required.
-  DO NOT skip Authorization — it is a required header, not optional metadata.
 
 == RULES ==
 1. Cover ALL required fields from the endpoint spec — including required headers.
@@ -151,6 +155,10 @@ def _constraint_hint(c: dict) -> str:
 def _endpoint_spec_text(ep: dict) -> str:
     """Формат включает target_location явно — модель просто копирует."""
     lines = [f"{ep['method']} {ep['path']}", ""]
+
+    if ep.get("requires_auth"):
+        lines.append("REQUIRED header: Authorization  target_location=\"header.Authorization\"")
+        lines.append("")
 
     if ep.get("path_params"):
         lines.append("PATH parameters (use target_location='path.<name>'):")
@@ -243,11 +251,11 @@ def scenario_analyst(state: GraphState) -> dict:
             if invalid:
                 raise ValueError(f"invalid operation_ids {invalid}. Valid: {sorted(valid_op_ids)}")
             selected_ids = selection.ordered_operation_ids
-            print(f"[scenario_analyst] Phase1 OK (attempt {attempt}): {selected_ids}")
+            log.info("Phase1 OK (attempt %d): %s", attempt, selected_ids)
             break
         except Exception as e:
             last_error = e
-            print(f"[scenario_analyst] Phase1 attempt {attempt} failed: {e}")
+            log.warning("Phase1 attempt %d failed: %s", attempt, e)
     else:
         return {
             "flow_card": {},
@@ -280,6 +288,40 @@ def scenario_analyst(state: GraphState) -> dict:
                     "previous_context": _previous_context_text(steps, ep_map),
                 })
                 # Принцип 3.5: Python форсит инварианты после LLM
+
+                # Авто-ремонт Authorization (Принцип 3.5 — инварианты в коде).
+                # Случаи когда модель ошибается с токеном:
+                #   1. FROM_STEP без source_ref/source_field (модель забыла ссылку на шаг логина)
+                #   2. ENV с несуществующим ключом (модель указала устаревший/удалённый env var)
+                # В обоих случаях: берём токен из ближайшего предыдущего шага с $.token в produces.
+                token_step = next(
+                    (s for s in reversed(steps) if any("token" in p.lower() for p in s.produces)),
+                    None,
+                )
+                repaired = []
+                for inp in step_inputs.inputs:
+                    is_auth = (inp.target_location or "").lower() == "header.authorization"
+                    needs_repair = False
+                    if is_auth:
+                        if inp.source == VarSource.FROM_STEP and (not inp.source_ref or not inp.source_field):
+                            needs_repair = True
+                        elif inp.source == VarSource.ENV and inp.value and inp.value not in CONFIG.env_vars:
+                            needs_repair = True
+                    if needs_repair and token_step is not None:
+                        token_field = next(
+                            (p for p in token_step.produces if "token" in p.lower()), "$.token"
+                        )
+                        inp = inp.model_copy(update={
+                            "source": VarSource.FROM_STEP,
+                            "source_ref": token_step.step_id,
+                            "source_field": token_field,
+                            "value": None,
+                        })
+                        log.info("Auto-repaired Authorization → from_step %s %s",
+                                 token_step.step_id, token_field)
+                    repaired.append(inp)
+                step_inputs = StepInputs(inputs=repaired, produces=step_inputs.produces)
+
                 no_location = [inp.name for inp in step_inputs.inputs if not inp.target_location]
                 if no_location:
                     raise ValueError(f"{step_id}: missing target_location: {no_location}")
@@ -292,12 +334,16 @@ def scenario_analyst(state: GraphState) -> dict:
                     raise ValueError(
                         f"{step_id}: from_step inputs missing source_ref/source_field: {broken_ref}"
                     )
-                print(f"[scenario_analyst] Phase2 {step_id} OK (attempt {attempt}): "
-                      f"{[inp.name for inp in step_inputs.inputs]}")
+                log.info("Phase2 %s OK (attempt %d): %s",
+                         step_id, attempt, [inp.name for inp in step_inputs.inputs])
+                for inp in step_inputs.inputs:
+                    log.debug("  %s: source=%s loc=%s val=%s",
+                              inp.name, inp.source.value, inp.target_location,
+                              inp.value or inp.generator or inp.source_field)
                 break
             except Exception as e:
                 last_error = e
-                print(f"[scenario_analyst] Phase2 {step_id} attempt {attempt} failed: {e}")
+                log.warning("Phase2 %s attempt %d failed: %s", step_id, attempt, e)
         else:
             return {
                 "flow_card": {},
@@ -320,7 +366,7 @@ def scenario_analyst(state: GraphState) -> dict:
         steps=steps,
     )
 
-    print(f"[scenario_analyst] OK: {len(steps)} steps -> {[s.operation_id for s in steps]}")
+    log.info("FlowCard built: %d steps -> %s", len(steps), [s.operation_id for s in steps])
     return {
         "flow_card": flow_card.model_dump(),
         "trace": ["scenario_analyst"],

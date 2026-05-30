@@ -13,62 +13,49 @@ Multi-scenario runner.
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
+from src.artifacts import (
+    export_allure_results,
+    export_combined_coverage,
+    export_coverage_report,
+    export_defect_report,
+    export_execution_report,
+    export_stabilization_trace,
+    export_test_cases_csv,
+    export_test_cases_full,
+    export_test_plan,
+)
 from src.collection_builder import export_collection
-from src.config import CONFIG
+from src.config import CONFIG, load_domain_config
 from src.graph import build_graph
+from src.logger import setup_logging
 
-# ── Конфигурация окружения ────────────────────────────────────────────────────
+# ── Конфигурация: читается из constants.json ──────────────────────────────────
+domain_cfg = load_domain_config("carsharing")
 
-CONFIG.base_url = "http://localhost:8000"
-CONFIG.env_vars = {
-    "customerId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-    "paymentId":  "99999999-9999-9999-9999-999999999999",
-}
-
-# ── Группы сценариев ─────────────────────────────────────────────────────────
-# Каждая группа - один FlowCard. Файлы читаются в порядке объявления.
-# mock_supported=True -> доступны реальные exec_results (mock поддерживает эту группу)
-
+# Группы берутся из constants.json
+_all_scenarios: dict = domain_cfg.get("scenarios", {})
 SCENARIO_GROUPS = [
     {
-        "name": "UC_001-003: Search -> Draft -> Confirm",
-        "collection_name": "Carsharing - Booking Flow",
+        "name": g["name"],
+        "collection_name": g["collection_name"],
         "files": [
-            "UC_001_SearchAvailableCars",
-            "UC_002_CreateReservationDraft",
-            "UC_003_ConfirmReservation",
+            f
+            for uc in g.get("ucs", [])
+            for f in _all_scenarios.get(uc, {}).get("files", [])
         ],
-        "mock_supported": True,
-    },
-    {
-        "name": "UC_001-003+008: Search -> Draft -> Confirm -> Cancel",
-        "collection_name": "Carsharing - Booking + Cancellation",
-        "files": [
-            "UC_001_SearchAvailableCars",
-            "UC_002_CreateReservationDraft",
-            "UC_003_ConfirmReservation",
-            "UC_008_CancelReservation",
-        ],
-        "mock_supported": True,
-    },
-    # Добавить когда mock расширится:
-    # {
-    #     "name": "UC_004: Start Rental",
-    #     "collection_name": "Carsharing - Rental Start",
-    #     "files": [
-    #         "UC_001_SearchAvailableCars",
-    #         "UC_002_CreateReservationDraft",
-    #         "UC_003_ConfirmReservation",
-    #         "UC_004_StartRental",
-    #     ],
-    #     "mock_supported": False,
-    # },
+        "mock_supported": all(
+            _all_scenarios.get(uc, {}).get("mock_supported", False)
+            for uc in g.get("ucs", [])
+        ),
+    }
+    for g in domain_cfg.get("groups", [])
 ]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -128,6 +115,7 @@ def _print_summary(group_name: str, result: dict) -> None:
 def main():
     out_dir = ROOT / "output"
     out_dir.mkdir(exist_ok=True)
+    setup_logging(log_dir=out_dir)
 
     graph = build_graph()
     all_results: list[dict] = []
@@ -149,11 +137,15 @@ def main():
 
         CONFIG.collection_name = group["collection_name"]
 
-        result = graph.invoke({"spec_paths": spec_paths, "raw_scenarios": raw_scenarios})
+        result = graph.invoke({
+            "spec_paths": spec_paths,
+            "raw_scenarios": raw_scenarios,
+            "no_interrupt": True,
+        })
 
         _print_summary(group_name, result)
 
-        all_results.append({
+        group_result = {
             "group": group_name,
             "flow_card": result.get("stabilized_card") or result.get("flow_card"),
             "test_cases": result.get("test_cases", []),
@@ -162,7 +154,31 @@ def main():
             "diagnoses": result.get("diagnoses", []),
             "validation_errors": result.get("validation_errors", []),
             "trace": result.get("trace", []),
-        })
+        }
+        all_results.append(group_result)
+
+        # ── Артефакты группы ─────────────────────────────────────────────────
+        group_slug = group["collection_name"].replace(" ", "_").replace("/", "-").replace("—", "-")
+        group_out = out_dir / group_slug
+        group_out.mkdir(exist_ok=True)
+
+        stab_card = result.get("stabilized_card") or result.get("flow_card") or {}
+        exec_results_all = result.get("exec_results", [])
+        tc_list = result.get("test_cases", [])
+        diagnoses = result.get("diagnoses", [])
+        endpoints = result.get("endpoints", [])
+        metrics = result.get("metrics", {})
+
+        export_stabilization_trace(stab_card, exec_results_all, group_out / "stabilization_trace.md")
+        export_coverage_report(metrics, exec_results_all, group_out / "coverage_report.md", group_name)
+        export_execution_report(tc_list, exec_results_all, group_out / "execution_report.md", group_name)
+        export_defect_report(diagnoses, exec_results_all, group_out / "defect_report.md", group_name)
+        export_test_plan(group_name, endpoints, tc_list, stab_card, group_out / "test_plan.md")
+
+        if tc_list:
+            export_test_cases_full(tc_list, group_out / "test_cases_full.md")
+            export_test_cases_csv(tc_list, group_out / "test_cases_tms.csv")
+            export_allure_results(tc_list, exec_results_all, group_out / "allure-results")
 
         if result.get("test_cases"):
             all_test_cases.extend(result["test_cases"])
@@ -211,6 +227,17 @@ def main():
     md_path = out_dir / "all_test_cases.md"
     _export_md(all_test_cases, md_path)
     print(f"[OK] All test cases MD: {md_path}")
+
+    # ── Полные тест-кейсы (со шагами) ─────────────────────────────────────────
+    if all_test_cases:
+        tc_full_path = out_dir / "test_cases_full.md"
+        export_test_cases_full(all_test_cases, tc_full_path)
+        print(f"[OK] Test cases full: {tc_full_path}")
+
+    # ── Сводный coverage report ───────────────────────────────────────────────
+    combined_cov_path = out_dir / "coverage_report.md"
+    export_combined_coverage(all_results, combined_cov_path)
+    print(f"[OK] Combined coverage: {combined_cov_path}")
 
     # ── Итоговый отчёт ────────────────────────────────────────────────────────
     print("\n" + "="*60)

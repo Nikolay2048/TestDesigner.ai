@@ -61,6 +61,11 @@ def _parse_operation(path: str, method: str, op: dict) -> Endpoint:
     params = op.get("parameters", [])
     path_params = [p for p in params if p.get("in") == "path"]
     query_params = [p for p in params if p.get("in") == "query"]
+    header_params = [p for p in params if p.get("in") == "header"]
+    requires_auth = any(
+        p.get("name", "").lower() == "authorization" and p.get("required", False)
+        for p in header_params
+    )
 
     # Тело запроса
     request_schema: dict | None = None
@@ -98,6 +103,7 @@ def _parse_operation(path: str, method: str, op: dict) -> Endpoint:
         response_schemas=response_schemas,
         required_fields=required_fields,
         constraints=constraints,
+        requires_auth=requires_auth,
     )
 
 

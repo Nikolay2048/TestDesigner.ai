@@ -16,44 +16,35 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
+from src.artifacts import (
+    export_combined_coverage,
+    export_coverage_report,
+    export_stabilization_trace,
+    export_test_cases_full,
+)
 from src.collection_builder import export_collection
-from src.config import CONFIG
+from src.config import CONFIG, load_domain_config
 from src.graph import build_graph
 
-CONFIG.base_url = "http://localhost:8080"
-CONFIG.env_vars = {
-    "sellerToken":   "token-seller-aaa00001",
-    "buyerToken":    "token-buyer-aaa00002",
-    "publishedAdId": "bbbb0001-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-    "userEmail":     "testuser@example.com",
-    "userPassword":  "TestPass123!",
-}
+# ── Конфигурация: читается из constants.json ──────────────────────────────────
+domain_cfg = load_domain_config("bulletin_board")
 
+_all_scenarios: dict = domain_cfg.get("scenarios", {})
 SCENARIO_GROUPS = [
     {
-        "name": "UC_101: Register -> Login -> CreateAd -> Publish",
-        "collection_name": "Bulletin Board - Ad Creation",
-        "files": ["UC_101_CreateAd"],
-        "mock_supported": True,
-    },
-    {
-        "name": "UC_102: Search -> ViewAd",
-        "collection_name": "Bulletin Board - Search and View",
-        "files": ["UC_102_SearchAndViewAds"],
-        "mock_supported": True,
-    },
-    {
-        "name": "UC_102+103: Search -> View -> Respond -> ListResponses -> MarkRead",
-        "collection_name": "Bulletin Board - Responses",
-        "files": ["UC_102_SearchAndViewAds", "UC_103_RespondToAd"],
-        "mock_supported": True,
-    },
-    {
-        "name": "UC_101+102: Register -> Publish -> Search -> View",
-        "collection_name": "Bulletin Board - Create and Find",
-        "files": ["UC_101_CreateAd", "UC_102_SearchAndViewAds"],
-        "mock_supported": True,
-    },
+        "name": g["name"],
+        "collection_name": g["collection_name"],
+        "files": [
+            f
+            for uc in g.get("ucs", [])
+            for f in _all_scenarios.get(uc, {}).get("files", [])
+        ],
+        "mock_supported": all(
+            _all_scenarios.get(uc, {}).get("mock_supported", False)
+            for uc in g.get("ucs", [])
+        ),
+    }
+    for g in domain_cfg.get("groups", [])
 ]
 
 
@@ -130,11 +121,15 @@ def main():
 
         CONFIG.collection_name = group["collection_name"]
 
-        result = graph.invoke({"spec_paths": spec_paths, "raw_scenarios": raw_scenarios})
+        result = graph.invoke({
+            "spec_paths": spec_paths,
+            "raw_scenarios": raw_scenarios,
+            "no_interrupt": True,
+        })
 
         _print_summary(group_name, result)
 
-        all_results.append({
+        group_result = {
             "group": group_name,
             "flow_card": result.get("stabilized_card") or result.get("flow_card"),
             "test_cases": result.get("test_cases", []),
@@ -143,7 +138,25 @@ def main():
             "diagnoses": result.get("diagnoses", []),
             "validation_errors": result.get("validation_errors", []),
             "trace": result.get("trace", []),
-        })
+        }
+        all_results.append(group_result)
+
+        # ── Артефакты группы ─────────────────────────────────────────────────
+        group_slug = group["collection_name"].replace(" ", "_").replace("/", "-").replace("—", "-")
+        group_out = out_dir / group_slug
+        group_out.mkdir(exist_ok=True)
+
+        stab_card = result.get("stabilized_card") or result.get("flow_card") or {}
+        exec_results_all = result.get("exec_results", [])
+
+        export_stabilization_trace(stab_card, exec_results_all, group_out / "stabilization_trace.md")
+        export_coverage_report(
+            result.get("metrics", {}), exec_results_all,
+            group_out / "coverage_report.md", group_name,
+        )
+        tc_list = result.get("test_cases", [])
+        if tc_list:
+            export_test_cases_full(tc_list, group_out / "test_cases_full.md")
 
         if result.get("test_cases"):
             all_test_cases.extend(result["test_cases"])
@@ -182,6 +195,15 @@ def main():
     md_path = out_dir / "all_test_cases.md"
     _export_md(all_test_cases, md_path)
     print(f"[OK] Test cases MD: {md_path}")
+
+    if all_test_cases:
+        tc_full_path = out_dir / "test_cases_full.md"
+        export_test_cases_full(all_test_cases, tc_full_path)
+        print(f"[OK] Test cases full: {tc_full_path}")
+
+    combined_cov_path = out_dir / "coverage_report.md"
+    export_combined_coverage(all_results, combined_cov_path)
+    print(f"[OK] Combined coverage: {combined_cov_path}")
 
     print("\n" + "="*60)
     print("OVERALL SUMMARY — Bulletin Board")

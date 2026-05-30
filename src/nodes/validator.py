@@ -7,6 +7,7 @@ Validator — статическая проверка FlowCard до запуск
   3. from_step: source_ref — предшествующий шаг, source_field не пустой
   4. from_flow: source_ref входит в requires_flows
   5. target_location задан для каждого binding
+  6. (предупреждение) тело-поля существуют в request_schema endpoint'а
 """
 
 from src.state import GraphState
@@ -69,6 +70,22 @@ def _validate_flow_card(flow_card: dict, endpoints: list[dict]) -> list[str]:
                     errors.append(
                         f"[{step_id}.{bname}] from_flow source_ref {ref!r} not in requires_flows"
                     )
+
+        # Проверка 6: body-поля существуют в request_schema (предупреждение, не ошибка)
+        ep_for_step = next((ep for ep in endpoints if ep.get("operation_id") == op_id), None)
+        if ep_for_step:
+            req_schema = ep_for_step.get("request_schema") or {}
+            schema_props = set((req_schema.get("properties") or {}).keys())
+            if schema_props:
+                for binding in step.get("inputs", []):
+                    loc = binding.get("target_location") or ""
+                    if loc.startswith("body."):
+                        field = loc[5:]
+                        if field and field not in schema_props:
+                            errors.append(
+                                f"[{step_id}.{binding.get('name')}] body field '{field}' "
+                                f"not in request_schema properties {sorted(schema_props)}"
+                            )
 
         seen_step_ids.add(step_id)
 

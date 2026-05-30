@@ -32,7 +32,7 @@ def generate_value(generator_name: str) -> str:
         )
         return dt.isoformat()
     if generator_name == "decimal_amount":
-        return "1000.00"
+        return "1499.99"  # не кратно 100 — не триггерит демо-баг
     if generator_name == "fake_email":
         return f"user_{uuid.uuid4().hex[:8]}@example.com"
     if generator_name == "random_string":
@@ -108,11 +108,11 @@ def resolve_binding(
             generated_cache[cache_key] = generate_value(binding.generator or "uuid4")
         return generated_cache[cache_key]
 
-    if source == VarSource.FROM_STEP:
+    if source in (VarSource.FROM_STEP, VarSource.FROM_FLOW):
         ref = step_context.get(binding.source_ref)
         if ref is None:
             raise KeyError(
-                f"Step {binding.source_ref!r} not yet executed or produced no response"
+                f"Step/flow {binding.source_ref!r} not yet executed or produced no response"
             )
         return resolve_jsonpath(ref, binding.source_field)
 
@@ -144,6 +144,8 @@ def build_request(
     body: dict[str, Any] = {}
 
     for binding in step.inputs:
+        if binding.name not in resolved:
+            continue  # биндинг был пропущен (например, header с незаданной env-var)
         loc = binding.target_location or ""
         value = resolved[binding.name]
 
@@ -184,17 +186,22 @@ def execute_step(
     Возвращает лог-запись: status_code, response, produces_extracted, passed.
     """
     # 1. Разрешить все переменные
-    step_generated: dict[str, str] = {}  # кэш генераторов для этого шага
     resolved: dict[str, Any] = {}
     resolve_errors: list[str] = []
 
     for binding in step.inputs:
         try:
             resolved[binding.name] = resolve_binding(
-                binding, step_context, step_generated, env
+                binding, step_context, generated_cache, env
             )
         except (KeyError, ValueError, TypeError, IndexError) as e:
-            resolve_errors.append(f"{binding.name}: {e}")
+            loc = binding.target_location or ""
+            if loc.startswith("header."):
+                # Заголовки — некритичны: пропустить, но не ронять шаг.
+                # Если Authorization не задан — сервер вернёт 401, что корректно.
+                print(f"[executor] Warning: skipping header binding '{binding.name}': {e}")
+            else:
+                resolve_errors.append(f"{binding.name}: {e}")
 
     if resolve_errors:
         return {

@@ -11,3 +11,4 @@ class Endpoint(BaseModel):
     response_schemas: dict
     required_fields: list[str]
     constraints: dict
+    requires_auth: bool = False

@@ -12,14 +12,22 @@ from src.nodes import (
     collection_builder,
     reporter,
 )
+from src.nodes.human_review import human_review
 
 
 def _stabilization_ok(state: GraphState) -> str:
-    """Условное ребро: стабилизация прошла? (пока всегда 'ok', пока нет реального executor)."""
-    return "ok" if state.get("stabilized_card") else "failed"
+    """Условное ребро: стабилизация прошла?"""
+    return "ok" if state.get("stabilized_card", {}).get("is_stabilized") else "failed"
 
 
-def build_graph():
+def build_graph(checkpointer=None):
+    """
+    Собирает граф.
+
+    checkpointer — LangGraph checkpointer для поддержки interrupt/resume
+                   (human-in-the-loop). Если None — human_review работает
+                   в автоматическом режиме (пропускает interrupt).
+    """
     g = StateGraph(GraphState)
 
     g.add_node("spec_parser", spec_parser)
@@ -27,6 +35,7 @@ def build_graph():
     g.add_node("validator", validator)
     g.add_node("executor_stabilize", executor_stabilize)
     g.add_node("diagnosis", diagnosis)
+    g.add_node("human_review", human_review)
     g.add_node("test_designer", test_designer)
     g.add_node("executor_run_all", executor_run_all)
     g.add_node("collection_builder", collection_builder)
@@ -43,10 +52,11 @@ def build_graph():
         {"ok": "diagnosis", "failed": "reporter"},
     )
 
-    g.add_edge("diagnosis", "test_designer")
+    g.add_edge("diagnosis", "human_review")
+    g.add_edge("human_review", "test_designer")
     g.add_edge("test_designer", "executor_run_all")
     g.add_edge("executor_run_all", "collection_builder")
     g.add_edge("collection_builder", "reporter")
     g.add_edge("reporter", END)
 
-    return g.compile()
+    return g.compile(checkpointer=checkpointer)

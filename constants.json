@@ -1,0 +1,121 @@
+{
+  "domains": {
+    "carsharing": {
+      "base_url": "http://localhost:8000",
+      "collection_name": "Carsharing API Test Suite",
+      "env_vars": {
+        "customerId":    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "paymentId":     "99999999-9999-9999-9999-999999999999",
+        "reservationId": "cccccccc-0000-0000-0000-cccccccccccc"
+      },
+      "scenarios": {
+        "UC_001": {
+          "files": ["UC_001_SearchAvailableCars"],
+          "requires": [],
+          "mock_supported": true
+        },
+        "UC_002": {
+          "files": ["UC_002_CreateReservationDraft"],
+          "requires": ["UC_001"],
+          "mock_supported": true
+        },
+        "UC_003": {
+          "files": ["UC_003_ConfirmReservation"],
+          "requires": ["UC_001", "UC_002"],
+          "mock_supported": true
+        },
+        "UC_004": {
+          "files": ["UC_004_StartRental"],
+          "requires": ["UC_001", "UC_002", "UC_003"],
+          "mock_supported": false
+        },
+        "UC_005": {
+          "files": ["UC_005_ExtendRental"],
+          "requires": ["UC_001", "UC_002", "UC_003", "UC_004"],
+          "mock_supported": false
+        },
+        "UC_006": {
+          "files": ["UC_006_ReportDamage"],
+          "requires": ["UC_001", "UC_002", "UC_003", "UC_004"],
+          "mock_supported": false
+        },
+        "UC_007": {
+          "files": ["UC_007_CompleteRental"],
+          "requires": ["UC_001", "UC_002", "UC_003", "UC_004"],
+          "mock_supported": false
+        },
+        "UC_008": {
+          "files": ["UC_008_CancelReservation"],
+          "requires": [],
+          "mock_supported": true,
+          "note": "uses seed reservationId from env_vars, no live dependency on UC_001-003"
+        },
+        "UC_DEMO": {
+          "files": ["UC_DEMO_BugDetection"],
+          "requires": [],
+          "mock_supported": true,
+          "note": "demo scenario with intentional SPEC_GAP and SERVICE_BUG defects"
+        }
+      },
+      "groups": [
+        {
+          "name": "UC_001-003: Booking Flow",
+          "collection_name": "Carsharing - Booking Flow",
+          "ucs": ["UC_001", "UC_002", "UC_003"]
+        },
+        {
+          "name": "UC_008: Cancel Reservation",
+          "collection_name": "Carsharing - Cancel Reservation",
+          "ucs": ["UC_008"]
+        },
+        {
+          "name": "UC_DEMO: Bug Detection Demo",
+          "collection_name": "Carsharing - Bug Detection Demo",
+          "ucs": ["UC_DEMO"]
+        }
+      ]
+    },
+    "bulletin_board": {
+      "base_url": "http://localhost:8080",
+      "collection_name": "Bulletin Board API Test Suite",
+      "env_vars": {
+        "sellerEmail":    "testuser@example.com",
+        "sellerPassword": "TestPass123!"
+      },
+      "scenarios": {
+        "UC_101": {
+          "files": ["UC_101_CreateAd"],
+          "requires": [],
+          "mock_supported": true
+        },
+        "UC_102": {
+          "files": ["UC_102_SearchAndViewAds"],
+          "requires": ["UC_101"],
+          "mock_supported": true
+        },
+        "UC_103": {
+          "files": ["UC_103_RespondToAd"],
+          "requires": ["UC_101"],
+          "mock_supported": true
+        }
+      },
+      "groups": [
+        {
+          "name": "UC_101: Ad Creation",
+          "collection_name": "Bulletin Board - Ad Creation",
+          "ucs": ["UC_101"]
+        },
+        {
+          "name": "UC_101+102: Ad Creation and Search",
+          "collection_name": "Bulletin Board - Search and View",
+          "ucs": ["UC_101", "UC_102"]
+        },
+        {
+          "name": "UC_101+103: Ad Creation and Responses",
+          "collection_name": "Bulletin Board - Responses",
+          "ucs": ["UC_101", "UC_103"]
+        }
+      ]
+    }
+  }
+}

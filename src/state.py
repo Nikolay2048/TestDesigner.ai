@@ -32,6 +32,10 @@ class GraphState(TypedDict):
     # diagnosis
     diagnoses: list[dict]
 
+    # human_review (LangGraph interrupt)
+    human_decisions: list[dict]   # решения от человека
+    no_interrupt: bool             # True → пропустить interrupt (авторежим)
+
     # collection_builder
     collection: dict
 

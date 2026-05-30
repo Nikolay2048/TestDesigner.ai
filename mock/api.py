@@ -127,6 +127,26 @@ def _seed() -> None:
         "refunds": {},
     })
 
+    # ── Seed: pre-confirmed reservation for UC_008 standalone testing ─────────
+    res_seed_id = UUID("cccccccc-0000-0000-0000-cccccccccccc")
+    lock_seed_id = UUID("eeeeeeee-0000-0000-0000-eeeeeeeeeeee")
+    from datetime import timezone as _tz
+    seed_from = datetime(2099, 12, 1, 10, 0, 0, tzinfo=_tz.utc)
+    seed_to   = datetime(2099, 12, 7, 10, 0, 0, tzinfo=_tz.utc)
+    seed_deposit = Decimal("4050.00")
+    DB["reservations"][res_seed_id] = {
+        "reservationId": res_seed_id,
+        "reservationDraftId": UUID("dddddddd-0000-0000-0000-dddddddddddd"),
+        "status": "CONFIRMED",
+        "carId": c1, "customerId": cust_active, "cityId": 77,
+        "dateFrom": seed_from, "dateTo": seed_to,
+        "depositAmount": seed_deposit, "currency": "RUB",
+    }
+    DB["locks"][lock_seed_id] = {
+        "lockId": lock_seed_id, "carId": c1, "lockType": "RENTAL_RESERVATION",
+        "dateFrom": seed_from, "dateTo": seed_to, "status": "ACTIVE",
+    }
+
 
 _seed()
 
@@ -425,6 +445,54 @@ def get_refund_status(cancellationId: UUID = Path(...)):
     return _err(404, "REFUND-GET-001", "refund record not found for given cancellationId")
 
 
+# ──────────────── UC_DEMO: намеренные дефекты для демонстрации системы ──────
+# Два дефекта:
+# 1. SPEC_GAP:          принимает только RUB (спека разрешает RUB/USD/EUR)
+# 2. SERVICE_BUG:       суммы кратные 100 → 500 (валидны по схеме, баг сервера)
+
+class _ValidatePaymentRequest(BaseModel):
+    amount: Optional[Decimal] = None
+    currency: Optional[str] = None
+
+
+@app.post("/api/v1/demo/payment-validate")
+def demo_payment_validate(req: _ValidatePaymentRequest):
+    if req.amount is None:
+        return _err(400, "DEMO-001", "amount is required")
+    if req.amount < 1 or req.amount > 999999:
+        return _err(400, "DEMO-001", "amount must be between 1 and 999999")
+    if not req.currency:
+        return _err(400, "DEMO-002", "currency is required")
+
+    # DEFECT #1 — SPEC_GAP: сервер принимает только RUB, хотя спека разрешает USD/EUR
+    # Постановка явно говорит «все стандартные валюты поддерживаются».
+    # Diagnosis должен определить это как SPEC_GAP.
+    if req.currency != "RUB":
+        return _err(400, "DEMO-003",
+                    f"unsupported currency: {req.currency}. Only RUB is currently accepted")
+
+    # DEFECT #2 — SERVICE_BUG: суммы кратные 100 вызывают внутреннюю ошибку.
+    # Данные полностью валидны по схеме. Diagnosis должен определить SUSPECTED_SERVICE_BUG.
+    try:
+        amount_int = int(req.amount)
+        if amount_int > 0 and amount_int % 100 == 0 and req.amount == Decimal(str(amount_int)):
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "errorCode": "DEMO-BUG-500",
+                    "message": "internal calculation error: amount causes overflow in pricing engine",
+                }
+            )
+    except Exception:
+        pass
+
+    return _serialize({
+        "validated": True,
+        "amount": req.amount,
+        "currency": req.currency,
+    })
+
+
 # ─────────────────── Служебные endpoints (сброс, состояние) ─────────────────
 
 @app.post("/api/v1/mock/reset")
@@ -455,5 +523,8 @@ def mock_seed_ids():
             "CONFIRMED":  "99999999-9999-9999-9999-999999999999",
             "AUTHORIZED": "77777777-7777-7777-7777-777777777777",
             "DECLINED":   "88888888-8888-8888-8888-888888888888",
+        },
+        "reservations": {
+            "CONFIRMED_seed_for_UC008": "cccccccc-0000-0000-0000-cccccccccccc",
         },
     }

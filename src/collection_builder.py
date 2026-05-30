@@ -29,6 +29,7 @@ class PostmanStep:
     method       — HTTP-метод.
     path         — URL-путь (Postman-переменные в формате {{var}}).
     query        — query-параметры {key: value|"{{var}}"}.
+    headers      — HTTP заголовки [{key, value}, ...] (кроме Content-Type, он добавляется авто).
     body         — тело запроса (dict, будет сериализован в JSON).
     prerequest   — строки JS для pre-request script.
     tests        — строки JS для test script.
@@ -37,6 +38,7 @@ class PostmanStep:
     method: str
     path: str
     query: dict[str, str] = field(default_factory=dict)
+    headers: list[dict[str, str]] = field(default_factory=list)
     body: dict[str, Any] | None = None
     prerequest: list[str] = field(default_factory=list)
     tests: list[str] = field(default_factory=list)
@@ -70,9 +72,14 @@ def step_to_postman_item(step: PostmanStep, base_url_var: str = "baseUrl") -> di
     # OpenAPI {param} → Postman {{param}} для path-переменных, которые не были заменены
     path_postman = re.sub(r"\{(\w+)\}", r"{{\1}}", step.path)
 
+    base_headers: list[dict] = []
+    if step.body:
+        base_headers.append({"key": "Content-Type", "value": "application/json"})
+    base_headers.extend(step.headers)
+
     request: dict[str, Any] = {
         "method": step.method.upper(),
-        "header": [{"key": "Content-Type", "value": "application/json"}] if step.body else [],
+        "header": base_headers,
         "url": _url_object(path_postman, step.query, base_url_var),
     }
 

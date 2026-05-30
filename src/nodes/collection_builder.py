@@ -22,7 +22,7 @@ from typing import Any
 
 from src.collection_builder import PostmanStep, step_to_postman_item
 from src.config import CONFIG
-from src.models.flow import FlowCard, ScenarioStep, VarSource, VariableBinding
+from src.models.flow import ScenarioStep, VarSource, VariableBinding
 from src.models.test_design import TestCase
 from src.state import GraphState
 
@@ -106,7 +106,21 @@ def _gen_prerequest(
                 f"}})();",
             ]
         elif gen == "decimal_amount":
-            lines += [f"pm.environment.set('{b.name}', '1000.00');"]
+            lines += [f"pm.environment.set('{b.name}', '1499.99');"]
+        elif gen == "fake_email":
+            lines += [
+                f"(function() {{",
+                f"  const r = Math.random().toString(36).substring(2, 10);",
+                f"  pm.environment.set('{b.name}', 'user_' + r + '@example.com');",
+                f"}})();",
+            ]
+        elif gen == "random_string":
+            lines += [
+                f"(function() {{",
+                f"  const r = Math.random().toString(36).substring(2, 12);",
+                f"  pm.environment.set('{b.name}', 'test_' + r);",
+                f"}})();",
+            ]
         else:
             # uuid4 или неизвестный генератор → UUID v4
             if not uuid_helper_added:
@@ -212,6 +226,7 @@ def _step_to_postman_step(
 
     query: dict[str, Any] = {}
     body: dict[str, Any] = {}
+    headers: list[dict[str, str]] = []
     path = ep["path"]
 
     for binding in step.inputs:
@@ -220,12 +235,18 @@ def _step_to_postman_step(
 
         if loc.startswith("path."):
             param_name = loc[5:]
-            # Подставляем resolved-значение вместо OpenAPI-параметра {param}
             path = path.replace(f"{{{param_name}}}", str(value))
         elif loc.startswith("query."):
             query[loc[6:]] = value
         elif loc.startswith("body."):
             body[loc[5:]] = value
+        elif loc.startswith("header."):
+            header_name = loc[7:]
+            str_val = str(value)
+            # Авто-форматирование Bearer для Authorization
+            if header_name.lower() == "authorization" and not str_val.lower().startswith("bearer "):
+                str_val = f"Bearer {str_val}"
+            headers.append({"key": header_name, "value": str_val})
 
     prerequest = _gen_prerequest(step.inputs, generated_already)
     tests = _gen_test_script(step, expected_status, assertions)
@@ -235,6 +256,7 @@ def _step_to_postman_step(
         method=ep["method"],
         path=path,
         query=query,
+        headers=headers,
         body=body if body else None,
         prerequest=prerequest,
         tests=tests,
@@ -242,30 +264,6 @@ def _step_to_postman_step(
 
 
 # ─────────────────────── Folder builders ────────────────────────────────────
-
-def _flow_to_folder(
-    flow_card: FlowCard,
-    ep_map: dict,
-    folder_name: str,
-) -> dict:
-    """Строит папку Postman из всех шагов FlowCard (happy path)."""
-    items = []
-    generated_already: set[str] = set()
-
-    for step in flow_card.steps:
-        ep = ep_map.get(step.operation_id)
-        if ep is None:
-            continue
-        ps = _step_to_postman_step(
-            step, ep,
-            name=f"{step.step_id} — {step.operation_id}",
-            assertions=[{"type": "status_code", "expected_range": [200, 299]}],
-            generated_already=generated_already,
-        )
-        items.append(step_to_postman_item(ps))
-
-    return {"name": folder_name, "item": items}
-
 
 def _test_case_to_folder(
     tc: TestCase,
@@ -333,8 +331,12 @@ def collection_builder(state: GraphState) -> dict:
             step_op_map[step["step_id"]] = step["operation_id"]
 
     # ── Имя и id сценария ────────────────────────────────────────────────────
+    # CONFIG.collection_name задаётся per-group в runner'е и содержит имя UC
+    uc_label = CONFIG.collection_name if CONFIG.collection_name != "API Test Collection" else None
     flow_name = stabilized_card_dict.get("name", "Flow") if stabilized_card_dict else "Flow"
     flow_id   = stabilized_card_dict.get("flow_id", "flow") if stabilized_card_dict else "flow"
+    # Папка сценария: "UC-имя" если задано, иначе "flow_id: flow_name"
+    scenario_label = uc_label or f"{flow_id}: {flow_name}"
 
     # ── Папки по техникам ────────────────────────────────────────────────────
     technique_folders: dict[str, list[dict]] = {}
@@ -368,12 +370,8 @@ def collection_builder(state: GraphState) -> dict:
     for tech, cases in technique_folders.items():
         tech_subfolders.append({"name": tech.replace("_", " ").title(), "item": cases})
 
-    # ── Всё внутри папки сценария ─────────────────────────────────────────────
-    # Единая папка-сценарий содержит все техники как подпапки.
-    # Нет отдельного "Happy Path из stabilized_card" — тест-кейс happy_path
-    # из test_cases уже включает полный setup_chain и корректно отражает поток.
     scenario_folder: dict = {
-        "name": f"[{flow_id}] {flow_name}",
+        "name": scenario_label,
         "item": tech_subfolders,
     }
 

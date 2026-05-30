@@ -460,8 +460,8 @@ def _generate_boundary(flow_card: FlowCard, ep_map: dict) -> list[TestCase]:
             # minimum: just below (invalid) and at minimum (valid)
             if "minimum" in c:
                 mn = c["minimum"]
-                below = str(int(mn) - 1)
-                at_min = str(int(mn))
+                below = str(mn - 1)
+                at_min = str(mn)
                 cases.append(_make_case(
                     flow_card.flow_id, step, TestTechnique.BOUNDARY,
                     f"{step.operation_id}: {binding.name} below minimum ({below} < {mn})",
@@ -480,8 +480,8 @@ def _generate_boundary(flow_card: FlowCard, ep_map: dict) -> list[TestCase]:
             # maximum: at maximum (valid) and just above (invalid)
             if "maximum" in c:
                 mx = c["maximum"]
-                at_max = str(int(mx))
-                above = str(int(mx) + 1)
+                at_max = str(mx)
+                above = str(mx + 1)
                 cases.append(_make_case(
                     flow_card.flow_id, step, TestTechnique.BOUNDARY,
                     f"{step.operation_id}: {binding.name} at maximum ({at_max})",

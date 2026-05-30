@@ -15,9 +15,12 @@ import requests as http
 
 from src.config import CONFIG
 from src.executor import execute_step
+from src.logger import get_logger
 from src.models.flow import FlowCard, ScenarioStep
 from src.nodes.stabilizer import stabilize_step
 from src.state import GraphState
+
+log = get_logger("executor.stabilize")
 
 MAX_STEP_ATTEMPTS = 3    # попыток на один шаг (1 оригинал + 2 стабилизации)
 MAX_TOTAL_FIXES = 9      # суммарный лимит фиксов на весь сценарий
@@ -27,9 +30,9 @@ def _reset_mock_server(base_url: str) -> None:
     """Сбрасывает состояние mock-сервера перед прогоном."""
     try:
         http.post(f"{base_url}/api/v1/mock/reset", timeout=3)
-        print("[executor] mock server reset OK")
-    except Exception:
-        pass  # сервер недоступен или не поддерживает reset
+        log.info("Mock server reset OK")
+    except Exception as e:
+        log.debug("Mock reset skipped: %s", e)
 
 
 def executor_stabilize(state: GraphState) -> dict:
@@ -73,37 +76,35 @@ def executor_stabilize(state: GraphState) -> dict:
         step_passed = False
 
         for attempt in range(1, MAX_STEP_ATTEMPTS + 1):
-            log = execute_step(current_step, ep, step_context, generated_cache, CONFIG.env_vars, CONFIG.base_url)
-            log["stabilize_attempt"] = attempt
-            steps_log.append(log)
+            step_log = execute_step(current_step, ep, step_context, generated_cache, CONFIG.env_vars, CONFIG.base_url)
+            step_log["stabilize_attempt"] = attempt
+            steps_log.append(step_log)
 
-            if log["passed"]:
+            if step_log["passed"]:
                 step_passed = True
-                status = f"attempt {attempt}" if attempt > 1 else "OK"
-                print(
-                    f"[executor] {step.step_id} OK ({status}) "
-                    f"{log.get('method')} {log.get('url')} -> {log.get('status_code')}"
-                )
+                status_label = f"attempt {attempt}" if attempt > 1 else "OK"
+                log.info("%s OK (%s) %s %s -> %s",
+                         step.step_id, status_label,
+                         step_log.get("method"), step_log.get("url"), step_log.get("status_code"))
                 break
 
-            print(
-                f"[executor] {step.step_id} FAIL attempt {attempt} "
-                f"-> {log.get('status_code')} error={log.get('error')}"
-            )
+            log.warning("%s FAIL attempt %d -> %s error=%s",
+                        step.step_id, attempt, step_log.get("status_code"), step_log.get("error"))
+            if step_log.get("response"):
+                log.debug("  Response body: %s", str(step_log.get("response"))[:300])
 
-            # Лимит суммарных фиксов — страховка от бесконечного цикла
             if total_fixes >= MAX_TOTAL_FIXES:
-                print(f"[executor] total_fixes limit ({MAX_TOTAL_FIXES}) reached, stopping")
+                log.error("total_fixes limit (%d) reached, stopping stabilization", MAX_TOTAL_FIXES)
                 break
 
             if attempt >= MAX_STEP_ATTEMPTS:
                 break
 
             # Вызов агента-стабилизатора (Принцип 3.4)
-            fixed_step, fix = stabilize_step(current_step, ep, log)
+            fixed_step, fix = stabilize_step(current_step, ep, step_log)
 
             if fixed_step is None:
-                print(f"[executor] {step.step_id} stabilizer returned no fix, stopping")
+                log.warning("%s stabilizer returned no fix, stopping", step.step_id)
                 break
 
             current_step = fixed_step
@@ -115,7 +116,7 @@ def executor_stabilize(state: GraphState) -> dict:
                 "fixes": [f.model_dump() for f in fix.fixes],
             })
 
-        final_results.append(log)  # финальная (последняя) попытка шага
+        final_results.append(step_log)  # финальная (последняя) попытка шага
 
         if not step_passed:
             break  # Шаг не прошёл — дальнейшие шаги бессмысленны
@@ -124,6 +125,20 @@ def executor_stabilize(state: GraphState) -> dict:
     all_passed = all(l["passed"] for l in final_results)
     if all_passed:
         flow_card.is_stabilized = True
+
+    # Teardown: запускаем teardown_steps если основной сценарий прошёл
+    # (Принцип CLAUDE.md §10: сквозные сценарии меняют состояние → teardown обязателен)
+    if all_passed and flow_card.teardown_steps:
+        print(f"[executor] running {len(flow_card.teardown_steps)} teardown step(s)")
+        for td_step in flow_card.teardown_steps:
+            ep = ep_map.get(td_step.operation_id)
+            if ep is None:
+                continue
+            td_log = execute_step(td_step, ep, step_context, generated_cache, CONFIG.env_vars, CONFIG.base_url)
+            td_log["is_teardown"] = True
+            steps_log.append(td_log)
+            icon = "OK" if td_log["passed"] else "WARN"
+            print(f"[executor] teardown {td_step.step_id} [{icon}] -> {td_log.get('status_code')}")
 
     exec_result = {
         "case_id": flow_card.flow_id,
