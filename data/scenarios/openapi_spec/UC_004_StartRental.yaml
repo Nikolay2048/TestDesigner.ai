@@ -1,0 +1,428 @@
+openapi: 3.0.3
+info:
+  title: UC_004_StartRental
+  version: 1.0.0
+  description: Начало аренды — проверка брони, валидация прав, разблокировка авто, регистрация аренды.
+servers:
+  - url: https://api.example.com
+    description: Example API host
+paths:
+  /api/v1/reservations/{reservationId}:
+    get:
+      tags:
+        - Reservations
+      summary: Get reservation details
+      description: Возвращает детали подтверждённого бронирования. Используется как первый шаг UC_004 и UC_008.
+      operationId: getReservation
+      parameters:
+        - $ref: '#/components/parameters/ReservationIdPathParam'
+      responses:
+        '200':
+          description: Бронирование найдено.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReservationResponse'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '422':
+          $ref: '#/components/responses/BusinessRuleError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/customers/{customerId}/documents/license/check:
+    post:
+      tags:
+        - Customers
+      summary: Verify driver's license for rental period
+      description: Проверяет, что водительское удостоверение клиента действует на весь период аренды.
+      operationId: checkDriverLicense
+      parameters:
+        - $ref: '#/components/parameters/CustomerIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LicenseCheckRequest'
+      responses:
+        '200':
+          description: Проверка выполнена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LicenseCheckResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/cars/{carId}/unlock:
+    post:
+      tags:
+        - Cars
+      summary: Remotely unlock the car
+      description: Генерирует одноразовый код разблокировки для указанного автомобиля в рамках бронирования.
+      operationId: unlockCar
+      parameters:
+        - $ref: '#/components/parameters/CarIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UnlockCarRequest'
+      responses:
+        '200':
+          description: Код разблокировки выдан.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnlockCarResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/rentals:
+    post:
+      tags:
+        - Rentals
+      summary: Start rental
+      description: Регистрирует начало аренды. Требует действующего кода разблокировки и актуального licenseCheckId.
+      operationId: startRental
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartRentalRequest'
+      responses:
+        '201':
+          description: Аренда начата.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartRentalResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '422':
+          $ref: '#/components/responses/BusinessRuleError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  parameters:
+    ReservationIdPathParam:
+      name: reservationId
+      in: path
+      required: true
+      description: UUID подтверждённого бронирования.
+      schema:
+        type: string
+        format: uuid
+    CustomerIdPathParam:
+      name: customerId
+      in: path
+      required: true
+      description: UUID клиента.
+      schema:
+        type: string
+        format: uuid
+    CarIdPathParam:
+      name: carId
+      in: path
+      required: true
+      description: UUID автомобиля.
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    ValidationError:
+      description: Ошибка валидации входных параметров.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            missingField:
+              summary: Обязательное поле не передано
+              value:
+                errorCode: RENTAL-START-001
+                message: reservationId is required
+    BusinessRuleError:
+      description: Нарушение бизнес-правила.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            wrongStatus:
+              summary: Бронирование не подтверждено
+              value:
+                errorCode: RENTAL-START-010
+                message: reservation status must be CONFIRMED
+            outsidePickupWindow:
+              summary: Вне окна выдачи
+              value:
+                errorCode: RENTAL-START-011
+                message: current time is outside the allowed pickup window
+            licenseExpired:
+              summary: ВУ истекло
+              value:
+                errorCode: LICENSE-CHECK-005
+                message: driver license expires before rental end date
+    ForbiddenError:
+      description: Клиент заблокирован.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            customerBlocked:
+              summary: Клиент заблокирован
+              value:
+                errorCode: LICENSE-CHECK-009
+                message: customer account is blocked
+    NotFoundError:
+      description: Ресурс не найден.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            reservationNotFound:
+              summary: Бронирование не найдено
+              value:
+                errorCode: RESERVATION-GET-001
+                message: reservation not found
+    ConflictError:
+      description: Конфликт состояния.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            alreadyUnlocked:
+              summary: Авто уже разблокировано для этой брони
+              value:
+                errorCode: CAR-UNLOCK-003
+                message: car already unlocked for this reservation
+            rentalAlreadyStarted:
+              summary: Аренда уже начата
+              value:
+                errorCode: RENTAL-START-009
+                message: rental already exists for this reservation
+    InternalServerError:
+      description: Внутренняя ошибка сервера.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    ReservationResponse:
+      type: object
+      required:
+        - reservationId
+        - status
+        - carId
+        - customerId
+        - cityId
+        - dateFrom
+        - dateTo
+        - depositPaid
+      properties:
+        reservationId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/ReservationStatus'
+        carId:
+          type: string
+          format: uuid
+        customerId:
+          type: string
+          format: uuid
+        cityId:
+          $ref: '#/components/schemas/CityId'
+        dateFrom:
+          $ref: '#/components/schemas/RentalDateTime'
+        dateTo:
+          $ref: '#/components/schemas/RentalDateTime'
+        depositPaid:
+          type: boolean
+          example: true
+
+    LicenseCheckRequest:
+      type: object
+      required:
+        - rentalDateFrom
+        - rentalDateTo
+      properties:
+        rentalDateFrom:
+          $ref: '#/components/schemas/RentalDateTime'
+        rentalDateTo:
+          $ref: '#/components/schemas/RentalDateTime'
+
+    LicenseCheckResponse:
+      type: object
+      required:
+        - licenseCheckId
+        - isValid
+        - licenseExpiryDate
+        - driverAge
+      properties:
+        licenseCheckId:
+          type: string
+          format: uuid
+        isValid:
+          type: boolean
+          example: true
+        licenseExpiryDate:
+          type: string
+          format: date
+          example: '2030-12-31'
+        driverAge:
+          type: integer
+          minimum: 18
+          maximum: 100
+          example: 32
+
+    UnlockCarRequest:
+      type: object
+      required:
+        - reservationId
+        - customerId
+      properties:
+        reservationId:
+          type: string
+          format: uuid
+        customerId:
+          type: string
+          format: uuid
+
+    UnlockCarResponse:
+      type: object
+      required:
+        - unlockCode
+        - unlockExpiresAt
+        - unlockAttemptId
+      properties:
+        unlockCode:
+          type: string
+          minLength: 6
+          maxLength: 6
+          pattern: '^[A-Z0-9]{6}$'
+          example: 'X7K2PQ'
+        unlockExpiresAt:
+          type: string
+          format: date-time
+          example: '2026-06-01T10:05:00+03:00'
+        unlockAttemptId:
+          type: string
+          format: uuid
+
+    StartRentalRequest:
+      type: object
+      required:
+        - reservationId
+        - carId
+        - customerId
+        - licenseCheckId
+        - unlockCode
+      properties:
+        reservationId:
+          type: string
+          format: uuid
+        carId:
+          type: string
+          format: uuid
+        customerId:
+          type: string
+          format: uuid
+        licenseCheckId:
+          type: string
+          format: uuid
+        unlockCode:
+          type: string
+          minLength: 6
+          maxLength: 6
+          pattern: '^[A-Z0-9]{6}$'
+          example: 'X7K2PQ'
+
+    StartRentalResponse:
+      type: object
+      required:
+        - rentalId
+        - status
+        - startedAt
+        - carId
+        - plannedReturnAt
+      properties:
+        rentalId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/RentalStatus'
+        startedAt:
+          type: string
+          format: date-time
+        carId:
+          type: string
+          format: uuid
+        plannedReturnAt:
+          type: string
+          format: date-time
+
+    ReservationStatus:
+      type: string
+      enum:
+        - CONFIRMED
+        - CANCELLED
+        - EXPIRED
+        - COMPLETED
+      example: CONFIRMED
+
+    RentalStatus:
+      type: string
+      enum:
+        - ACTIVE
+        - EXTENDED
+        - COMPLETED
+        - SUSPENDED
+      example: ACTIVE
+
+    CityId:
+      type: integer
+      enum:
+        - 36
+        - 77
+      example: 77
+
+    RentalDateTime:
+      type: string
+      format: date-time
+      example: '2026-06-01T10:00:00+03:00'
+
+    ErrorResponse:
+      type: object
+      required:
+        - errorCode
+        - message
+      properties:
+        errorCode:
+          type: string
+          example: RENTAL-START-001
+        message:
+          type: string
+          example: Validation error

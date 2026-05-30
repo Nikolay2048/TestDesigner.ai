@@ -1,0 +1,568 @@
+openapi: 3.0.3
+info:
+  title: UC_007_CompleteRental
+  version: 1.0.0
+  description: Завершение аренды — фиксация возврата, расчёт доплат/возврата, расчёт, закрытие.
+servers:
+  - url: https://api.example.com
+    description: Example API host
+paths:
+  /api/v1/rentals/{rentalId}:
+    get:
+      tags:
+        - Rentals
+      summary: Get rental details
+      description: Возвращает полные данные аренды включая depositAmount и mileageLimitPerDay. Первый шаг UC_007.
+      operationId: getRentalForReturn
+      parameters:
+        - $ref: '#/components/parameters/RentalIdPathParam'
+      responses:
+        '200':
+          description: Аренда найдена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RentalDetailResponse'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/rentals/{rentalId}/return/initiate:
+    post:
+      tags:
+        - Rentals
+      summary: Initiate car return
+      description: Фиксирует факт возврата авто — пробег, уровень топлива, время. Возвращает returnId и доп. сборы.
+      operationId: initiateReturn
+      parameters:
+        - $ref: '#/components/parameters/RentalIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitiateReturnRequest'
+      responses:
+        '201':
+          description: Возврат зафиксирован.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InitiateReturnResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '422':
+          $ref: '#/components/responses/BusinessRuleError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/rentals/{rentalId}/return/{returnId}/charges:
+    get:
+      tags:
+        - Rentals
+      summary: Get itemized charge breakdown
+      description: Возвращает детализацию всех доп. сборов и итоговое сальдо (возврат или доплата).
+      operationId: getReturnCharges
+      parameters:
+        - $ref: '#/components/parameters/RentalIdPathParam'
+        - $ref: '#/components/parameters/ReturnIdPathParam'
+      responses:
+        '200':
+          description: Детализация сборов.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReturnChargesResponse'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/rentals/{rentalId}/return/{returnId}/settle:
+    post:
+      tags:
+        - Rentals
+      summary: Settle financial balance
+      description: Проводит финансовый расчёт по возврату — списывает доплату или возвращает депозит.
+      operationId: settleReturn
+      parameters:
+        - $ref: '#/components/parameters/RentalIdPathParam'
+        - $ref: '#/components/parameters/ReturnIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettleReturnRequest'
+      responses:
+        '200':
+          description: Расчёт выполнен.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettleReturnResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '422':
+          $ref: '#/components/responses/BusinessRuleError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/rentals/{rentalId}/close:
+    post:
+      tags:
+        - Rentals
+      summary: Close rental
+      description: Окончательно закрывает аренду. Требует завершённого расчёта. Освобождает автомобиль.
+      operationId: closeRental
+      parameters:
+        - $ref: '#/components/parameters/RentalIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CloseRentalRequest'
+      responses:
+        '200':
+          description: Аренда закрыта.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CloseRentalResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '422':
+          $ref: '#/components/responses/BusinessRuleError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  parameters:
+    RentalIdPathParam:
+      name: rentalId
+      in: path
+      required: true
+      description: UUID аренды.
+      schema:
+        type: string
+        format: uuid
+    ReturnIdPathParam:
+      name: returnId
+      in: path
+      required: true
+      description: UUID записи о возврате.
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    ValidationError:
+      description: Ошибка валидации входных параметров.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            missingReturnId:
+              summary: returnId не передан
+              value:
+                errorCode: RENTAL-CLOSE-001
+                message: returnId is required
+            invalidMileage:
+              summary: Отрицательный пробег
+              value:
+                errorCode: RETURN-INITIATE-003
+                message: finalMileage must be non-negative
+    BusinessRuleError:
+      description: Нарушение бизнес-правила.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            rentalNotActive:
+              summary: Аренда не активна
+              value:
+                errorCode: RETURN-INITIATE-010
+                message: rental must be ACTIVE or EXTENDED to initiate return
+            settlementRequired:
+              summary: Расчёт не завершён
+              value:
+                errorCode: RENTAL-CLOSE-011
+                message: settlement must be completed before closing rental
+            paymentMethodRequired:
+              summary: Не указан способ оплаты доплаты
+              value:
+                errorCode: RETURN-SETTLE-005
+                message: paymentMethodId is required when settlementType is CHARGE
+    ConflictError:
+      description: Конфликт состояния.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            returnAlreadyInitiated:
+              summary: Возврат уже был зарегистрирован
+              value:
+                errorCode: RETURN-INITIATE-009
+                message: return already initiated for this rental
+            settlementDuplicate:
+              summary: Расчёт уже выполнен
+              value:
+                errorCode: RETURN-SETTLE-009
+                message: settlement already completed for this return
+            rentalAlreadyClosed:
+              summary: Аренда уже закрыта
+              value:
+                errorCode: RENTAL-CLOSE-009
+                message: rental is already closed
+    NotFoundError:
+      description: Ресурс не найден.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            rentalNotFound:
+              summary: Аренда не найдена
+              value:
+                errorCode: RENTAL-GET-001
+                message: rental not found
+    InternalServerError:
+      description: Внутренняя ошибка сервера.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    RentalDetailResponse:
+      type: object
+      required:
+        - rentalId
+        - status
+        - carId
+        - customerId
+        - cityId
+        - dateFrom
+        - dateTo
+        - depositAmount
+        - currency
+        - mileageLimitPerDay
+      properties:
+        rentalId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/RentalStatus'
+        carId:
+          type: string
+          format: uuid
+        customerId:
+          type: string
+          format: uuid
+        cityId:
+          type: integer
+          example: 77
+        dateFrom:
+          type: string
+          format: date-time
+        dateTo:
+          type: string
+          format: date-time
+        depositAmount:
+          type: number
+          format: decimal
+          example: 10000.00
+        currency:
+          $ref: '#/components/schemas/Currency'
+        mileageLimitPerDay:
+          type: integer
+          minimum: 0
+          example: 300
+
+    InitiateReturnRequest:
+      type: object
+      required:
+        - carId
+        - actualReturnDatetime
+        - finalMileage
+        - fuelLevelPercent
+        - returnCityId
+      properties:
+        carId:
+          type: string
+          format: uuid
+        actualReturnDatetime:
+          type: string
+          format: date-time
+        finalMileage:
+          type: integer
+          minimum: 0
+          example: 450
+        fuelLevelPercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+          example: 90
+        returnCityId:
+          type: integer
+          enum:
+            - 36
+            - 77
+          example: 77
+
+    InitiateReturnResponse:
+      type: object
+      required:
+        - returnId
+        - mileageOverage
+        - mileageOverageFee
+        - lateFee
+        - fuelShortfallFee
+        - interCityFee
+        - totalExtraCharges
+        - currency
+      properties:
+        returnId:
+          type: string
+          format: uuid
+        mileageOverage:
+          type: integer
+          minimum: 0
+          example: 0
+        mileageOverageFee:
+          type: number
+          format: decimal
+          minimum: 0
+          example: 0.00
+        lateFee:
+          type: number
+          format: decimal
+          minimum: 0
+          example: 0.00
+        fuelShortfallFee:
+          type: number
+          format: decimal
+          minimum: 0
+          example: 0.00
+        interCityFee:
+          type: number
+          format: decimal
+          minimum: 0
+          example: 0.00
+        totalExtraCharges:
+          type: number
+          format: decimal
+          minimum: 0
+          example: 0.00
+        currency:
+          $ref: '#/components/schemas/Currency'
+
+    ReturnChargesResponse:
+      type: object
+      required:
+        - returnId
+        - depositAmount
+        - extraCharges
+        - totalExtraCharges
+        - netAmount
+        - settlementType
+        - currency
+      properties:
+        returnId:
+          type: string
+          format: uuid
+        depositAmount:
+          type: number
+          format: decimal
+          example: 10000.00
+        extraCharges:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChargeItem'
+        totalExtraCharges:
+          type: number
+          format: decimal
+          minimum: 0
+          example: 0.00
+        netAmount:
+          type: number
+          format: decimal
+          description: depositAmount − totalExtraCharges. Отрицательное — возврат клиенту; положительное — доплата.
+          example: -10000.00
+        settlementType:
+          $ref: '#/components/schemas/SettlementType'
+        currency:
+          $ref: '#/components/schemas/Currency'
+
+    SettleReturnRequest:
+      type: object
+      required:
+        - settlementType
+      properties:
+        settlementType:
+          $ref: '#/components/schemas/SettlementType'
+        paymentMethodId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Обязательно при settlementType=CHARGE
+        refundAccountId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Обязательно при settlementType=REFUND
+
+    SettleReturnResponse:
+      type: object
+      required:
+        - settlementId
+        - settlementType
+        - amount
+        - currency
+      properties:
+        settlementId:
+          type: string
+          format: uuid
+        settlementType:
+          $ref: '#/components/schemas/SettlementType'
+        amount:
+          type: number
+          format: decimal
+          minimum: 0
+          example: 10000.00
+        currency:
+          $ref: '#/components/schemas/Currency'
+
+    CloseRentalRequest:
+      type: object
+      required:
+        - returnId
+        - settlementId
+      properties:
+        returnId:
+          type: string
+          format: uuid
+        settlementId:
+          type: string
+          format: uuid
+
+    CloseRentalResponse:
+      type: object
+      required:
+        - rentalId
+        - status
+        - ratingToken
+        - closedAt
+        - finalSummary
+      properties:
+        rentalId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - COMPLETED
+          example: COMPLETED
+        ratingToken:
+          type: string
+          format: uuid
+        closedAt:
+          type: string
+          format: date-time
+        finalSummary:
+          $ref: '#/components/schemas/RentalFinalSummary'
+
+    ChargeItem:
+      type: object
+      required:
+        - chargeType
+        - amount
+        - description
+      properties:
+        chargeType:
+          type: string
+          enum:
+            - MILEAGE_OVERAGE
+            - LATE_RETURN
+            - FUEL_SHORTFALL
+            - INTER_CITY
+            - DAMAGE_PENALTY
+          example: MILEAGE_OVERAGE
+        amount:
+          type: number
+          format: decimal
+          minimum: 0
+          example: 1200.00
+        description:
+          type: string
+          example: '50 extra km at 24.00 per km'
+
+    RentalFinalSummary:
+      type: object
+      required:
+        - totalDurationHours
+        - totalKm
+        - totalCharges
+        - currency
+      properties:
+        totalDurationHours:
+          type: number
+          example: 24.0
+        totalKm:
+          type: integer
+          example: 300
+        totalCharges:
+          type: number
+          format: decimal
+          example: 0.00
+        currency:
+          $ref: '#/components/schemas/Currency'
+
+    RentalStatus:
+      type: string
+      enum:
+        - ACTIVE
+        - EXTENDED
+        - COMPLETED
+        - SUSPENDED
+      example: ACTIVE
+
+    SettlementType:
+      type: string
+      enum:
+        - CHARGE
+        - REFUND
+        - ZERO
+      example: REFUND
+
+    Currency:
+      type: string
+      enum:
+        - RUB
+        - USD
+        - EUR
+      example: RUB
+
+    ErrorResponse:
+      type: object
+      required:
+        - errorCode
+        - message
+      properties:
+        errorCode:
+          type: string
+          example: RENTAL-CLOSE-001
+        message:
+          type: string
+          example: Validation error

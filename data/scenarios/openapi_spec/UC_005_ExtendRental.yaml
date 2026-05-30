@@ -1,0 +1,481 @@
+openapi: 3.0.3
+info:
+  title: UC_005_ExtendRental
+  version: 1.0.0
+  description: Продление аренды — проверка доступности, расчёт цены, оплата, применение продления.
+servers:
+  - url: https://api.example.com
+    description: Example API host
+paths:
+  /api/v1/rentals/{rentalId}:
+    get:
+      tags:
+        - Rentals
+      summary: Get rental details
+      description: Возвращает текущее состояние аренды, включая carId, статус и счётчик продлений.
+      operationId: getRental
+      parameters:
+        - $ref: '#/components/parameters/RentalIdPathParam'
+      responses:
+        '200':
+          description: Аренда найдена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RentalResponse'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/cars/{carId}/availability:
+    get:
+      tags:
+        - Cars
+      summary: Check car availability for a period
+      description: Проверяет доступность конкретного автомобиля на заданный интервал дат. Используется в UC_005 для проверки окна продления.
+      operationId: checkCarAvailability
+      parameters:
+        - $ref: '#/components/parameters/CarIdPathParam'
+        - $ref: '#/components/parameters/DateFromQueryParam'
+        - $ref: '#/components/parameters/DateToQueryParam'
+      responses:
+        '200':
+          description: Результат проверки доступности.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CarAvailabilityResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/rentals/{rentalId}/extensions/quote:
+    post:
+      tags:
+        - Rentals
+      summary: Get extension price quote
+      description: Рассчитывает стоимость продления аренды до указанной даты. Квота действует 10 минут.
+      operationId: getExtensionQuote
+      parameters:
+        - $ref: '#/components/parameters/RentalIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExtensionQuoteRequest'
+      responses:
+        '200':
+          description: Квота на продление рассчитана.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExtensionQuoteResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '422':
+          $ref: '#/components/responses/BusinessRuleError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/payments:
+    post:
+      tags:
+        - Payments
+      summary: Create payment
+      description: Создаёт платёж по квоте. Используется в UC_005 для оплаты продления.
+      operationId: createPayment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePaymentRequest'
+      responses:
+        '201':
+          description: Платёж создан и подтверждён.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatePaymentResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '422':
+          $ref: '#/components/responses/BusinessRuleError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/rentals/{rentalId}/extend:
+    patch:
+      tags:
+        - Rentals
+      summary: Apply rental extension
+      description: Применяет продление аренды по подтверждённой оплате. Обновляет plannedReturnAt и счётчик продлений.
+      operationId: applyRentalExtension
+      parameters:
+        - $ref: '#/components/parameters/RentalIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApplyExtensionRequest'
+      responses:
+        '200':
+          description: Продление применено.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplyExtensionResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '422':
+          $ref: '#/components/responses/BusinessRuleError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  parameters:
+    RentalIdPathParam:
+      name: rentalId
+      in: path
+      required: true
+      description: UUID активной аренды.
+      schema:
+        type: string
+        format: uuid
+    CarIdPathParam:
+      name: carId
+      in: path
+      required: true
+      description: UUID автомобиля.
+      schema:
+        type: string
+        format: uuid
+    DateFromQueryParam:
+      name: dateFrom
+      in: query
+      required: true
+      description: Начало проверяемого интервала.
+      schema:
+        $ref: '#/components/schemas/RentalDateTime'
+    DateToQueryParam:
+      name: dateTo
+      in: query
+      required: true
+      description: Конец проверяемого интервала.
+      schema:
+        $ref: '#/components/schemas/RentalDateTime'
+
+  responses:
+    ValidationError:
+      description: Ошибка валидации входных параметров.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            missingNewDateTo:
+              summary: newDateTo не передан
+              value:
+                errorCode: EXTENSION-QUOTE-001
+                message: newDateTo is required
+    BusinessRuleError:
+      description: Нарушение бизнес-правила.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            rentalNotActive:
+              summary: Аренда не активна
+              value:
+                errorCode: RENTAL-EXTEND-010
+                message: rental status must be ACTIVE or EXTENDED
+            maxExtensionsReached:
+              summary: Превышен лимит продлений
+              value:
+                errorCode: RENTAL-EXTEND-011
+                message: maximum number of extensions (2) already applied
+            quoteTooShort:
+              summary: Продление слишком короткое
+              value:
+                errorCode: EXTENSION-QUOTE-005
+                message: extension must be at least 1 hour
+            quoteTooLong:
+              summary: Продление слишком длинное
+              value:
+                errorCode: EXTENSION-QUOTE-006
+                message: extension cannot exceed 7 days
+            amountMismatch:
+              summary: Сумма платежа не совпадает с квотой
+              value:
+                errorCode: PAYMENT-AMOUNT-003
+                message: payment amount does not match quote
+    ConflictError:
+      description: Конфликт состояния.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            carNotAvailable:
+              summary: Авто занято на период продления
+              value:
+                errorCode: EXTENSION-QUOTE-009
+                message: car is not available for the requested extension period
+            quoteExpired:
+              summary: Квота истекла
+              value:
+                errorCode: RENTAL-EXTEND-007
+                message: extension quote has expired
+            duplicateApply:
+              summary: Продление уже применено
+              value:
+                errorCode: RENTAL-EXTEND-008
+                message: extension already applied for this quote
+    NotFoundError:
+      description: Ресурс не найден.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            rentalNotFound:
+              summary: Аренда не найдена
+              value:
+                errorCode: RENTAL-GET-001
+                message: rental not found
+    InternalServerError:
+      description: Внутренняя ошибка сервера.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    RentalResponse:
+      type: object
+      required:
+        - rentalId
+        - status
+        - carId
+        - customerId
+        - dateFrom
+        - dateTo
+        - pricePerDay
+        - currency
+        - extensionCount
+      properties:
+        rentalId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/RentalStatus'
+        carId:
+          type: string
+          format: uuid
+        customerId:
+          type: string
+          format: uuid
+        dateFrom:
+          $ref: '#/components/schemas/RentalDateTime'
+        dateTo:
+          $ref: '#/components/schemas/RentalDateTime'
+        pricePerDay:
+          type: number
+          format: decimal
+          example: 3500.00
+        currency:
+          $ref: '#/components/schemas/Currency'
+        extensionCount:
+          type: integer
+          minimum: 0
+          maximum: 2
+          example: 0
+
+    CarAvailabilityResponse:
+      type: object
+      required:
+        - carId
+        - available
+      properties:
+        carId:
+          type: string
+          format: uuid
+        available:
+          type: boolean
+          example: true
+        reason:
+          type: string
+          nullable: true
+          example: 'car booked by another customer'
+
+    ExtensionQuoteRequest:
+      type: object
+      required:
+        - newDateTo
+      properties:
+        newDateTo:
+          $ref: '#/components/schemas/RentalDateTime'
+
+    ExtensionQuoteResponse:
+      type: object
+      required:
+        - extensionQuoteId
+        - extensionCost
+        - currency
+        - newDateTo
+        - quoteExpiresAt
+      properties:
+        extensionQuoteId:
+          type: string
+          format: uuid
+        extensionCost:
+          type: number
+          format: decimal
+          example: 3500.00
+        currency:
+          $ref: '#/components/schemas/Currency'
+        newDateTo:
+          $ref: '#/components/schemas/RentalDateTime'
+        quoteExpiresAt:
+          type: string
+          format: date-time
+
+    CreatePaymentRequest:
+      type: object
+      required:
+        - quoteId
+        - amount
+        - currency
+        - customerId
+        - paymentMethod
+      properties:
+        quoteId:
+          type: string
+          format: uuid
+        amount:
+          type: number
+          format: decimal
+          example: 3500.00
+        currency:
+          $ref: '#/components/schemas/Currency'
+        customerId:
+          type: string
+          format: uuid
+        paymentMethod:
+          $ref: '#/components/schemas/PaymentMethod'
+
+    CreatePaymentResponse:
+      type: object
+      required:
+        - paymentId
+        - paymentStatus
+        - paidAmount
+        - paidAt
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+        paymentStatus:
+          $ref: '#/components/schemas/PaymentStatus'
+        paidAmount:
+          type: number
+          format: decimal
+          example: 3500.00
+        paidAt:
+          type: string
+          format: date-time
+
+    ApplyExtensionRequest:
+      type: object
+      required:
+        - extensionQuoteId
+        - paymentId
+      properties:
+        extensionQuoteId:
+          type: string
+          format: uuid
+        paymentId:
+          type: string
+          format: uuid
+
+    ApplyExtensionResponse:
+      type: object
+      required:
+        - rentalId
+        - status
+        - newDateTo
+        - extensionCount
+      properties:
+        rentalId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/RentalStatus'
+        newDateTo:
+          $ref: '#/components/schemas/RentalDateTime'
+        extensionCount:
+          type: integer
+          minimum: 1
+          maximum: 2
+          example: 1
+
+    RentalStatus:
+      type: string
+      enum:
+        - ACTIVE
+        - EXTENDED
+        - COMPLETED
+        - SUSPENDED
+      example: EXTENDED
+
+    Currency:
+      type: string
+      enum:
+        - RUB
+        - USD
+        - EUR
+      example: RUB
+
+    PaymentMethod:
+      type: string
+      enum:
+        - CARD
+        - WALLET
+      example: CARD
+
+    PaymentStatus:
+      type: string
+      enum:
+        - CONFIRMED
+        - PENDING
+        - FAILED
+      example: CONFIRMED
+
+    RentalDateTime:
+      type: string
+      format: date-time
+      example: '2026-06-02T10:00:00+03:00'
+
+    ErrorResponse:
+      type: object
+      required:
+        - errorCode
+        - message
+      properties:
+        errorCode:
+          type: string
+          example: RENTAL-EXTEND-001
+        message:
+          type: string
+          example: Validation error

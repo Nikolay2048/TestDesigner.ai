@@ -1,0 +1,336 @@
+openapi: 3.0.3
+info:
+  title: UC_103_RespondToAd
+  version: 1.0.0
+  description: Покупатель оставляет отклик на объявление, продавец просматривает отклики и отмечает их прочитанными.
+servers:
+  - url: https://api.example.com
+    description: Example API host
+paths:
+  /api/bb/v1/ads/{adId}/responses:
+    post:
+      tags:
+        - Responses
+      summary: Create a response to an ad
+      description: Покупатель оставляет отклик на опубликованное объявление. Требует авторизации покупателя. Автор объявления не может откликаться на своё же объявление.
+      operationId: createResponse
+      parameters:
+        - $ref: '#/components/parameters/AdIdPathParam'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateResponseRequest'
+      responses:
+        '201':
+          description: Отклик создан.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateResponseResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    get:
+      tags:
+        - Responses
+      summary: List responses for an ad
+      description: Возвращает список откликов на объявление. Доступно только автору объявления. Требует авторизации.
+      operationId: getAdResponses
+      parameters:
+        - $ref: '#/components/parameters/AdIdPathParam'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+      responses:
+        '200':
+          description: Список откликов.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdResponsesResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/bb/v1/responses/{responseId}:
+    patch:
+      tags:
+        - Responses
+      summary: Update response status
+      description: Продавец помечает отклик как прочитанный, передавая status=READ в теле запроса. Повторная пометка уже прочитанного отклика возвращает ошибку конфликта.
+      operationId: markResponseRead
+      parameters:
+        - $ref: '#/components/parameters/ResponseIdPathParam'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MarkResponseReadRequest'
+      responses:
+        '200':
+          description: Статус отклика обновлён.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarkResponseReadResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  parameters:
+    AdIdPathParam:
+      name: adId
+      in: path
+      required: true
+      description: UUID объявления.
+      schema:
+        type: string
+        format: uuid
+    ResponseIdPathParam:
+      name: responseId
+      in: path
+      required: true
+      description: UUID отклика.
+      schema:
+        type: string
+        format: uuid
+    AuthorizationHeader:
+      name: Authorization
+      in: header
+      required: true
+      description: Bearer-токен. Формат — "Bearer {token}".
+      schema:
+        type: string
+        example: "Bearer token-buyer-aaa00002"
+
+  responses:
+    ValidationError:
+      description: Ошибка валидации.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            emptyMessage:
+              summary: Пустое сообщение
+              value:
+                errorCode: BB-RESP-001
+                message: message is required
+            messageTooLong:
+              summary: Слишком длинное сообщение
+              value:
+                errorCode: BB-RESP-002
+                message: message must not exceed 2000 characters
+    UnauthorizedError:
+      description: Токен отсутствует или невалиден.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            invalidToken:
+              summary: Невалидный токен
+              value:
+                errorCode: BB-AD-010
+                message: token is invalid or expired
+    ForbiddenError:
+      description: Доступ запрещён.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            authorResponding:
+              summary: Автор откликается на своё объявление
+              value:
+                errorCode: BB-RESP-003
+                message: ad author cannot respond to own ad
+            notAuthor:
+              summary: Не автор объявления
+              value:
+                errorCode: BB-RESP-010
+                message: only the ad author can view responses
+    NotFoundError:
+      description: Ресурс не найден.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            adNotFound:
+              summary: Объявление не найдено
+              value:
+                errorCode: BB-AD-030
+                message: ad not found
+            responseNotFound:
+              summary: Отклик не найден
+              value:
+                errorCode: BB-RESP-020
+                message: response not found
+    ConflictError:
+      description: Конфликт состояния.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            adNotPublished:
+              summary: Объявление не опубликовано
+              value:
+                errorCode: BB-RESP-004
+                message: only PUBLISHED ads accept responses
+            alreadyRead:
+              summary: Отклик уже прочитан
+              value:
+                errorCode: BB-RESP-021
+                message: response is already read
+    InternalServerError:
+      description: Внутренняя ошибка сервера.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    CreateResponseRequest:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          example: Здравствуйте! Ещё продаёте? Готов купить сегодня.
+
+    CreateResponseResponse:
+      type: object
+      required:
+        - responseId
+        - adId
+        - buyerId
+        - message
+        - status
+        - createdAt
+      properties:
+        responseId:
+          type: string
+          format: uuid
+        adId:
+          type: string
+          format: uuid
+        buyerId:
+          type: string
+          format: uuid
+        message:
+          type: string
+        status:
+          type: string
+          enum:
+            - NEW
+          example: NEW
+        createdAt:
+          type: string
+          format: date-time
+
+    AdResponsesResponse:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdResponse'
+
+    AdResponse:
+      type: object
+      required:
+        - responseId
+        - buyerId
+        - message
+        - status
+        - createdAt
+      properties:
+        responseId:
+          type: string
+          format: uuid
+        buyerId:
+          type: string
+          format: uuid
+        message:
+          type: string
+        status:
+          $ref: '#/components/schemas/ResponseStatus'
+        createdAt:
+          type: string
+          format: date-time
+
+    MarkResponseReadRequest:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - READ
+          example: READ
+
+    MarkResponseReadResponse:
+      type: object
+      required:
+        - responseId
+        - status
+      properties:
+        responseId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/ResponseStatus'
+
+    ResponseStatus:
+      type: string
+      enum:
+        - NEW
+        - READ
+      example: NEW
+
+    ErrorResponse:
+      type: object
+      required:
+        - errorCode
+        - message
+      properties:
+        errorCode:
+          type: string
+          example: BB-RESP-001
+        message:
+          type: string
+          example: Validation error
