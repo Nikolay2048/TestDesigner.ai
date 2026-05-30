@@ -1,0 +1,177 @@
+openapi: 3.0.3
+info:
+  title: UC_003_ConfirmReservation
+  version: 1.0.0
+  description: Подтверждение бронирования после оплаты депозита.
+servers:
+  - url: https://api.example.com
+    description: Example API host
+paths:
+  /api/v1/reservations/{reservationDraftId}/confirm:
+    post:
+      tags:
+        - Reservations
+      summary: Confirm reservation
+      description: Сервис подтверждает черновик бронирования и блокирует автомобиль на период аренды.
+      operationId: confirmReservation
+      parameters:
+        - $ref: '#/components/parameters/ReservationDraftIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmReservationRequest'
+      responses:
+        '200':
+          description: Бронирование подтверждено.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfirmReservationResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+components:
+  parameters:
+    ReservationDraftIdPathParam:
+      name: reservationDraftId
+      in: path
+      required: true
+      description: Идентификатор черновика бронирования.
+      schema:
+        type: string
+        format: uuid
+  responses:
+    ValidationError:
+      description: Ошибка валидации входных параметров.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            paymentIdMissing:
+              summary: paymentId не передан
+              value:
+                errorCode: RESERVATION-CONFIRM-004
+                message: paymentId is required
+            unsupportedCurrency:
+              summary: Валюта не поддерживается
+              value:
+                errorCode: RESERVATION-CONFIRM-007
+                message: currency is not supported
+    ConflictError:
+      description: Конфликт бизнес-правил.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            draftExpired:
+              summary: Срок жизни черновика истёк
+              value:
+                errorCode: RESERVATION-CONFIRM-003
+                message: reservation draft expired
+            carLocked:
+              summary: Автомобиль уже заблокирован
+              value:
+                errorCode: RESERVATION-CONFIRM-011
+                message: car is already locked for selected period
+    InternalServerError:
+      description: Внутренняя ошибка сервера.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    ConfirmReservationRequest:
+      type: object
+      required:
+        - paymentId
+        - paymentAmount
+        - currency
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+        paymentAmount:
+          type: number
+          format: decimal
+          example: 10000.00
+        currency:
+          $ref: '#/components/schemas/Currency'
+    ConfirmReservationResponse:
+      type: object
+      required:
+        - reservationId
+        - reservationDraftId
+        - status
+        - carLock
+      properties:
+        reservationId:
+          type: string
+          format: uuid
+        reservationDraftId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/ReservationStatus'
+        carLock:
+          $ref: '#/components/schemas/CarLock'
+    Currency:
+      type: string
+      enum:
+        - RUB
+        - USD
+        - EUR
+      example: RUB
+    ReservationStatus:
+      type: string
+      enum:
+        - CONFIRMED
+      example: CONFIRMED
+    CarLock:
+      type: object
+      required:
+        - lockId
+        - carId
+        - lockType
+        - dateFrom
+        - dateTo
+      properties:
+        lockId:
+          type: string
+          format: uuid
+        carId:
+          type: string
+          format: uuid
+        lockType:
+          $ref: '#/components/schemas/CarLockType'
+        dateFrom:
+          $ref: '#/components/schemas/RentalDateTime'
+        dateTo:
+          $ref: '#/components/schemas/RentalDateTime'
+    CarLockType:
+      type: string
+      enum:
+        - RENTAL_RESERVATION
+      example: RENTAL_RESERVATION
+    RentalDateTime:
+      type: string
+      format: date-time
+      example: '2026-06-01T10:00:00+03:00'
+    ErrorResponse:
+      type: object
+      required:
+        - errorCode
+        - message
+      properties:
+        errorCode:
+          type: string
+          example: RESERVATION-CONFIRM-001
+        message:
+          type: string
+          example: Validation error

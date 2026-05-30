@@ -1,7 +1,0 @@
-type: object
-properties:
-  amount:
-    type: number
-    format: double
-    example: 78500.0
-required: [amount]

@@ -20,7 +20,22 @@
       "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\('vehicle-in-use', d\\), indent=2\\)\\)\")",
       "PowerShell(Get-Process *)",
       "Bash(curl *)",
-      "Bash(pkill -f \"run_mock_server.*8082\")"
+      "Bash(pkill -f \"run_mock_server.*8082\")",
+      "Bash(Get-ChildItem \"C:\\\\Users\\\\Admin\\\\PycharmProjects\\\\TestDesignerAI\" -Depth 0)",
+      "Bash(Select-Object Name, PSIsContainer)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\Admin\\\\PycharmProjects\\\\TestDesignerAI\" -Recurse -File -Filter \"*.py\")",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(Sort-Object)",
+      "PowerShell(Invoke-WebRequest -Uri \"http://localhost:8000/api/v1/mock/seed-ids\" -UseBasicParsing -TimeoutSec 3 2>$null | Select-Object -ExpandProperty StatusCode)",
+      "PowerShell(Start-Process -FilePath \"python\" -ArgumentList \"run_mock.py\" -WorkingDirectory \"C:\\\\Users\\\\Admin\\\\PycharmProjects\\\\TestDesignerAI\" -WindowStyle Hidden)",
+      "PowerShell(Start-Sleep -Seconds 4; Invoke-WebRequest -Uri \"http://localhost:8000/api/v1/mock/seed-ids\" -UseBasicParsing -TimeoutSec 5 | Select-Object -ExpandProperty StatusCode)",
+      "PowerShell(Invoke-WebRequest -Uri \"http://localhost:11434/api/tags\" -UseBasicParsing -TimeoutSec 3 2>$null | Select-Object -ExpandProperty StatusCode)",
+      "PowerShell(Get-Command *)",
+      "PowerShell(Start-Process -FilePath \"python\" -ArgumentList \"run_mock_bulletin.py\" -WorkingDirectory \"C:\\\\Users\\\\Admin\\\\PycharmProjects\\\\TestDesignerAI\" -WindowStyle Hidden; Start-Sleep -Seconds 4; Invoke-WebRequest -Uri \"http://localhost:8001/api/bb/v1/mock/seed-ids\" -UseBasicParsing -TimeoutSec 5 | Select-Object -ExpandProperty StatusCode)",
+      "PowerShell(Start-Sleep -Seconds 5; Invoke-WebRequest -Uri \"http://localhost:8001/api/bb/v1/mock/seed-ids\" -UseBasicParsing -TimeoutSec 5 | Select-Object -ExpandProperty StatusCode)",
+      "PowerShell(cd C:\\\\Users\\\\Admin\\\\PycharmProjects\\\\TestDesignerAI; $env:PYTHONIOENCODING=\"utf-8\"; python run_bulletin_board.py 2>&1)",
+      "PowerShell(Start-Process -FilePath \"python\" -ArgumentList \"run_mock_bulletin.py\" -WorkingDirectory \"C:\\\\Users\\\\Admin\\\\PycharmProjects\\\\TestDesignerAI\" -WindowStyle Hidden; Start-Sleep -Seconds 5; Invoke-WebRequest -Uri \"http://localhost:8080/api/bb/v1/mock/seed-ids\" -UseBasicParsing -TimeoutSec 5 | Select-Object -ExpandProperty StatusCode)",
+      "PowerShell(Invoke-WebRequest -Uri \"http://localhost:8080/api/v1/mock/reset\" -Method POST -UseBasicParsing -TimeoutSec 5 | Select-Object -ExpandProperty StatusCode)"
     ]
   }
 }
