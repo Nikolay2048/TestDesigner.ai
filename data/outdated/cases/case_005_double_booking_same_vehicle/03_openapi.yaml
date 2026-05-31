@@ -1,0 +1,209 @@
+openapi: 3.0.3
+info:
+  title: Carsharing Backend API
+  version: 1.0.0
+  description: Синтетическая OpenAPI спецификация для сценария Попытка двойного бронирования автомобиля.
+servers:
+  - url: https://api.carsharing.local/v1
+paths:
+  /users/{userId}:
+    get:
+      summary: Получение пользователя
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /users/{userId}/driver-license:
+    get:
+      summary: Получение водительского удостоверения
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+  /vehicles/available:
+    get:
+      summary: Получение доступных автомобилей
+      responses:
+        '200':
+          description: OK
+  /vehicles/{vehicleId}:
+    get:
+      summary: Получение автомобиля
+      parameters:
+        - name: vehicleId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+  /bookings:
+    post:
+      summary: Создание бронирования
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateBookingRequest' }
+      responses:
+        '201':
+          description: Created
+        '409':
+          $ref: '#/components/responses/BusinessConflict'
+  /bookings/{bookingId}:
+    get:
+      summary: Получение бронирования
+      parameters:
+        - name: bookingId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+  /bookings/{bookingId}/cancel:
+    post:
+      summary: Отмена бронирования
+      parameters:
+        - name: bookingId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+  /bookings/{bookingId}/expire:
+    post:
+      summary: Истечение бронирования
+      parameters:
+        - name: bookingId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+  /rentals/start:
+    post:
+      summary: Старт аренды
+      responses:
+        '201':
+          description: Created
+  /rentals/{rentalId}:
+    get:
+      summary: Получение аренды
+      parameters:
+        - name: rentalId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+  /rentals/{rentalId}/finish:
+    post:
+      summary: Завершение аренды
+      parameters:
+        - name: rentalId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+  /payments:
+    post:
+      summary: Создание платежа
+      responses:
+        '201':
+          description: Created
+  /payments/{paymentId}/retry:
+    post:
+      summary: Повтор платежа
+      parameters:
+        - name: paymentId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+  /payments/{paymentId}/refund:
+    post:
+      summary: Возврат платежа
+      parameters:
+        - name: paymentId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '201':
+          description: Created
+  /fines:
+    post:
+      summary: Создание штрафа
+      responses:
+        '201':
+          description: Created
+  /damage-reports:
+    post:
+      summary: Создание отчета о повреждении
+      responses:
+        '201':
+          description: Created
+  /vehicles/{vehicleId}/telemetry:
+    get:
+      summary: Получение телеметрии автомобиля
+      parameters:
+        - name: vehicleId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+components:
+  responses:
+    NotFound:
+      description: Объект не найден
+    BusinessConflict:
+      description: Ошибка бизнес-логики
+  schemas:
+    User:
+      type: object
+      properties:
+        userId: { type: string }
+        status:
+          type: string
+          enum: [NEW, VERIFIED, BLOCKED, SUSPENDED, FRAUD_CHECK]
+    CreateBookingRequest:
+      type: object
+      required: [userId, vehicleId]
+      properties:
+        userId: { type: string }
+        vehicleId: { type: string }
+    VehicleStatus:
+      type: string
+      enum: [AVAILABLE, RESERVED, IN_USE, MAINTENANCE, BLOCKED, OFFLINE]
+    BookingStatus:
+      type: string
+      enum: [CREATED, CONFIRMED, STARTED, CANCELLED, EXPIRED, CLOSED, FAILED]
+    RentalStatus:
+      type: string
+      enum: [CREATED, STARTED, FINISHED, FAILED, PAYMENT_PENDING, PAYMENT_FAILED, PAID, MANUAL_REVIEW]
+    PaymentStatus:
+      type: string
+      enum: [NEW, AUTHORIZED, CAPTURED, PAID, FAILED, RETRYING, PARTIALLY_REFUNDED, REFUNDED]

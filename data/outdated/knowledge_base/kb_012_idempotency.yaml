@@ -1,0 +1,211 @@
+# ═══════════════════════════════════════════════════════════════════════
+# KB-012 — Идемпотентность операций
+# ═══════════════════════════════════════════════════════════════════════
+
+card_id: KB-012
+title: "Идемпотентность: повторный finish, повторный start, дублирующие операции"
+type: negative
+category: idempotency
+chain_id: NEG-012
+
+source_files:
+  business_requirements: "data/cases/case_012_repeated_finish_rental_request/01_business_requirements.md"
+  system_analysis: "data/cases/case_012_repeated_finish_rental_request/02_system_analysis.md"
+  openapi: "data/cases/case_012_repeated_finish_rental_request/03_openapi.yaml"
+  flk_rules: "data/cases/case_012_repeated_finish_rental_request/04_flk_rules.yaml"
+  status_matrix: "data/cases/case_012_repeated_finish_rental_request/05_status_transition_matrix.yaml"
+
+summary: >
+  Повторный вызов POST /rentals/{id}/finish → 409 RENTAL_STATUS_INVALID (не 200, не 500).
+  Данные аренды (amount, finished_at) не изменяются при повторном вызове.
+  В outbox ровно 1 событие RENTAL_FINISHED (не дублируется).
+  Аналогично: повторный старт аренды по booking-started → 409.
+  POST /bookings для user-with-rental (активная аренда) → 409 USER_HAS_ACTIVE_RENTAL.
+  POST /payments повторно для уже PAID аренды → 409 PAYMENT_OPERATION_DUPLICATE.
+
+business_goals:
+  - "Система защищена от дублирования операций"
+  - "Повторный запрос возвращает ошибку, не изменяет данные"
+  - "Один раз завершённая аренда не создаёт дублирующие записи"
+
+preconditions:
+  setup_call: "POST /mock/reset"
+  seed_state:
+    rental_started:
+      id: "rental-started"
+      status: STARTED
+      userId: "user-with-rental"
+      vehicleId: "vehicle-in-use"
+    booking_started:
+      id: "booking-started"
+      status: STARTED
+      userId: "user-with-rental"
+    rental_for_refund:
+      id: "rental-for-refund"
+      status: PAID
+      note: "для теста PAYMENT_OPERATION_DUPLICATE"
+    payment_captured:
+      id: "payment-captured"
+      status: CAPTURED
+      rentalId: "rental-for-refund"
+
+api_chain:
+  - step: 1
+    name: "Первое завершение аренды → 200 FINISHED"
+    method: POST
+    path: /v1/rentals/rental-started/finish
+    expected_status: 200
+    assert:
+      - "response.status == 'FINISHED'"
+      - "response.amount > 0"
+      - "response.finished_at не пустой"
+    extract: {amount: "response.amount", finished_at: "response.finished_at"}
+
+  - step: 2
+    name: "Повторное завершение → 409 RENTAL_STATUS_INVALID"
+    method: POST
+    path: /v1/rentals/rental-started/finish
+    expected_status: 409
+    assert:
+      - "response.error == 'RENTAL_STATUS_INVALID'"
+
+  - step: 3
+    name: "Данные аренды не изменились"
+    method: GET
+    path: /v1/rentals/rental-started
+    expected_status: 200
+    assert:
+      - "response.status == 'FINISHED'"
+      - "response.amount == {amount из шага 1}"
+      - "response.finished_at == {finished_at из шага 1}"
+
+  - step: 4
+    name: "Третий вызов finish → снова 409 (устойчивость)"
+    method: POST
+    path: /v1/rentals/rental-started/finish
+    expected_status: 409
+    assert:
+      - "response.error == 'RENTAL_STATUS_INVALID'"
+
+  - step: 5
+    name: "В outbox ровно 1 событие RENTAL_FINISHED"
+    method: GET
+    path: "/mock/outbox?type=RENTAL_FINISHED"
+    expected_status: 200
+    assert:
+      - "count == 1"
+
+  - step: 6
+    name: "Повторный старт аренды по booking-started (уже STARTED) → 409"
+    method: POST
+    path: /v1/rentals/start
+    request_body: {bookingId: "booking-started"}
+    expected_status: 409
+    assert:
+      - "response.error == 'BOOKING_STATUS_INVALID'"
+
+  - step: 7
+    name: "Бронирование для user-with-rental (уже есть STARTED rental) → 409"
+    method: POST
+    path: /v1/bookings
+    request_body: {userId: "user-with-rental", vehicleId: "vehicle-available-4"}
+    expected_status: 409
+    assert:
+      - "response.error == 'USER_HAS_ACTIVE_RENTAL'"
+
+  - step: 8
+    name: "Повторный POST /payments для rental-for-refund (уже PAID) → 409"
+    method: POST
+    path: /v1/payments
+    request_body: {rentalId: "rental-for-refund", amount: 240.0}
+    expected_status: 409
+    assert:
+      - "response.error == 'PAYMENT_OPERATION_DUPLICATE'"
+
+  - step: 9
+    name: "Авто вернулось в AVAILABLE после первого завершения"
+    method: GET
+    path: /v1/vehicles/vehicle-in-use
+    expected_status: 200
+    assert:
+      - "response.status == 'AVAILABLE'"
+
+# ─── ФЛК-правила ─────────────────────────────────────────────────────
+flk_rules:
+  - id: FLK-RENTAL-STATUS-INVALID-FINISH
+    endpoint: POST /v1/rentals/{rentalId}/finish
+    condition: "rental.status == FINISHED (уже завершена)"
+    test_seed: "rental-started (после первого finish)"
+    expected_status: 409
+    expected_error_code: RENTAL_STATUS_INVALID
+    postconditions:
+      - "rental.amount не изменился"
+      - "rental.finished_at не изменился"
+      - "RENTAL_FINISHED не дублируется в outbox"
+
+  - id: FLK-RENTAL-STATUS-INVALID-PAID
+    endpoint: POST /v1/rentals/{rentalId}/finish
+    condition: "rental.status == PAID"
+    setup: ["создать платёж для FINISHED rental → PAID"]
+    expected_status: 409
+    expected_error_code: RENTAL_STATUS_INVALID
+
+  - id: FLK-USER-HAS-ACTIVE-RENTAL
+    endpoint: POST /v1/bookings
+    condition: "пользователь уже имеет STARTED rental"
+    test_seed: "user-with-rental + vehicle-available-4"
+    expected_status: 409
+    expected_error_code: USER_HAS_ACTIVE_RENTAL
+
+  - id: FLK-PAYMENT-DUPLICATE-PAID
+    endpoint: POST /v1/payments
+    condition: "rental.status == PAID (CAPTURED платёж уже есть)"
+    test_seed: "rental-for-refund"
+    expected_status: 409
+    expected_error_code: PAYMENT_OPERATION_DUPLICATE
+
+# ─── Переходы статусов ─────────────────────────────────────────────────
+status_transitions:
+  - entity: rental
+    forbidden:
+      - {from: FINISHED, to: FINISHED, reason: "Повторный finish → 409 (не 200)"}
+      - {from: PAID, to: FINISHED, reason: "Нельзя заново завершить оплаченную аренду"}
+
+expected_outbox_events:
+  idempotency_guarantee:
+    - "RENTAL_FINISHED: ровно 1 событие за 1 завершение (не дублируется)"
+    - "VEHICLE_RELEASED: ровно 1 событие"
+
+# ─── Техники тест-дизайна ─────────────────────────────────────────────
+test_design_techniques:
+  idempotency_testing:
+    operations_to_test:
+      - endpoint: "POST /v1/rentals/{id}/finish"
+        first_call: "200 FINISHED"
+        second_call: "409 RENTAL_STATUS_INVALID"
+        data_invariant: "amount и finished_at не изменяются"
+      - endpoint: "POST /v1/bookings/{id}/cancel"
+        first_call: "200 CANCELLED"
+        second_call: "409 BOOKING_STATUS_INVALID"
+      - endpoint: "POST /v1/bookings/{id}/expire"
+        first_call: "200 EXPIRED"
+        second_call: "409 BOOKING_STATUS_INVALID"
+
+  state_transition:
+    invalid_repeat_states:
+      - "FINISHED → finish повторно → должен быть 409, не 200"
+      - "PAID → finish повторно → должен быть 409"
+      - "CANCELLED → cancel повторно → должен быть 409"
+
+coverage_checklist:
+  idempotency:
+    - "[ ] Повторный finish FINISHED аренды → 409 RENTAL_STATUS_INVALID"
+    - "[ ] Повторный finish PAID аренды → 409 RENTAL_STATUS_INVALID"
+    - "[ ] amount не изменяется при повторных запросах"
+    - "[ ] finished_at не изменяется при повторных запросах"
+    - "[ ] RENTAL_FINISHED в outbox ровно 1 раз"
+    - "[ ] 3-й вызов finish также возвращает 409"
+  business_rules:
+    - "[ ] USER_HAS_ACTIVE_RENTAL при попытке бронирования с активной арендой"
+    - "[ ] PAYMENT_OPERATION_DUPLICATE для уже оплаченной аренды"
+    - "[ ] BOOKING_STATUS_INVALID при повторном старте по STARTED booking"

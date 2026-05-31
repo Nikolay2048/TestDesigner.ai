@@ -1,0 +1,112 @@
+statusTransitionMatrix:
+  - entity: User
+    statuses: [NEW, VERIFIED, BLOCKED, SUSPENDED, FRAUD_CHECK]
+    allowedTransitions:
+      - from: NEW
+        to: VERIFIED
+        trigger: successful_user_verification
+      - from: VERIFIED
+        to: BLOCKED
+        trigger: manual_block_or_debt
+      - from: BLOCKED
+        to: VERIFIED
+        trigger: manual_unblock
+    forbiddenTransitions:
+      - from: BLOCKED
+        to: NEW
+        reason: Заблокированный пользователь не возвращается в первичный статус
+  - entity: Vehicle
+    statuses: [AVAILABLE, RESERVED, IN_USE, MAINTENANCE, BLOCKED, OFFLINE]
+    allowedTransitions:
+      - from: AVAILABLE
+        to: RESERVED
+        trigger: booking_confirmed
+      - from: RESERVED
+        to: IN_USE
+        trigger: rental_started
+      - from: IN_USE
+        to: AVAILABLE
+        trigger: rental_finished
+      - from: RESERVED
+        to: AVAILABLE
+        trigger: booking_cancelled_or_expired
+      - from: AVAILABLE
+        to: MAINTENANCE
+        trigger: maintenance_required
+    forbiddenTransitions:
+      - from: MAINTENANCE
+        to: IN_USE
+        reason: Автомобиль на обслуживании не может быть передан в аренду
+  - entity: Booking
+    statuses: [CREATED, CONFIRMED, STARTED, CANCELLED, EXPIRED, CLOSED, FAILED]
+    allowedTransitions:
+      - from: CREATED
+        to: CONFIRMED
+        trigger: booking_validation_passed
+      - from: CONFIRMED
+        to: STARTED
+        trigger: rental_started
+      - from: CONFIRMED
+        to: CANCELLED
+        trigger: cancel_booking
+      - from: CONFIRMED
+        to: EXPIRED
+        trigger: booking_ttl_expired
+    forbiddenTransitions:
+      - from: CANCELLED
+        to: STARTED
+        reason: Отмененное бронирование нельзя использовать для старта аренды
+  - entity: RentalSession
+    statuses: [CREATED, STARTED, FINISHED, FAILED, PAYMENT_PENDING, PAYMENT_FAILED, PAID, MANUAL_REVIEW]
+    allowedTransitions:
+      - from: CREATED
+        to: STARTED
+        trigger: rental_start_validation_passed
+      - from: STARTED
+        to: FINISHED
+        trigger: rental_finish_validation_passed
+      - from: FINISHED
+        to: PAYMENT_PENDING
+        trigger: payment_created
+      - from: PAYMENT_PENDING
+        to: PAID
+        trigger: payment_captured
+    forbiddenTransitions:
+      - from: FINISHED
+        to: STARTED
+        reason: Завершенная аренда не может быть возвращена в активную
+  - entity: Payment
+    statuses: [NEW, AUTHORIZED, CAPTURED, PAID, FAILED, RETRYING, PARTIALLY_REFUNDED, REFUNDED]
+    allowedTransitions:
+      - from: NEW
+        to: CAPTURED
+        trigger: payment_capture_success
+      - from: NEW
+        to: FAILED
+        trigger: payment_capture_failed
+      - from: FAILED
+        to: RETRYING
+        trigger: payment_retry_started
+      - from: CAPTURED
+        to: REFUNDED
+        trigger: refund_created
+    forbiddenTransitions:
+      - from: REFUNDED
+        to: CAPTURED
+        reason: Возвращенный платеж не должен повторно списываться
+  - entity: OutboxEvent
+    statuses: [NEW, PUBLISHED, FAILED, RETRYING]
+    allowedTransitions:
+      - from: NEW
+        to: PUBLISHED
+        trigger: kafka_publish_success
+      - from: NEW
+        to: FAILED
+        trigger: kafka_publish_error
+      - from: FAILED
+        to: RETRYING
+        trigger: outbox_retry_started
+    forbiddenTransitions:
+      - from: PUBLISHED
+        to: NEW
+        reason: Опубликованное событие не должно возвращаться в начальный статус

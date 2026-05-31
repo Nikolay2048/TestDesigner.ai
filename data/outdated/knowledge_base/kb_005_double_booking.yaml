@@ -1,0 +1,255 @@
+# ═══════════════════════════════════════════════════════════════════════
+# KB-005 — Предотвращение двойного бронирования одного автомобиля
+# ═══════════════════════════════════════════════════════════════════════
+
+card_id: KB-005
+title: "Отказ в двойном бронировании — VEHICLE_NOT_AVAILABLE для всех недоступных статусов"
+type: negative
+category: double_booking
+chain_id: NEG-005
+
+source_files:
+  business_requirements: "data/cases/case_005_double_booking_same_vehicle/01_business_requirements.md"
+  system_analysis: "data/cases/case_005_double_booking_same_vehicle/02_system_analysis.md"
+  openapi: "data/cases/case_005_double_booking_same_vehicle/03_openapi.yaml"
+  flk_rules: "data/cases/case_005_double_booking_same_vehicle/04_flk_rules.yaml"
+  status_matrix: "data/cases/case_005_double_booking_same_vehicle/05_status_transition_matrix.yaml"
+
+summary: >
+  Система запрещает бронировать автомобиль, который уже занят (не AVAILABLE).
+  Код ошибки VEHICLE_NOT_AVAILABLE возвращается для статусов: RESERVED, IN_USE, MAINTENANCE, BLOCKED.
+  VEHICLE_NOT_FOUND (404) — для несуществующего vehicleId.
+  Сценарий конкурентного бронирования: два пользователя одновременно пытаются
+  забронировать один авто — второй получает 409.
+  После отмены первого бронирования авто снова доступно.
+
+business_goals:
+  - "Один автомобиль не может быть забронирован двумя пользователями одновременно"
+  - "Система обеспечивает консистентность статуса авто"
+  - "После отмены бронирования авто становится доступным для других"
+
+preconditions:
+  setup_call: "POST /mock/reset"
+  seed_state:
+    vehicle_reserved:
+      id: "vehicle-reserved"
+      status: RESERVED
+      booking: "booking-reserved (user-verified)"
+    vehicle_in_use:
+      id: "vehicle-in-use"
+      status: IN_USE
+      rental: "rental-started"
+    vehicle_maintenance:
+      id: "vehicle-maintenance"
+      status: MAINTENANCE
+    vehicle_blocked:
+      id: "vehicle-blocked"
+      status: BLOCKED
+    vehicle_available_4:
+      id: "vehicle-available-4"
+      status: AVAILABLE
+    users_available: [user-verified, user-for-cancel, user-for-fine]
+
+api_chain:
+  - step: 1
+    name: "Подтвердить статус RESERVED авто"
+    method: GET
+    path: /v1/vehicles/vehicle-reserved
+    expected_status: 200
+    assert:
+      - "response.status == 'RESERVED'"
+
+  - step: 2
+    name: "Попытка бронирования RESERVED авто → 409 VEHICLE_NOT_AVAILABLE"
+    method: POST
+    path: /v1/bookings
+    request_body: {userId: "user-for-cancel", vehicleId: "vehicle-reserved"}
+    expected_status: 409
+    assert:
+      - "response.error == 'VEHICLE_NOT_AVAILABLE'"
+
+  - step: 3
+    name: "Попытка бронирования IN_USE авто → 409 VEHICLE_NOT_AVAILABLE"
+    method: POST
+    path: /v1/bookings
+    request_body: {userId: "user-verified", vehicleId: "vehicle-in-use"}
+    expected_status: 409
+    assert:
+      - "response.error == 'VEHICLE_NOT_AVAILABLE'"
+
+  - step: 4
+    name: "Попытка бронирования MAINTENANCE авто → 409 VEHICLE_NOT_AVAILABLE"
+    method: POST
+    path: /v1/bookings
+    request_body: {userId: "user-verified", vehicleId: "vehicle-maintenance"}
+    expected_status: 409
+    assert:
+      - "response.error == 'VEHICLE_NOT_AVAILABLE'"
+
+  - step: 5
+    name: "Попытка бронирования BLOCKED авто → 409 VEHICLE_NOT_AVAILABLE"
+    method: POST
+    path: /v1/bookings
+    request_body: {userId: "user-verified", vehicleId: "vehicle-blocked"}
+    expected_status: 409
+    assert:
+      - "response.error == 'VEHICLE_NOT_AVAILABLE'"
+
+  - step: 6
+    name: "Сценарий конкурентного бронирования — USER_1 бронирует vehicle-available-4"
+    method: POST
+    path: /v1/bookings
+    request_body: {userId: "user-verified", vehicleId: "vehicle-available-4"}
+    expected_status: 201
+    assert:
+      - "response.status == 'CONFIRMED'"
+    extract: {bookingId_user1: "response.bookingId"}
+
+  - step: 7
+    name: "Авто теперь RESERVED"
+    method: GET
+    path: /v1/vehicles/vehicle-available-4
+    expected_status: 200
+    assert:
+      - "response.status == 'RESERVED'"
+
+  - step: 8
+    name: "USER_2 пытается забронировать то же авто → 409 VEHICLE_NOT_AVAILABLE"
+    method: POST
+    path: /v1/bookings
+    request_body: {userId: "user-for-cancel", vehicleId: "vehicle-available-4"}
+    expected_status: 409
+    assert:
+      - "response.error == 'VEHICLE_NOT_AVAILABLE'"
+
+  - step: 9
+    name: "USER_1 отменяет своё бронирование"
+    method: POST
+    path: "/v1/bookings/{bookingId_user1}/cancel"
+    request_body: {reason: "TEST_RELEASE"}
+    expected_status: 200
+    assert:
+      - "response.status == 'CANCELLED'"
+
+  - step: 10
+    name: "Авто снова AVAILABLE после отмены"
+    method: GET
+    path: /v1/vehicles/vehicle-available-4
+    expected_status: 200
+    assert:
+      - "response.status == 'AVAILABLE'"
+
+  - step: 11
+    name: "USER_2 теперь успешно бронирует освободившееся авто"
+    method: POST
+    path: /v1/bookings
+    request_body: {userId: "user-for-cancel", vehicleId: "vehicle-available-4"}
+    expected_status: 201
+    assert:
+      - "response.status == 'CONFIRMED'"
+
+  - step: 12
+    name: "Проверка outbox — два BOOKING_CREATED и один BOOKING_CANCELLED"
+    method: GET
+    path: "/mock/outbox"
+    expected_status: 200
+    assert:
+      - "2 события BOOKING_CREATED (user-verified и user-for-cancel)"
+      - "1 событие BOOKING_CANCELLED (user-verified)"
+
+  - step: 13
+    name: "Несуществующее авто → 404 VEHICLE_NOT_FOUND"
+    method: POST
+    path: /v1/bookings
+    request_body: {userId: "user-verified", vehicleId: "vehicle-nonexistent"}
+    expected_status: 404
+    assert:
+      - "response.error == 'VEHICLE_NOT_FOUND'"
+
+# ─── ФЛК-правила ─────────────────────────────────────────────────────
+flk_rules:
+  - id: FLK-VEHICLE-001_RESERVED
+    endpoint: POST /v1/bookings
+    condition: "vehicle.status == RESERVED"
+    test_seed: "vehicle-reserved"
+    expected_status: 409
+    expected_error_code: VEHICLE_NOT_AVAILABLE
+
+  - id: FLK-VEHICLE-001_IN_USE
+    endpoint: POST /v1/bookings
+    condition: "vehicle.status == IN_USE"
+    test_seed: "vehicle-in-use"
+    expected_status: 409
+    expected_error_code: VEHICLE_NOT_AVAILABLE
+
+  - id: FLK-VEHICLE-001_MAINTENANCE
+    endpoint: POST /v1/bookings
+    condition: "vehicle.status == MAINTENANCE"
+    test_seed: "vehicle-maintenance"
+    expected_status: 409
+    expected_error_code: VEHICLE_NOT_AVAILABLE
+
+  - id: FLK-VEHICLE-001_BLOCKED
+    endpoint: POST /v1/bookings
+    condition: "vehicle.status == BLOCKED"
+    test_seed: "vehicle-blocked"
+    expected_status: 409
+    expected_error_code: VEHICLE_NOT_AVAILABLE
+
+  - id: FLK-VEHICLE-NOT-FOUND
+    endpoint: POST /v1/bookings
+    condition: "vehicleId не существует"
+    test_input: {vehicleId: "vehicle-nonexistent"}
+    expected_status: 404
+    expected_error_code: VEHICLE_NOT_FOUND
+
+# ─── Переходы статусов ─────────────────────────────────────────────────
+status_transitions:
+  - entity: vehicle
+    transitions:
+      - {from: AVAILABLE, to: RESERVED, trigger: "Первое бронирование → 201"}
+      - {from: RESERVED, to: AVAILABLE, trigger: "Отмена бронирования → 200"}
+    blocked_by_status: "VEHICLE_NOT_AVAILABLE при RESERVED|IN_USE|MAINTENANCE|BLOCKED"
+
+# ─── Техники тест-дизайна ─────────────────────────────────────────────
+test_design_techniques:
+  equivalence_partitioning:
+    valid_class: "vehicle.status == AVAILABLE → 201"
+    invalid_classes:
+      - "vehicle.status == RESERVED → 409 VEHICLE_NOT_AVAILABLE"
+      - "vehicle.status == IN_USE → 409 VEHICLE_NOT_AVAILABLE"
+      - "vehicle.status == MAINTENANCE → 409 VEHICLE_NOT_AVAILABLE"
+      - "vehicle.status == BLOCKED → 409 VEHICLE_NOT_AVAILABLE"
+      - "vehicle не существует → 404 VEHICLE_NOT_FOUND"
+
+  pairwise_testing:
+    description: "Покрыть все недоступные статусы авто для разных пользователей"
+    matrix:
+      - {user: user-verified, vehicle: vehicle-reserved, expected: 409}
+      - {user: user-for-cancel, vehicle: vehicle-in-use, expected: 409}
+      - {user: user-for-fine, vehicle: vehicle-maintenance, expected: 409}
+      - {user: user-verified, vehicle: vehicle-blocked, expected: 409}
+
+  concurrency_testing:
+    description: "Два последовательных запроса на одно авто"
+    scenario:
+      1: "POST /v1/bookings {user1 + vehicle-available-4} → 201"
+      2: "POST /v1/bookings {user2 + vehicle-available-4} → 409 (авто уже RESERVED)"
+      3: "POST /v1/bookings/{bookingId}/cancel → 200"
+      4: "POST /v1/bookings {user2 + vehicle-available-4} → 201 (авто снова AVAILABLE)"
+
+coverage_checklist:
+  negative:
+    - "[ ] VEHICLE_NOT_AVAILABLE — RESERVED (vehicle-reserved)"
+    - "[ ] VEHICLE_NOT_AVAILABLE — IN_USE (vehicle-in-use)"
+    - "[ ] VEHICLE_NOT_AVAILABLE — MAINTENANCE (vehicle-maintenance)"
+    - "[ ] VEHICLE_NOT_AVAILABLE — BLOCKED (vehicle-blocked)"
+    - "[ ] VEHICLE_NOT_FOUND (vehicle-nonexistent)"
+    - "[ ] Второй пользователь не может забронировать уже забронированное авто"
+  positive:
+    - "[ ] После отмены бронирования авто → AVAILABLE"
+    - "[ ] После освобождения авто другой пользователь успешно его бронирует"
+  outbox:
+    - "[ ] 2 BOOKING_CREATED"
+    - "[ ] 1 BOOKING_CANCELLED"
+    - "[ ] Нет лишних событий при отказах"

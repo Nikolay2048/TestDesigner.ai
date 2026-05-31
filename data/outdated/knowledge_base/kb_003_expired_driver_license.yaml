@@ -1,0 +1,194 @@
+# ═══════════════════════════════════════════════════════════════════════
+# KB-003 — Попытка аренды с просроченным водительским удостоверением
+# ═══════════════════════════════════════════════════════════════════════
+
+card_id: KB-003
+title: "Отказ в бронировании при просроченном водительском удостоверении"
+type: negative
+category: driver_license
+chain_id: NEG-003
+
+source_files:
+  business_requirements: "data/cases/case_003_rental_with_expired_driver_license/01_business_requirements.md"
+  system_analysis: "data/cases/case_003_rental_with_expired_driver_license/02_system_analysis.md"
+  openapi: "data/cases/case_003_rental_with_expired_driver_license/03_openapi.yaml"
+  flk_rules: "data/cases/case_003_rental_with_expired_driver_license/04_flk_rules.yaml"
+  status_matrix: "data/cases/case_003_rental_with_expired_driver_license/05_status_transition_matrix.yaml"
+
+summary: >
+  Система должна проверять срок действия ВУ при создании бронирования.
+  Если expiration_date <= today → отказ с кодом DRIVER_LICENSE_EXPIRED.
+  Авто не должно становиться RESERVED, outbox не должен содержать BOOKING_CREATED.
+  Граничное значение: expiration_date == today → EXPIRED.
+  Позитивный контраст: user-verified (ВУ действует) → 201.
+
+business_goals:
+  - "ВУ должно быть подтверждено (VERIFIED) и не просрочено на момент бронирования"
+  - "Просроченное ВУ блокирует создание бронирования и старт аренды"
+  - "Авто не должно резервироваться за клиентом с недействительным ВУ"
+
+preconditions:
+  setup_call: "POST /mock/reset"
+  seed_state:
+    user_expired_lic:
+      id: "user-expired-lic"
+      status: VERIFIED
+      driver_license:
+        status: VERIFIED
+        expiration_date: "today - 1 день"
+      payment_method: "активный"
+    user_blocked:
+      id: "user-blocked"
+      status: BLOCKED
+      driver_license: {status: REJECTED}
+      note: "USER_BLOCKED проверяется раньше DRIVER_LICENSE_EXPIRED"
+    vehicle_available_4: {status: AVAILABLE}
+
+api_chain:
+  - step: 1
+    name: "Получить данные пользователя с просроченным ВУ"
+    method: GET
+    path: /v1/users/user-expired-lic
+    expected_status: 200
+    assert:
+      - "response.status == 'VERIFIED'"
+
+  - step: 2
+    name: "Получить ВУ — убедиться что оно просрочено"
+    method: GET
+    path: /v1/users/user-expired-lic/driver-license
+    expected_status: 200
+    assert:
+      - "response.status == 'VERIFIED'"
+      - "response.expiration_date <= today()"
+
+  - step: 3
+    name: "Попытка бронирования с просроченным ВУ → 409 DRIVER_LICENSE_EXPIRED"
+    method: POST
+    path: /v1/bookings
+    request_body: {userId: "user-expired-lic", vehicleId: "vehicle-available-4"}
+    expected_status: 409
+    assert:
+      - "response.error == 'DRIVER_LICENSE_EXPIRED'"
+      - "response.message содержит userId или описание"
+
+  - step: 4
+    name: "Авто осталось AVAILABLE"
+    method: GET
+    path: /v1/vehicles/vehicle-available-4
+    expected_status: 200
+    assert:
+      - "response.status == 'AVAILABLE'"
+
+  - step: 5
+    name: "Outbox НЕ содержит BOOKING_CREATED для user-expired-lic"
+    method: GET
+    path: "/mock/outbox?type=BOOKING_CREATED"
+    expected_status: 200
+    assert:
+      - "нет события BOOKING_CREATED с userId == 'user-expired-lic'"
+
+  - step: 6
+    name: "USER_BLOCKED проверяется ДО ВУ (user-blocked → USER_BLOCKED, не DRIVER_LICENSE_EXPIRED)"
+    method: POST
+    path: /v1/bookings
+    request_body: {userId: "user-blocked", vehicleId: "vehicle-available-4"}
+    expected_status: 409
+    assert:
+      - "response.error == 'USER_BLOCKED'"
+      - "response.error != 'DRIVER_LICENSE_EXPIRED'"
+
+  - step: 7
+    name: "Контраст: user-verified (действующее ВУ) → 201"
+    method: POST
+    path: /v1/bookings
+    request_body: {userId: "user-verified", vehicleId: "vehicle-available-4"}
+    expected_status: 201
+    assert:
+      - "response.status == 'CONFIRMED'"
+
+# ─── ФЛК-правила ─────────────────────────────────────────────────────
+flk_rules:
+  - id: FLK-LICENSE-001_EXPIRED
+    endpoint: POST /v1/bookings
+    condition: "license.expiration_date <= today()"
+    test_input: {userId: "user-expired-lic", vehicleId: "vehicle-available-4"}
+    expected_status: 409
+    expected_error_code: DRIVER_LICENSE_EXPIRED
+    note: "seed: user-expired-lic имеет expiration_date = today - 1"
+
+  - id: FLK-LICENSE-001_BOUNDARY
+    endpoint: POST /v1/bookings
+    condition: "license.expiration_date == today (граничное значение)"
+    note: >
+      Нет прямого seed-ID для этого случая. Агент может использовать user-expired-lic
+      (expiration_date = yesterday) как ближайший аналог граничного значения.
+      Фактическое граничное значение: expiration_date == today → DRIVER_LICENSE_EXPIRED.
+    expected_status: 409
+    expected_error_code: DRIVER_LICENSE_EXPIRED
+
+  - id: FLK-LICENSE-PRIORITY
+    description: "Порядок проверок при множестве ошибок"
+    order: "1. USER_NOT_FOUND → 2. USER_BLOCKED → 3. USER_NOT_VERIFIED → 4. DRIVER_LICENSE_EXPIRED"
+    test: "user-blocked: должен вернуть USER_BLOCKED, не DRIVER_LICENSE_REJECTED"
+    test_input: {userId: "user-blocked", vehicleId: "vehicle-available-4"}
+    expected_status: 409
+    expected_error_code: USER_BLOCKED
+
+# ─── Переходы статусов ─────────────────────────────────────────────────
+status_transitions:
+  - entity: vehicle
+    note: "При отказе из-за ВУ vehicle статус НЕ меняется — остаётся AVAILABLE"
+  - entity: booking
+    note: "Booking НЕ создаётся при DRIVER_LICENSE_EXPIRED"
+
+expected_outbox_events:
+  must_not_appear:
+    - "BOOKING_CREATED (при DRIVER_LICENSE_EXPIRED)"
+
+# ─── Граничные значения ────────────────────────────────────────────────
+boundary_value_analysis:
+  - field: "license.expiration_date"
+    cases:
+      - {value: "today + 1 день", expected: "201 — ВУ действует"}
+      - {value: "today", expected: "409 DRIVER_LICENSE_EXPIRED (истекло сегодня)"}
+      - {value: "today - 1 день", expected: "409 DRIVER_LICENSE_EXPIRED"}
+      - {value: "today - 365 дней", expected: "409 DRIVER_LICENSE_EXPIRED"}
+    seed_available: "user-expired-lic: expiration_date = today - 1"
+    rule: "expiration_date > today → valid; expiration_date <= today → EXPIRED"
+
+# ─── Техники тест-дизайна ─────────────────────────────────────────────
+test_design_techniques:
+  equivalence_partitioning:
+    valid_class:
+      - "expiration_date > today + status=VERIFIED → бронирование разрешено"
+    invalid_classes:
+      - "expiration_date == today → DRIVER_LICENSE_EXPIRED"
+      - "expiration_date < today → DRIVER_LICENSE_EXPIRED"
+      - "status == REJECTED → DRIVER_LICENSE_REJECTED"
+      - "status != VERIFIED (и != REJECTED) → DRIVER_LICENSE_INVALID"
+      - "лицензия отсутствует → DRIVER_LICENSE_NOT_FOUND"
+
+  decision_table:
+    title: "Проверка ВУ при бронировании"
+    conditions:
+      C1_license_exists: [yes, no]
+      C2_license_status: [VERIFIED, REJECTED, other]
+      C3_expiration_valid: [valid (>today), expired (<=today)]
+    outcomes:
+      - "no + any + any → DRIVER_LICENSE_NOT_FOUND (409)"
+      - "yes + REJECTED + any → DRIVER_LICENSE_REJECTED (409)"
+      - "yes + other + any → DRIVER_LICENSE_INVALID (409)"
+      - "yes + VERIFIED + expired → DRIVER_LICENSE_EXPIRED (409)"
+      - "yes + VERIFIED + valid → проверка пройдена → зависит от других условий"
+
+coverage_checklist:
+  negative:
+    - "[ ] DRIVER_LICENSE_EXPIRED — expiration_date = today - 1 (seed: user-expired-lic)"
+    - "[ ] DRIVER_LICENSE_EXPIRED — граница: expiration_date = today"
+    - "[ ] Порядок приоритета: USER_BLOCKED проверяется раньше ВУ"
+  state_integrity:
+    - "[ ] vehicle-available-4 остаётся AVAILABLE после отказа"
+    - "[ ] BOOKING_CREATED не появляется в outbox"
+  positive:
+    - "[ ] user-verified (ВУ expires +3 года) → 201 (контрастный тест)"

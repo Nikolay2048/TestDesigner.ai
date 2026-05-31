@@ -1,0 +1,397 @@
+openapi: 3.0.3
+info:
+  title: UC_101_CreateAd
+  version: 1.0.0
+  description: Регистрация пользователя, авторизация, создание и публикация объявления на доске объявлений.
+servers:
+  - url: https://api.example.com
+    description: Example API host
+paths:
+  /api/bb/v1/users/register:
+    post:
+      tags:
+        - Users
+      summary: Register a new user
+      description: Создаёт аккаунт с проверкой уникальности email и минимальной длины пароля.
+      operationId: registerUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterUserRequest'
+      responses:
+        '201':
+          description: Пользователь зарегистрирован.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterUserResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/bb/v1/users/login:
+    post:
+      tags:
+        - Users
+      summary: Authenticate and get token
+      description: Проверяет учётные данные и возвращает токен доступа.
+      operationId: loginUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginUserRequest'
+      responses:
+        '200':
+          description: Авторизация успешна.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginUserResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/bb/v1/ads:
+    post:
+      tags:
+        - Ads
+      summary: Create an ad draft
+      description: Создаёт объявление в статусе DRAFT. Требует авторизации.
+      operationId: createAd
+      parameters:
+        - $ref: '#/components/parameters/AuthorizationHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAdRequest'
+      responses:
+        '201':
+          description: Черновик объявления создан.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateAdResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/bb/v1/ads/{adId}/publish:
+    post:
+      tags:
+        - Ads
+      summary: Publish an ad
+      description: Переводит объявление из DRAFT в PUBLISHED. Только автор, только из статуса DRAFT.
+      operationId: publishAd
+      parameters:
+        - $ref: '#/components/parameters/AdIdPathParam'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+      responses:
+        '200':
+          description: Объявление опубликовано.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublishAdResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  parameters:
+    AdIdPathParam:
+      name: adId
+      in: path
+      required: true
+      description: UUID объявления.
+      schema:
+        type: string
+        format: uuid
+    AuthorizationHeader:
+      name: Authorization
+      in: header
+      required: true
+      description: Bearer-токен. Формат — "Bearer {token}".
+      schema:
+        type: string
+        example: "Bearer token-seller-aaa00001"
+
+  responses:
+    ValidationError:
+      description: Ошибка валидации входных данных.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            emptyTitle:
+              summary: Пустой заголовок
+              value:
+                errorCode: BB-AD-001
+                message: title is required
+            invalidCategory:
+              summary: Недопустимая категория
+              value:
+                errorCode: BB-AD-003
+                message: category is not supported
+    UnauthorizedError:
+      description: Токен отсутствует или невалиден.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            invalidToken:
+              summary: Токен недействителен
+              value:
+                errorCode: BB-AD-010
+                message: token is invalid or expired
+    ForbiddenError:
+      description: Доступ запрещён.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            notAuthor:
+              summary: Пользователь не является автором
+              value:
+                errorCode: BB-AD-021
+                message: only the ad author can publish this ad
+            bannedUser:
+              summary: Пользователь заблокирован
+              value:
+                errorCode: BB-AUTH-003
+                message: user is banned
+    ConflictError:
+      description: Конфликт состояния.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            emailTaken:
+              summary: Email уже занят
+              value:
+                errorCode: BB-USER-003
+                message: email is already registered
+            alreadyPublished:
+              summary: Объявление не в статусе DRAFT
+              value:
+                errorCode: BB-AD-022
+                message: only DRAFT ads can be published
+    NotFoundError:
+      description: Ресурс не найден.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            adNotFound:
+              summary: Объявление не найдено
+              value:
+                errorCode: BB-AD-020
+                message: ad not found
+    InternalServerError:
+      description: Внутренняя ошибка сервера.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    RegisterUserRequest:
+      type: object
+      required:
+        - email
+        - password
+        - name
+      properties:
+        email:
+          type: string
+          format: email
+          example: seller@example.com
+        password:
+          type: string
+          minLength: 6
+          example: secret123
+        name:
+          type: string
+          minLength: 1
+          example: Ivan Seller
+
+    RegisterUserResponse:
+      type: object
+      required:
+        - userId
+        - email
+        - status
+      properties:
+        userId:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        status:
+          type: string
+          enum:
+            - ACTIVE
+          example: ACTIVE
+
+    LoginUserRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+          example: seller@example.com
+        password:
+          type: string
+          example: secret123
+
+    LoginUserResponse:
+      type: object
+      required:
+        - userId
+        - token
+      properties:
+        userId:
+          type: string
+          format: uuid
+        token:
+          type: string
+          example: token-seller-aaa00001
+
+    CreateAdRequest:
+      type: object
+      required:
+        - title
+        - description
+        - price
+        - currency
+        - category
+        - city
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          example: iPhone 14 Pro в отличном состоянии
+        description:
+          type: string
+          minLength: 1
+          example: Продаю iPhone 14 Pro, 256 GB, Space Black. Полный комплект.
+        price:
+          type: number
+          format: decimal
+          minimum: 0.01
+          example: 75000.00
+        currency:
+          $ref: '#/components/schemas/AdCurrency'
+        category:
+          $ref: '#/components/schemas/AdCategory'
+        city:
+          type: string
+          minLength: 1
+          example: Moscow
+
+    CreateAdResponse:
+      type: object
+      required:
+        - adId
+        - status
+        - authorId
+        - createdAt
+      properties:
+        adId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - DRAFT
+          example: DRAFT
+        authorId:
+          type: string
+          format: uuid
+        createdAt:
+          type: string
+          format: date-time
+
+    PublishAdResponse:
+      type: object
+      required:
+        - adId
+        - status
+        - publishedAt
+      properties:
+        adId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - PUBLISHED
+          example: PUBLISHED
+        publishedAt:
+          type: string
+          format: date-time
+
+    AdCategory:
+      type: string
+      enum:
+        - ELECTRONICS
+        - CLOTHING
+        - FURNITURE
+        - TRANSPORT
+        - SERVICES
+        - OTHER
+      example: ELECTRONICS
+
+    AdCurrency:
+      type: string
+      enum:
+        - RUB
+        - USD
+        - EUR
+      example: RUB
+
+    ErrorResponse:
+      type: object
+      required:
+        - errorCode
+        - message
+      properties:
+        errorCode:
+          type: string
+          example: BB-AD-001
+        message:
+          type: string
+          example: Validation error

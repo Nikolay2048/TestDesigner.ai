@@ -1,0 +1,162 @@
+openapi: 3.0.3
+info:
+  title: UC_001_SearchAvailableCars
+  version: 1.0.0
+  description: Поиск доступных автомобилей для аренды.
+servers:
+  - url: https://api.example.com
+    description: Example API host
+paths:
+  /api/v1/cars/availability:
+    get:
+      tags:
+        - Car Availability
+      summary: Search available cars
+      description: Сервис выполняет поиск доступных автомобилей по параметрам клиента.
+      operationId: searchAvailableCars
+      parameters:
+        - $ref: '#/components/parameters/CityIdQueryParam'
+        - $ref: '#/components/parameters/DateFromQueryParam'
+        - $ref: '#/components/parameters/DateToQueryParam'
+        - $ref: '#/components/parameters/DriverAgeQueryParam'
+        - $ref: '#/components/parameters/CarClassQueryParam'
+      responses:
+        '200':
+          description: Список доступных автомобилей успешно получен.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AvailableCarsResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+components:
+  parameters:
+    CityIdQueryParam:
+      name: cityId
+      in: query
+      required: true
+      description: Идентификатор города аренды. Сервер принимает только значения 36 и 77.
+      schema:
+        $ref: '#/components/schemas/CityId'
+    DateFromQueryParam:
+      name: dateFrom
+      in: query
+      required: true
+      description: Дата и время начала аренды.
+      schema:
+        $ref: '#/components/schemas/RentalDateTime'
+    DateToQueryParam:
+      name: dateTo
+      in: query
+      required: true
+      description: Дата и время окончания аренды.
+      schema:
+        $ref: '#/components/schemas/RentalDateTime'
+    DriverAgeQueryParam:
+      name: driverAge
+      in: query
+      required: true
+      description: Возраст водителя.
+      schema:
+        $ref: '#/components/schemas/DriverAge'
+    CarClassQueryParam:
+      name: carClass
+      in: query
+      required: false
+      description: Класс автомобиля.
+      schema:
+        $ref: '#/components/schemas/CarClass'
+  responses:
+    ValidationError:
+      description: Ошибка валидации входных параметров.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            cityIdMissing:
+              summary: cityId не передан
+              value:
+                errorCode: CAR-AVAILABILITY-001
+                message: cityId is required
+            cityIdUnsupported:
+              summary: cityId не равен 36 или 77
+              value:
+                errorCode: CAR-AVAILABILITY-002
+                message: cityId must be 36 or 77
+    InternalServerError:
+      description: Внутренняя ошибка сервера.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    CityId:
+      type: integer
+      enum:
+        - 36
+        - 77
+      example: 77
+    RentalDateTime:
+      type: string
+      format: date-time
+      example: '2026-06-01T10:00:00+03:00'
+    DriverAge:
+      type: integer
+      minimum: 21
+      maximum: 75
+      example: 32
+    CarClass:
+      type: string
+      enum:
+        - ECONOMY
+        - COMFORT
+        - BUSINESS
+        - SUV
+        - PREMIUM
+      example: COMFORT
+    AvailableCarsResponse:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AvailableCar'
+    AvailableCar:
+      type: object
+      required:
+        - carId
+        - cityId
+        - carClass
+        - status
+      properties:
+        carId:
+          type: string
+          format: uuid
+        cityId:
+          $ref: '#/components/schemas/CityId'
+        carClass:
+          $ref: '#/components/schemas/CarClass'
+        status:
+          $ref: '#/components/schemas/CarStatus'
+    CarStatus:
+      type: string
+      enum:
+        - AVAILABLE
+      example: AVAILABLE
+    ErrorResponse:
+      type: object
+      required:
+        - errorCode
+        - message
+      properties:
+        errorCode:
+          type: string
+          example: CAR-AVAILABILITY-001
+        message:
+          type: string
+          example: Validation error

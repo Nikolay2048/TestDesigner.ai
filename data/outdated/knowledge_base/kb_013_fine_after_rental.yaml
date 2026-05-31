@@ -1,0 +1,269 @@
+# ═══════════════════════════════════════════════════════════════════════
+# KB-013 — Создание штрафа после завершения аренды
+# ═══════════════════════════════════════════════════════════════════════
+
+card_id: KB-013
+title: "Создание штрафа за нарушения после завершённой аренды"
+type: positive
+category: fines
+chain_id: POS-013
+
+source_files:
+  business_requirements: "data/cases/case_013_fine_created_after_rental/01_business_requirements.md"
+  system_analysis: "data/cases/case_013_fine_created_after_rental/02_system_analysis.md"
+  openapi: "data/cases/case_013_fine_created_after_rental/03_openapi.yaml"
+  flk_rules: "data/cases/case_013_fine_created_after_rental/04_flk_rules.yaml"
+  status_matrix: "data/cases/case_013_fine_created_after_rental/05_status_transition_matrix.yaml"
+
+summary: >
+  Штрафы могут быть созданы для аренд в статусах FINISHED, PAID, PAYMENT_FAILED.
+  Несколько штрафов для одной аренды — разрешено.
+  Штраф для активной аренды (STARTED) → 409 RENTAL_NOT_CLOSED.
+  Обязательные поля: rentalId, userId, amount(>0), reason.
+  При отсутствии любого обязательного поля → 422.
+  После создания: FINE_CREATED в outbox.
+
+business_goals:
+  - "Штраф создаётся только по завершённой аренде"
+  - "Для одной аренды допустимо несколько штрафов"
+  - "Каждый штраф фиксируется в outbox"
+  - "Нельзя наложить штраф на активную аренду"
+
+preconditions:
+  setup_call: "POST /mock/reset"
+  seed_state:
+    rental_finished:
+      id: "rental-finished"
+      status: FINISHED
+      userId: "user-for-fine"
+      vehicleId: "vehicle-available-5"
+      amount: 480.0
+    rental_started:
+      id: "rental-started"
+      status: STARTED
+      note: "для теста RENTAL_NOT_CLOSED"
+
+api_chain:
+  - step: 1
+    name: "Проверить что rental-finished имеет статус FINISHED"
+    method: GET
+    path: /v1/rentals/rental-finished
+    expected_status: 200
+    assert:
+      - "response.status == 'FINISHED'"
+
+  - step: 2
+    name: "Создать штраф за нарушение парковки — 500 RUB"
+    method: POST
+    path: /v1/fines
+    request_body:
+      rentalId: "rental-finished"
+      userId: "user-for-fine"
+      amount: 500.0
+      reason: "PARKING_VIOLATION"
+      currency: "RUB"
+    expected_status: 201
+    assert:
+      - "response.fineId не пустой"
+      - "response.rentalId == 'rental-finished'"
+      - "response.userId == 'user-for-fine'"
+      - "response.amount == 500.0"
+      - "response.reason == 'PARKING_VIOLATION'"
+      - "response.status == 'CREATED'"
+    extract: {fineId1: "response.fineId"}
+
+  - step: 3
+    name: "GET штрафа"
+    method: GET
+    path: "/v1/fines/{fineId1}"
+    expected_status: 200
+    assert:
+      - "response.fineId == {fineId1}"
+      - "response.amount == 500.0"
+
+  - step: 4
+    name: "Создать второй штраф — зональный (1000 RUB)"
+    method: POST
+    path: /v1/fines
+    request_body:
+      rentalId: "rental-finished"
+      userId: "user-for-fine"
+      amount: 1000.0
+      reason: "ZONE_VIOLATION"
+    expected_status: 201
+    assert:
+      - "response.fineId != {fineId1}"
+
+  - step: 5
+    name: "Создать третий штраф — превышение скорости (100 RUB)"
+    method: POST
+    path: /v1/fines
+    request_body:
+      rentalId: "rental-finished"
+      userId: "user-for-fine"
+      amount: 100.0
+      reason: "SPEEDING"
+    expected_status: 201
+
+  - step: 6
+    name: "Попытка создать штраф по активной аренде → 409 RENTAL_NOT_CLOSED"
+    method: POST
+    path: /v1/fines
+    request_body:
+      rentalId: "rental-started"
+      userId: "user-with-rental"
+      amount: 200.0
+      reason: "TEST"
+    expected_status: 409
+    assert:
+      - "response.error == 'RENTAL_NOT_CLOSED'"
+
+  - step: 7
+    name: "Штраф без rentalId → 422"
+    method: POST
+    path: /v1/fines
+    request_body: {userId: "user-for-fine", amount: 100.0, reason: "TEST"}
+    expected_status: 422
+    assert:
+      - "response.error == 'FINE_RENTAL_REQUIRED'"
+
+  - step: 8
+    name: "Штраф без amount → 422"
+    method: POST
+    path: /v1/fines
+    request_body: {rentalId: "rental-finished", userId: "user-for-fine", reason: "TEST"}
+    expected_status: 422
+    assert:
+      - "response.error == 'FINE_AMOUNT_INVALID'"
+
+  - step: 9
+    name: "Штраф с amount=0 → 422"
+    method: POST
+    path: /v1/fines
+    request_body: {rentalId: "rental-finished", userId: "user-for-fine", amount: 0, reason: "TEST"}
+    expected_status: 422
+    assert:
+      - "response.error == 'FINE_AMOUNT_INVALID'"
+
+  - step: 10
+    name: "Outbox содержит 3 события FINE_CREATED"
+    method: GET
+    path: "/mock/outbox?type=FINE_CREATED"
+    expected_status: 200
+    assert:
+      - "count == 3"
+
+# ─── ФЛК-правила ─────────────────────────────────────────────────────
+flk_rules:
+  - id: FLK-RENTAL-NOT-CLOSED
+    endpoint: POST /v1/fines
+    condition: "rental.status == STARTED (не завершена)"
+    test_seed: "rental-started"
+    test_input: {rentalId: "rental-started", userId: "user-with-rental", amount: 100.0, reason: "TEST"}
+    expected_status: 409
+    expected_error_code: RENTAL_NOT_CLOSED
+
+  - id: FLK-FINE-RENTAL-REQUIRED
+    endpoint: POST /v1/fines
+    condition: "rentalId отсутствует"
+    test_input: {userId: "user-for-fine", amount: 100.0, reason: "TEST"}
+    expected_status: 422
+    expected_error_code: FINE_RENTAL_REQUIRED
+
+  - id: FLK-FINE-USER-REQUIRED
+    endpoint: POST /v1/fines
+    condition: "userId отсутствует"
+    test_input: {rentalId: "rental-finished", amount: 100.0, reason: "TEST"}
+    expected_status: 422
+    expected_error_code: FINE_USER_REQUIRED
+
+  - id: FLK-FINE-AMOUNT-ZERO
+    endpoint: POST /v1/fines
+    condition: "amount == 0"
+    test_input: {rentalId: "rental-finished", userId: "user-for-fine", amount: 0, reason: "TEST"}
+    expected_status: 422
+    expected_error_code: FINE_AMOUNT_INVALID
+
+  - id: FLK-FINE-REASON-REQUIRED
+    endpoint: POST /v1/fines
+    condition: "reason отсутствует"
+    test_input: {rentalId: "rental-finished", userId: "user-for-fine", amount: 100.0}
+    expected_status: 422
+    expected_error_code: FINE_REASON_REQUIRED
+
+  - id: FLK-RENTAL-NOT-FOUND-FINE
+    endpoint: POST /v1/fines
+    condition: "rentalId не существует"
+    test_input: {rentalId: "rental-nonexistent", userId: "user-for-fine", amount: 100.0, reason: "TEST"}
+    expected_status: 404
+    expected_error_code: RENTAL_NOT_FOUND
+
+  - id: FLK-USER-NOT-FOUND-FINE
+    endpoint: POST /v1/fines
+    condition: "userId не существует"
+    test_input: {rentalId: "rental-finished", userId: "user-nonexistent", amount: 100.0, reason: "TEST"}
+    expected_status: 404
+    expected_error_code: USER_NOT_FOUND
+
+expected_outbox_events:
+  on_success:
+    - {event_type: FINE_CREATED, note: "По одному на каждый созданный штраф"}
+  note: "Несколько штрафов = несколько событий FINE_CREATED"
+
+# ─── Граничные значения ─────────────────────────────────────────────────
+boundary_value_analysis:
+  - field: "fine amount"
+    cases:
+      - {value: 0, expected: "422 FINE_AMOUNT_INVALID"}
+      - {value: 0.01, expected: "201 CREATED"}
+      - {value: 100.0, expected: "201 CREATED"}
+      - {value: -1, expected: "422 FINE_AMOUNT_INVALID (негативное)"}
+
+  - field: "rental status для штрафа"
+    allowed: [FINISHED, PAID, PAYMENT_FAILED]
+    denied: [STARTED, CREATED]
+    note: "RENTAL_NOT_CLOSED при статусе не из допустимого набора"
+
+# ─── Техники тест-дизайна ─────────────────────────────────────────────
+test_design_techniques:
+  equivalence_partitioning:
+    valid_class:
+      - "rental.status in {FINISHED, PAID, PAYMENT_FAILED} + все поля заполнены → 201"
+    invalid_classes:
+      - "rental.status == STARTED → 409 RENTAL_NOT_CLOSED"
+      - "rentalId отсутствует → 422"
+      - "userId отсутствует → 422"
+      - "amount = 0 → 422"
+      - "reason отсутствует → 422"
+      - "rentalId не существует → 404"
+
+  pairwise_testing:
+    description: "Типы нарушений × суммы штрафов"
+    pairs:
+      - {reason: PARKING_VIOLATION, amount: 500}
+      - {reason: ZONE_VIOLATION, amount: 1000}
+      - {reason: SPEEDING, amount: 100}
+      - {reason: DAMAGE, amount: 5000}
+
+  multiple_fines:
+    description: "Несколько штрафов за одну аренду"
+    test: "3 штрафа для rental-finished → все 3 создаются → 3 FINE_CREATED в outbox"
+
+coverage_checklist:
+  positive:
+    - "[ ] Создание штрафа для FINISHED аренды → 201"
+    - "[ ] GET штрафа по fineId → 200"
+    - "[ ] Несколько штрафов для одной аренды"
+    - "[ ] Штраф для PAID аренды → 201"
+    - "[ ] FINE_CREATED в outbox"
+  negative:
+    - "[ ] RENTAL_NOT_CLOSED (STARTED)"
+    - "[ ] FINE_RENTAL_REQUIRED"
+    - "[ ] FINE_USER_REQUIRED"
+    - "[ ] FINE_AMOUNT_INVALID (amount=0)"
+    - "[ ] FINE_REASON_REQUIRED"
+    - "[ ] RENTAL_NOT_FOUND"
+    - "[ ] USER_NOT_FOUND"
+  boundary:
+    - "[ ] amount=0 → 422"
+    - "[ ] amount=0.01 → 201"

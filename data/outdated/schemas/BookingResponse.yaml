@@ -1,0 +1,32 @@
+type: object
+
+required:
+  - bookingId
+  - userId
+  - vehicleId
+  - startDate
+  - status
+
+properties:
+  bookingId:
+    type: string
+    example: booking-1
+
+  userId:
+    type: string
+    example: user-1
+
+  vehicleId:
+    type: string
+    example: vehicle-1
+
+  startDate:
+    type: string
+    format: date-time
+    example: "2026-05-20T10:00:00Z"
+
+  status:
+    type: string
+    enum:
+      - CREATED
+      - CANCELLED

@@ -1,0 +1,113 @@
+openapi: 3.0.3
+info:
+  title: UC_DEMO_BugDetection
+  version: 1.0.0
+  description: >
+    Демо-endpoint
+servers:
+  - url: https://api.example.com
+    description: Example API host
+paths:
+  /api/v1/demo/payment-validate:
+    post:
+      tags:
+        - Demo
+      summary: Validate payment parameters
+      description: >
+        Validates payment amount and currency before processing.
+        All listed currencies are supported. Amounts from 1 to 999999 are valid.
+      operationId: validatePayment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ValidatePaymentRequest'
+      responses:
+        '200':
+          description: Payment parameters are valid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidatePaymentResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  responses:
+    ValidationError:
+      description: Validation error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            invalidAmount:
+              summary: Amount out of range
+              value:
+                errorCode: DEMO-001
+                message: amount must be between 1 and 999999
+    InternalServerError:
+      description: Internal server error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    ValidatePaymentRequest:
+      type: object
+      required:
+        - amount
+        - currency
+      properties:
+        amount:
+          type: number
+          format: decimal
+          minimum: 1
+          maximum: 999999
+          example: 1500.50
+          description: Payment amount. Any value from 1 to 999999 is valid.
+        currency:
+          $ref: '#/components/schemas/Currency'
+
+    ValidatePaymentResponse:
+      type: object
+      required:
+        - validated
+        - amount
+        - currency
+      properties:
+        validated:
+          type: boolean
+          example: true
+        amount:
+          type: number
+          format: decimal
+          example: 1500.50
+        currency:
+          $ref: '#/components/schemas/Currency'
+
+    Currency:
+      type: string
+      enum:
+        - RUB
+        - USD
+        - EUR
+      description: Supported currencies. All three are accepted by the API.
+      example: RUB
+
+    ErrorResponse:
+      type: object
+      required:
+        - errorCode
+        - message
+      properties:
+        errorCode:
+          type: string
+          example: DEMO-001
+        message:
+          type: string
+          example: Validation error

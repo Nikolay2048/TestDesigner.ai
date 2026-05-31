@@ -1,0 +1,253 @@
+# ═══════════════════════════════════════════════════════════════════════
+# KB-007 — Ошибка платёжного провайдера при списании
+# ═══════════════════════════════════════════════════════════════════════
+
+card_id: KB-007
+title: "Обработка ошибки платёжного провайдера: FAILED → retry → CAPTURED"
+type: negative
+category: payment_failure
+chain_id: NEG-007
+
+source_files:
+  business_requirements: "data/cases/case_007_payment_provider_error_on_capture/01_business_requirements.md"
+  system_analysis: "data/cases/case_007_payment_provider_error_on_capture/02_system_analysis.md"
+  openapi: "data/cases/case_007_payment_provider_error_on_capture/03_openapi.yaml"
+  flk_rules: "data/cases/case_007_payment_provider_error_on_capture/04_flk_rules.yaml"
+  status_matrix: "data/cases/case_007_payment_provider_error_on_capture/05_status_transition_matrix.yaml"
+
+summary: >
+  При недоступности платёжного провайдера платёж создаётся со статусом FAILED (HTTP 201).
+  Rental переходит в PAYMENT_FAILED.
+  После восстановления провайдера — retry → CAPTURED, rental → PAID.
+  Повторный POST /payments для той же аренды (уже PAID) → 409 PAYMENT_OPERATION_DUPLICATE.
+  Сценарий: выключить провайдер → создать платёж (FAILED) → включить → retry (CAPTURED).
+
+business_goals:
+  - "Недоступность провайдера не откатывает завершение аренды"
+  - "Платёж создаётся со статусом FAILED — не 500/503"
+  - "После восстановления провайдера retry должен успешно списать средства"
+  - "Повторное создание платежа по уже оплаченной аренде запрещено"
+
+preconditions:
+  setup_call: "POST /mock/reset"
+  seed_state:
+    rental_finished:
+      id: "rental-finished"
+      status: FINISHED
+      userId: "user-for-fine"
+      amount: 480.0
+      note: "используем эту аренду т.к. она уже FINISHED и без платежа"
+    mock_config:
+      payment_provider_available: true
+    note: >
+      После reset rental-finished в статусе FINISHED без платежа.
+      Агент должен сначала выключить провайдер, создать FAILED платёж,
+      потом включить и сделать retry.
+
+mock_controls_required:
+  - "POST /mock/services/payment/disable — выключить провайдер"
+  - "POST /mock/services/payment/enable — включить провайдер"
+
+api_chain:
+  - step: 1
+    name: "Проверить что rental-finished имеет статус FINISHED"
+    method: GET
+    path: /v1/rentals/rental-finished
+    expected_status: 200
+    assert:
+      - "response.status == 'FINISHED'"
+      - "response.amount == 480.0"
+
+  - step: 2
+    name: "Выключить платёжного провайдера"
+    method: POST
+    path: /mock/services/payment/disable
+    expected_status: 200
+    assert:
+      - "response.available == false"
+
+  - step: 3
+    name: "Создать платёж при недоступном провайдере → 201 но статус FAILED"
+    method: POST
+    path: /v1/payments
+    request_body: {rentalId: "rental-finished", amount: 480.0, currency: "RUB"}
+    expected_status: 201
+    assert:
+      - "response.status == 'FAILED'"
+      - "response.paymentId не пустой"
+      - "response.failure_reason содержит 'PROVIDER'"
+    extract: {paymentId: "response.paymentId"}
+
+  - step: 4
+    name: "Статус аренды перешёл в PAYMENT_FAILED"
+    method: GET
+    path: /v1/rentals/rental-finished
+    expected_status: 200
+    assert:
+      - "response.status == 'PAYMENT_FAILED'"
+
+  - step: 5
+    name: "Outbox содержит PAYMENT_FAILED, но НЕ PAYMENT_CAPTURED"
+    method: GET
+    path: /mock/outbox
+    expected_status: 200
+    assert:
+      - "outbox содержит PAYMENT_FAILED"
+      - "outbox НЕ содержит PAYMENT_CAPTURED"
+
+  - step: 6
+    name: "Включить платёжного провайдера"
+    method: POST
+    path: /mock/services/payment/enable
+    expected_status: 200
+    assert:
+      - "response.available == true"
+
+  - step: 7
+    name: "Retry платежа → 200 CAPTURED"
+    method: POST
+    path: "/v1/payments/{paymentId}/retry"
+    expected_status: 200
+    assert:
+      - "response.status == 'CAPTURED'"
+      - "response.retry_count == 1"
+
+  - step: 8
+    name: "Статус аренды теперь PAID"
+    method: GET
+    path: /v1/rentals/rental-finished
+    expected_status: 200
+    assert:
+      - "response.status == 'PAID'"
+
+  - step: 9
+    name: "Повторный POST /payments для той же аренды → 409 PAYMENT_OPERATION_DUPLICATE"
+    method: POST
+    path: /v1/payments
+    request_body: {rentalId: "rental-finished", amount: 480.0}
+    expected_status: 409
+    assert:
+      - "response.error == 'PAYMENT_OPERATION_DUPLICATE'"
+
+  - step: 10
+    name: "Outbox содержит PAYMENT_CAPTURED после успешного retry"
+    method: GET
+    path: "/mock/outbox?type=PAYMENT_CAPTURED"
+    expected_status: 200
+    assert:
+      - "count >= 1"
+
+  - step: 11
+    name: "Попытка создать платёж для несуществующей аренды → 404"
+    method: POST
+    path: /v1/payments
+    request_body: {rentalId: "rental-nonexistent", amount: 100.0}
+    expected_status: 404
+    assert:
+      - "response.error == 'RENTAL_NOT_FOUND'"
+
+  - step: 12
+    name: "Попытка создать платёж для активной (STARTED) аренды → 409"
+    method: POST
+    path: /v1/payments
+    request_body: {rentalId: "rental-started", amount: 100.0}
+    expected_status: 409
+    assert:
+      - "response.error == 'RENTAL_NOT_FINISHED'"
+
+# ─── ФЛК-правила ─────────────────────────────────────────────────────
+flk_rules:
+  - id: FLK-PAYMENT-PROVIDER-FAIL
+    endpoint: POST /v1/payments
+    condition: "mock_config.payment_provider_available == false"
+    setup: ["POST /mock/services/payment/disable"]
+    test_seed: "rental-finished"
+    test_input: {rentalId: "rental-finished", amount: 480.0}
+    expected_status: 201
+    expected_payment_status: FAILED
+    note: "HTTP 201 — платёж создан, но в статусе FAILED"
+    teardown: ["POST /mock/services/payment/enable"]
+
+  - id: FLK-PAYMENT-001
+    endpoint: POST /v1/payments
+    condition: "CAPTURED платёж уже существует для rentalId"
+    note: "После успешного retry выполнить повторный POST /payments"
+    expected_status: 409
+    expected_error_code: PAYMENT_OPERATION_DUPLICATE
+
+  - id: FLK-RENTAL-NOT-FINISHED
+    endpoint: POST /v1/payments
+    condition: "rental.status == STARTED (не FINISHED)"
+    test_seed: "rental-started"
+    test_input: {rentalId: "rental-started", amount: 100.0}
+    expected_status: 409
+    expected_error_code: RENTAL_NOT_FINISHED
+
+  - id: FLK-RENTAL-NOT-FOUND-PAYMENT
+    endpoint: POST /v1/payments
+    condition: "rentalId не существует"
+    test_input: {rentalId: "rental-nonexistent", amount: 100.0}
+    expected_status: 404
+    expected_error_code: RENTAL_NOT_FOUND
+
+# ─── Переходы статусов ─────────────────────────────────────────────────
+status_transitions:
+  - entity: rental
+    transitions:
+      - {from: FINISHED, to: PAYMENT_FAILED, trigger: "POST /v1/payments → 201 (провайдер недоступен)"}
+      - {from: PAYMENT_FAILED, to: PAID, trigger: "POST /v1/payments/{id}/retry → 200 (провайдер доступен)"}
+
+  - entity: payment
+    transitions:
+      - {from: null, to: FAILED, trigger: "POST /v1/payments → 201 (провайдер недоступен)"}
+      - {from: FAILED, to: CAPTURED, trigger: "POST /v1/payments/{id}/retry → 200 (провайдер доступен)"}
+
+expected_outbox_events:
+  on_failure:
+    - {event_type: PAYMENT_FAILED}
+  on_retry_success:
+    - {event_type: PAYMENT_CAPTURED}
+    - {event_type: NOTIFICATION_REQUESTED}
+  must_not_appear_on_failure:
+    - "PAYMENT_CAPTURED"
+
+# ─── Граничные значения ─────────────────────────────────────────────────
+boundary_value_analysis:
+  - field: "payment amount"
+    cases:
+      - {value: "0", expected: "422 PAYMENT_AMOUNT_INVALID"}
+      - {value: "0.01", expected: "201 (valid)"}
+      - {value: "480.0", expected: "201 (exact rental amount)"}
+
+# ─── Техники тест-дизайна ─────────────────────────────────────────────
+test_design_techniques:
+  equivalence_partitioning:
+    valid_class: "rental FINISHED + провайдер доступен → 201 CAPTURED"
+    invalid_classes:
+      - "rental FINISHED + провайдер недоступен → 201 FAILED"
+      - "rental STARTED → 409 RENTAL_NOT_FINISHED"
+      - "rental несуществует → 404 RENTAL_NOT_FOUND"
+      - "CAPTURED платёж уже есть → 409 PAYMENT_OPERATION_DUPLICATE"
+
+  state_transition:
+    payment_states:
+      - "null → FAILED (provider unavailable) → CAPTURED (retry + provider ok)"
+      - "null → CAPTURED (provider available)"
+    rental_states:
+      - "FINISHED → PAYMENT_FAILED (FAILED платёж) → PAID (CAPTURED retry)"
+      - "FINISHED → PAID (успешный первый платёж)"
+
+coverage_checklist:
+  negative:
+    - "[ ] POST /payments с недоступным провайдером → 201 FAILED"
+    - "[ ] RENTAL_NOT_FINISHED (rental STARTED)"
+    - "[ ] RENTAL_NOT_FOUND"
+    - "[ ] PAYMENT_OPERATION_DUPLICATE (после CAPTURED)"
+  positive:
+    - "[ ] POST /payments при доступном провайдере → 201 CAPTURED"
+    - "[ ] retry при доступном провайдере → 200 CAPTURED"
+    - "[ ] Статус аренды = PAID после CAPTURED"
+  outbox:
+    - "[ ] PAYMENT_FAILED после неудачного платежа"
+    - "[ ] PAYMENT_CAPTURED после успешного retry"
+    - "[ ] PAYMENT_CAPTURED НЕ появляется при FAILED"

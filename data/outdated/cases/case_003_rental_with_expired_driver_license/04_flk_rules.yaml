@@ -1,0 +1,55 @@
+flkRules:
+  - id: FLK-USER-001
+    name: Пользователь должен существовать
+    object: user
+    condition: "exists users where id = userId"
+    errorCode: USER_NOT_FOUND
+    httpStatus: 404
+  - id: FLK-USER-002
+    name: Пользователь должен быть подтвержден
+    object: user
+    condition: "users.status == VERIFIED"
+    errorCode: USER_NOT_VERIFIED
+    httpStatus: 409
+  - id: FLK-USER-003
+    name: Пользователь не должен быть заблокирован
+    object: user
+    condition: "users.status != BLOCKED"
+    errorCode: USER_BLOCKED
+    httpStatus: 409
+  - id: FLK-LICENSE-001
+    name: Водительское удостоверение должно быть подтверждено и не просрочено
+    object: driverLicense
+    condition: "driver_licenses.status == VERIFIED and driver_licenses.expiration_date > current_date"
+    errorCode: DRIVER_LICENSE_INVALID
+    httpStatus: 409
+  - id: FLK-VEHICLE-001
+    name: Автомобиль должен быть доступен
+    object: vehicle
+    condition: "vehicles.status == AVAILABLE"
+    errorCode: VEHICLE_NOT_AVAILABLE
+    httpStatus: 409
+  - id: FLK-BOOKING-001
+    name: Бронирование должно быть в допустимом статусе
+    object: booking
+    condition: "bookings.status in (CONFIRMED, STARTED)"
+    errorCode: BOOKING_STATUS_INVALID
+    httpStatus: 409
+  - id: FLK-RENTAL-001
+    name: Rental session должна существовать и иметь корректный статус
+    object: rental
+    condition: "exists rental_sessions where id = rentalId"
+    errorCode: RENTAL_NOT_FOUND
+    httpStatus: 404
+  - id: FLK-PAYMENT-001
+    name: Платежные операции не должны дублироваться
+    object: payment
+    condition: "not duplicate payment/refund/retry for same aggregate"
+    errorCode: PAYMENT_OPERATION_DUPLICATE
+    httpStatus: 409
+  - id: FLK-OUTBOX-001
+    name: Kafka-событие публикуется только после успешного commit
+    object: outbox
+    condition: "business_operation_successful == true"
+    errorCode: OUTBOX_EVENT_DENIED
+    httpStatus: 409

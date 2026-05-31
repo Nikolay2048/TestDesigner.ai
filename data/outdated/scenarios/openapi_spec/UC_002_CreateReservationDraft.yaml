@@ -1,0 +1,168 @@
+openapi: 3.0.3
+info:
+  title: UC_002_CreateReservationDraft
+  version: 1.0.0
+  description: Создание предварительного бронирования автомобиля.
+servers:
+  - url: https://api.example.com
+    description: Example API host
+paths:
+  /api/v1/reservations/drafts:
+    post:
+      tags:
+        - Reservations
+      summary: Create reservation draft
+      description: Сервис создаёт черновик бронирования по автомобилю, выбранному в поиске.
+      operationId: createReservationDraft
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateReservationDraftRequest'
+      responses:
+        '201':
+          description: Черновик бронирования создан.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateReservationDraftResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+components:
+  responses:
+    ValidationError:
+      description: Ошибка валидации входных параметров.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            carIdMissing:
+              summary: carId не передан
+              value:
+                errorCode: RESERVATION-DRAFT-001
+                message: carId is required
+            unsupportedTariff:
+              summary: Неподдерживаемый тариф
+              value:
+                errorCode: RESERVATION-DRAFT-012
+                message: tariffCode is not supported
+    ConflictError:
+      description: Конфликт бизнес-правил.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            carUnavailable:
+              summary: Автомобиль недоступен
+              value:
+                errorCode: RESERVATION-DRAFT-003
+                message: car is unavailable
+    InternalServerError:
+      description: Внутренняя ошибка сервера.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    CreateReservationDraftRequest:
+      type: object
+      required:
+        - carId
+        - cityId
+        - customerId
+        - dateFrom
+        - dateTo
+        - tariffCode
+      properties:
+        carId:
+          type: string
+          format: uuid
+        cityId:
+          $ref: '#/components/schemas/CityId'
+        customerId:
+          type: string
+          format: uuid
+        dateFrom:
+          $ref: '#/components/schemas/RentalDateTime'
+        dateTo:
+          $ref: '#/components/schemas/RentalDateTime'
+        tariffCode:
+          $ref: '#/components/schemas/TariffCode'
+        promoCode:
+          $ref: '#/components/schemas/PromoCode'
+    CreateReservationDraftResponse:
+      type: object
+      required:
+        - reservationDraftId
+        - status
+        - depositAmount
+        - currency
+        - expiresAt
+      properties:
+        reservationDraftId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/ReservationDraftStatus'
+        depositAmount:
+          type: number
+          format: decimal
+          example: 10000.00
+        currency:
+          $ref: '#/components/schemas/Currency'
+        expiresAt:
+          type: string
+          format: date-time
+    CityId:
+      type: integer
+      enum:
+        - 36
+        - 77
+      example: 77
+    RentalDateTime:
+      type: string
+      format: date-time
+      example: '2026-06-01T10:00:00+03:00'
+    TariffCode:
+      type: string
+      enum:
+        - BASE
+        - FULL_INSURANCE
+        - PREMIUM
+      example: BASE
+    PromoCode:
+      type: string
+      nullable: true
+      maxLength: 50
+      example: SUMMER2026
+    Currency:
+      type: string
+      enum:
+        - RUB
+        - USD
+        - EUR
+      example: RUB
+    ReservationDraftStatus:
+      type: string
+      enum:
+        - DRAFT
+      example: DRAFT
+    ErrorResponse:
+      type: object
+      required:
+        - errorCode
+        - message
+      properties:
+        errorCode:
+          type: string
+          example: RESERVATION-DRAFT-001
+        message:
+          type: string
+          example: Validation error

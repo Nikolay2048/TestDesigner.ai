@@ -1,0 +1,243 @@
+# ═══════════════════════════════════════════════════════════════════════
+# KB-006 — Завершение аренды вне разрешённой зоны
+# ═══════════════════════════════════════════════════════════════════════
+
+card_id: KB-006
+title: "Отказ в завершении аренды при нахождении авто вне разрешённой зоны"
+type: negative
+category: zone_control
+chain_id: NEG-006
+
+source_files:
+  business_requirements: "data/cases/case_006_finish_rental_outside_allowed_zone/01_business_requirements.md"
+  system_analysis: "data/cases/case_006_finish_rental_outside_allowed_zone/02_system_analysis.md"
+  openapi: "data/cases/case_006_finish_rental_outside_allowed_zone/03_openapi.yaml"
+  flk_rules: "data/cases/case_006_finish_rental_outside_allowed_zone/04_flk_rules.yaml"
+  status_matrix: "data/cases/case_006_finish_rental_outside_allowed_zone/05_status_transition_matrix.yaml"
+
+summary: >
+  Клиент не может завершить аренду, если автомобиль находится вне разрешённой зоны.
+  Ошибка: 409 VEHICLE_OUTSIDE_ALLOWED_ZONE.
+  После устранения (возврат в зону) — завершение проходит успешно.
+  Также проверяется технический блок завершения (RENTAL_FINISH_BLOCKED).
+  Аренда и авто должны оставаться в текущих статусах при отказе.
+
+business_goals:
+  - "Завершение аренды разрешено только в разрешённой зоне парковки"
+  - "Статус аренды и авто не изменяется при отказе"
+  - "После возврата авто в зону — завершение должно пройти успешно"
+
+preconditions:
+  setup_call: "POST /mock/reset"
+  seed_state:
+    rental_started:
+      id: "rental-started"
+      status: STARTED
+      userId: "user-with-rental"
+      vehicleId: "vehicle-in-use"
+    vehicle_in_use:
+      id: "vehicle-in-use"
+      status: IN_USE
+    telemetry_vehicle_in_use:
+      engine_on: false
+      doors_closed: true
+      speed_kmh: 0
+    mock_config:
+      vehicles_outside_zone: []
+
+mock_controls_required:
+  zone_control:
+    - "POST /mock/vehicles/vehicle-in-use/set-outside-zone — авто за пределами зоны"
+    - "POST /mock/vehicles/vehicle-in-use/set-inside-zone — авто в зоне"
+  finish_block:
+    - "POST /mock/rentals/rental-started/block-finish — технический блок"
+    - "POST /mock/rentals/rental-started/unblock-finish — снять блок"
+
+api_chain:
+  - step: 1
+    name: "Проверить текущий статус аренды"
+    method: GET
+    path: /v1/rentals/rental-started
+    expected_status: 200
+    assert:
+      - "response.status == 'STARTED'"
+      - "response.vehicleId == 'vehicle-in-use'"
+
+  - step: 2
+    name: "Поместить авто вне разрешённой зоны"
+    method: POST
+    path: /mock/vehicles/vehicle-in-use/set-outside-zone
+    expected_status: 200
+    assert:
+      - "response.outside_zone == true"
+
+  - step: 3
+    name: "Попытка завершить аренду вне зоны → 409 VEHICLE_OUTSIDE_ALLOWED_ZONE"
+    method: POST
+    path: /v1/rentals/rental-started/finish
+    expected_status: 409
+    assert:
+      - "response.error == 'VEHICLE_OUTSIDE_ALLOWED_ZONE'"
+
+  - step: 4
+    name: "Статус аренды не изменился — всё ещё STARTED"
+    method: GET
+    path: /v1/rentals/rental-started
+    expected_status: 200
+    assert:
+      - "response.status == 'STARTED'"
+      - "response.finished_at == null"
+
+  - step: 5
+    name: "Статус авто не изменился — всё ещё IN_USE"
+    method: GET
+    path: /v1/vehicles/vehicle-in-use
+    expected_status: 200
+    assert:
+      - "response.status == 'IN_USE'"
+
+  - step: 6
+    name: "Outbox НЕ содержит RENTAL_FINISHED"
+    method: GET
+    path: "/mock/outbox?type=RENTAL_FINISHED"
+    expected_status: 200
+    assert:
+      - "count == 0"
+
+  - step: 7
+    name: "Вернуть авто в разрешённую зону"
+    method: POST
+    path: /mock/vehicles/vehicle-in-use/set-inside-zone
+    expected_status: 200
+    assert:
+      - "response.outside_zone == false"
+
+  - step: 8
+    name: "Успешное завершение аренды после возврата в зону"
+    method: POST
+    path: /v1/rentals/rental-started/finish
+    expected_status: 200
+    assert:
+      - "response.status == 'FINISHED'"
+      - "response.amount > 0"
+      - "response.finished_at не пустой"
+
+  - step: 9
+    name: "Авто теперь AVAILABLE"
+    method: GET
+    path: /v1/vehicles/vehicle-in-use
+    expected_status: 200
+    assert:
+      - "response.status == 'AVAILABLE'"
+
+  - step: 10
+    name: "Тест технического блока завершения"
+    setup: ["POST /mock/reset"]
+    substeps:
+      - "POST /mock/rentals/rental-started/block-finish"
+      - "POST /v1/rentals/rental-started/finish → 409 RENTAL_FINISH_BLOCKED"
+      - "POST /mock/rentals/rental-started/unblock-finish"
+      - "POST /v1/rentals/rental-started/finish → 200 FINISHED"
+
+  - step: 11
+    name: "Outbox содержит RENTAL_FINISHED и VEHICLE_RELEASED после успеха"
+    method: GET
+    path: /mock/outbox
+    expected_status: 200
+    assert:
+      - "outbox содержит RENTAL_FINISHED"
+      - "outbox содержит VEHICLE_RELEASED"
+
+# ─── ФЛК-правила ─────────────────────────────────────────────────────
+flk_rules:
+  - id: FLK-ZONE
+    endpoint: POST /v1/rentals/{rentalId}/finish
+    condition: "vehicleId in mock_config.vehicles_outside_zone"
+    setup: ["POST /mock/vehicles/vehicle-in-use/set-outside-zone"]
+    test_seed: "rental-started"
+    expected_status: 409
+    expected_error_code: VEHICLE_OUTSIDE_ALLOWED_ZONE
+    postconditions:
+      - "rental.status остаётся STARTED"
+      - "vehicle.status остаётся IN_USE"
+      - "RENTAL_FINISHED не в outbox"
+    teardown: ["POST /mock/vehicles/vehicle-in-use/set-inside-zone"]
+
+  - id: FLK-TECH-BLOCK
+    endpoint: POST /v1/rentals/{rentalId}/finish
+    condition: "rentalId in mock_config.rentals_blocked_finish"
+    setup: ["POST /mock/rentals/rental-started/block-finish"]
+    test_seed: "rental-started"
+    expected_status: 409
+    expected_error_code: RENTAL_FINISH_BLOCKED
+    teardown: ["POST /mock/rentals/rental-started/unblock-finish"]
+
+  - id: FLK-RENTAL-NOT-STARTED
+    endpoint: POST /v1/rentals/{rentalId}/finish
+    condition: "rental.status != STARTED"
+    note: "rental-finished — уже FINISHED → 409 RENTAL_STATUS_INVALID"
+    test_seed: "rental-finished"
+    expected_status: 409
+    expected_error_code: RENTAL_STATUS_INVALID
+
+  - id: FLK-RENTAL-NOT-FOUND
+    endpoint: POST /v1/rentals/{rentalId}/finish
+    condition: "rentalId не существует"
+    test_input: "rental-nonexistent"
+    expected_status: 404
+    expected_error_code: RENTAL_NOT_FOUND
+
+# ─── Переходы статусов ─────────────────────────────────────────────────
+status_transitions:
+  - entity: rental
+    transitions:
+      - {from: STARTED, to: FINISHED, trigger: "POST /v1/rentals/{id}/finish → 200 (авто в зоне)"}
+    blocked_transitions:
+      - "STARTED → FINISHED при VEHICLE_OUTSIDE_ALLOWED_ZONE (отказ)"
+      - "STARTED → FINISHED при RENTAL_FINISH_BLOCKED (отказ)"
+
+  - entity: vehicle
+    transitions:
+      - {from: IN_USE, to: AVAILABLE, trigger: "POST /v1/rentals/{id}/finish → 200"}
+    note: "При отказе остаётся IN_USE"
+
+expected_outbox_events:
+  on_success:
+    - {event_type: RENTAL_FINISHED}
+    - {event_type: VEHICLE_RELEASED}
+  must_not_appear_on_failure:
+    - "RENTAL_FINISHED"
+    - "VEHICLE_RELEASED"
+
+# ─── Техники тест-дизайна ─────────────────────────────────────────────
+test_design_techniques:
+  equivalence_partitioning:
+    valid_class: "авто в зоне + rental STARTED + телеметрия ok → 200 FINISHED"
+    invalid_classes:
+      - "авто вне зоны → 409 VEHICLE_OUTSIDE_ALLOWED_ZONE"
+      - "технический блок → 409 RENTAL_FINISH_BLOCKED"
+      - "rental статус != STARTED → 409 RENTAL_STATUS_INVALID"
+      - "rentalId не существует → 404 RENTAL_NOT_FOUND"
+
+  state_transition:
+    rental_finish_conditions:
+      - {condition: "авто в зоне + нет блока + телеметрия ok", result: "200 FINISHED"}
+      - {condition: "авто вне зоны", result: "409 VEHICLE_OUTSIDE_ALLOWED_ZONE"}
+      - {condition: "технический блок", result: "409 RENTAL_FINISH_BLOCKED"}
+      - {condition: "rental уже FINISHED", result: "409 RENTAL_STATUS_INVALID"}
+
+coverage_checklist:
+  negative:
+    - "[ ] VEHICLE_OUTSIDE_ALLOWED_ZONE — авто вне зоны"
+    - "[ ] RENTAL_FINISH_BLOCKED — технический блок"
+    - "[ ] RENTAL_STATUS_INVALID — аренда уже завершена"
+    - "[ ] RENTAL_NOT_FOUND"
+  state_integrity:
+    - "[ ] rental.status остаётся STARTED при отказе"
+    - "[ ] vehicle.status остаётся IN_USE при отказе"
+    - "[ ] RENTAL_FINISHED не в outbox при отказе"
+  positive:
+    - "[ ] После возврата авто в зону — завершение проходит (200)"
+    - "[ ] vehicle.status = AVAILABLE после завершения"
+    - "[ ] RENTAL_FINISHED и VEHICLE_RELEASED в outbox"
+    - "[ ] После снятия технического блока — завершение проходит"

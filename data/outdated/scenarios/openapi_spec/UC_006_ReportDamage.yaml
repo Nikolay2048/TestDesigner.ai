@@ -1,0 +1,441 @@
+openapi: 3.0.3
+info:
+  title: UC_006_ReportDamage
+  version: 1.0.0
+  description: Фиксация повреждения авто — создание отчёта, загрузка фото, оценка ущерба, ответ клиента.
+servers:
+  - url: https://api.example.com
+    description: Example API host
+paths:
+  /api/v1/rentals/{rentalId}:
+    get:
+      tags:
+        - Rentals
+      summary: Get rental details
+      description: Возвращает текущее состояние аренды. В UC_006 используется для проверки статуса ACTIVE и получения carId.
+      operationId: getRentalForDamage
+      parameters:
+        - $ref: '#/components/parameters/RentalIdPathParam'
+      responses:
+        '200':
+          description: Аренда найдена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RentalResponse'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/damage-reports:
+    post:
+      tags:
+        - DamageReports
+      summary: Create damage report
+      description: Открывает отчёт о повреждении для активной аренды. Переводит отчёт в статус AWAITING_PHOTOS.
+      operationId: createDamageReport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDamageReportRequest'
+      responses:
+        '201':
+          description: Отчёт создан.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateDamageReportResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '422':
+          $ref: '#/components/responses/BusinessRuleError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/damage-reports/{damageReportId}/photos:
+    post:
+      tags:
+        - DamageReports
+      summary: Upload photos and trigger assessment
+      description: Прикрепляет фотографии к отчёту, запускает синхронную оценку ущерба. Требует min 2 фото.
+      operationId: uploadDamagePhotos
+      parameters:
+        - $ref: '#/components/parameters/DamageReportIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadPhotosRequest'
+      responses:
+        '200':
+          description: Фото загружены, оценка выполнена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadPhotosResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '422':
+          $ref: '#/components/responses/BusinessRuleError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/damage-reports/{damageReportId}/customer-response:
+    post:
+      tags:
+        - DamageReports
+      summary: Respond to damage assessment
+      description: Клиент принимает или оспаривает результат оценки ущерба. Решение принимается однократно.
+      operationId: respondToDamageAssessment
+      parameters:
+        - $ref: '#/components/parameters/DamageReportIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomerResponseRequest'
+      responses:
+        '200':
+          description: Ответ клиента зафиксирован.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerResponseResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '422':
+          $ref: '#/components/responses/BusinessRuleError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  parameters:
+    RentalIdPathParam:
+      name: rentalId
+      in: path
+      required: true
+      description: UUID активной аренды.
+      schema:
+        type: string
+        format: uuid
+    DamageReportIdPathParam:
+      name: damageReportId
+      in: path
+      required: true
+      description: UUID отчёта о повреждении.
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    ValidationError:
+      description: Ошибка валидации входных параметров.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            tooFewPhotos:
+              summary: Менее 2 фотографий
+              value:
+                errorCode: DAMAGE-PHOTOS-001
+                message: at least 2 photos are required
+            tooManyPhotos:
+              summary: Более 10 фотографий
+              value:
+                errorCode: DAMAGE-PHOTOS-002
+                message: maximum 10 photos allowed
+            descriptionTooShort:
+              summary: Описание слишком короткое
+              value:
+                errorCode: DAMAGE-REPORT-005
+                message: description must be at least 10 characters
+    BusinessRuleError:
+      description: Нарушение бизнес-правила.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            rentalNotActive:
+              summary: Аренда не активна
+              value:
+                errorCode: DAMAGE-REPORT-010
+                message: rental must be ACTIVE to report damage
+            uploadSessionExpired:
+              summary: Сессия загрузки истекла
+              value:
+                errorCode: DAMAGE-PHOTOS-007
+                message: upload session has expired
+            responseDeadlinePassed:
+              summary: Срок ответа истёк
+              value:
+                errorCode: DAMAGE-RESPONSE-011
+                message: response deadline has passed
+    ConflictError:
+      description: Конфликт состояния.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            alreadyResponded:
+              summary: Клиент уже ответил на оценку
+              value:
+                errorCode: DAMAGE-RESPONSE-009
+                message: customer has already responded to this assessment
+            wrongSessionId:
+              summary: Неверный uploadSessionId
+              value:
+                errorCode: DAMAGE-PHOTOS-008
+                message: uploadSessionId does not match the damage report
+    NotFoundError:
+      description: Ресурс не найден.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            rentalNotFound:
+              summary: Аренда не найдена
+              value:
+                errorCode: RENTAL-GET-001
+                message: rental not found
+    InternalServerError:
+      description: Внутренняя ошибка сервера.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    RentalResponse:
+      type: object
+      required:
+        - rentalId
+        - status
+        - carId
+        - cityId
+        - startedAt
+      properties:
+        rentalId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/RentalStatus'
+        carId:
+          type: string
+          format: uuid
+        cityId:
+          type: integer
+          example: 77
+        startedAt:
+          type: string
+          format: date-time
+
+    CreateDamageReportRequest:
+      type: object
+      required:
+        - rentalId
+        - carId
+        - damageType
+        - description
+        - reportedAt
+      properties:
+        rentalId:
+          type: string
+          format: uuid
+        carId:
+          type: string
+          format: uuid
+        damageType:
+          $ref: '#/components/schemas/DamageType'
+        description:
+          type: string
+          minLength: 10
+          maxLength: 500
+          example: 'Scratch on the front-left door, approximately 15 cm long'
+        reportedAt:
+          type: string
+          format: date-time
+
+    CreateDamageReportResponse:
+      type: object
+      required:
+        - damageReportId
+        - status
+        - uploadSessionId
+        - reportDeadline
+      properties:
+        damageReportId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - AWAITING_PHOTOS
+          example: AWAITING_PHOTOS
+        uploadSessionId:
+          type: string
+          format: uuid
+        reportDeadline:
+          type: string
+          format: date-time
+
+    UploadPhotosRequest:
+      type: object
+      required:
+        - uploadSessionId
+        - photos
+      properties:
+        uploadSessionId:
+          type: string
+          format: uuid
+        photos:
+          type: array
+          items:
+            type: string
+            format: byte
+            description: Base64-encoded image (JPEG or PNG, max 5 MB each)
+          minItems: 2
+          maxItems: 10
+
+    UploadPhotosResponse:
+      type: object
+      required:
+        - photoIds
+        - assessmentId
+        - estimatedCost
+        - damageSeverity
+        - status
+        - responseDeadline
+      properties:
+        photoIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        assessmentId:
+          type: string
+          format: uuid
+        estimatedCost:
+          type: number
+          format: decimal
+          minimum: 0
+          example: 8500.00
+        damageSeverity:
+          $ref: '#/components/schemas/DamageSeverity'
+        status:
+          type: string
+          enum:
+            - ASSESSED
+          example: ASSESSED
+        responseDeadline:
+          type: string
+          format: date-time
+
+    CustomerResponseRequest:
+      type: object
+      required:
+        - assessmentId
+        - decision
+      properties:
+        assessmentId:
+          type: string
+          format: uuid
+        decision:
+          $ref: '#/components/schemas/CustomerDecision'
+        comment:
+          type: string
+          minLength: 10
+          maxLength: 300
+          nullable: true
+          description: Обязательно при decision=DISPUTE
+          example: 'This scratch was pre-existing and noted in the handover document'
+
+    CustomerResponseResult:
+      type: object
+      required:
+        - damageReportId
+        - finalStatus
+        - finalAmount
+      properties:
+        damageReportId:
+          type: string
+          format: uuid
+        finalStatus:
+          $ref: '#/components/schemas/DamageReportFinalStatus'
+        finalAmount:
+          type: number
+          format: decimal
+          minimum: 0
+          example: 8500.00
+        penaltyPaymentDeadline:
+          type: string
+          format: date-time
+          nullable: true
+          description: Присутствует только при finalStatus=ACCEPTED
+
+    RentalStatus:
+      type: string
+      enum:
+        - ACTIVE
+        - EXTENDED
+        - COMPLETED
+        - SUSPENDED
+      example: ACTIVE
+
+    DamageType:
+      type: string
+      enum:
+        - SCRATCH
+        - DENT
+        - GLASS
+        - INTERIOR
+        - MECHANICAL
+      example: SCRATCH
+
+    DamageSeverity:
+      type: string
+      enum:
+        - LOW
+        - MEDIUM
+        - HIGH
+        - CRITICAL
+      example: LOW
+
+    CustomerDecision:
+      type: string
+      enum:
+        - ACCEPT
+        - DISPUTE
+      example: ACCEPT
+
+    DamageReportFinalStatus:
+      type: string
+      enum:
+        - ACCEPTED
+        - DISPUTED
+      example: ACCEPTED
+
+    ErrorResponse:
+      type: object
+      required:
+        - errorCode
+        - message
+      properties:
+        errorCode:
+          type: string
+          example: DAMAGE-REPORT-001
+        message:
+          type: string
+          example: Validation error
