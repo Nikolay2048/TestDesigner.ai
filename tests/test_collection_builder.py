@@ -118,7 +118,7 @@ def test_prerequest_future_datetime_end():
 def test_prerequest_decimal_amount():
     bindings = [_gen_binding("amount", "decimal_amount")]
     script = "\n".join(_gen_prerequest(bindings, set()))
-    assert "1000.00" in script
+    assert "1499.99" in script
 
 
 def test_prerequest_skips_already_generated():

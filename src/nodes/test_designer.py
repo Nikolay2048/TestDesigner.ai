@@ -89,8 +89,17 @@ RULES:
 - Do NOT repeat invalid enum values that are already obvious from the schema.
 - Generate at most 6 cases total across all steps.
 - Use ONLY the step_ids and field names listed in FLOW STEPS below — copy them exactly.
+- Use ONLY field names that appear in the INPUTS list for the chosen step — do NOT invent fields.
 - field_name in field_changes must be the bare field name exactly as shown (e.g. "cityId"),
   NOT prefixed with location (e.g. NOT "query.cityId", NOT "body.cityId").
+- For POSITIVE equivalence classes (expected_status 2xx): ALL changed values MUST satisfy
+  the schema constraints shown in the step (enum values, minimum/maximum, format).
+  Example: if driverAge has minimum=21 and maximum=75, use 30 or 45 — never 18 or 80.
+- For NEGATIVE equivalence classes (expected_status 4xx): focus on semantic violations
+  that the schema does NOT already enforce (user roles, resource states, permission mismatches).
+- new_value in field_changes MUST be a concrete scalar (string or number), NEVER copy the
+  source description. For example: write "1499.99" not "generated:decimal_amount",
+  write "RUB" not "static:RUB", write "500.00" not "default:decimal_amount".
 - If no meaningful equivalence classes exist beyond the schema, return an empty list.
 """
 
@@ -130,6 +139,9 @@ RULES:
 - Use ONLY the step_ids and field names listed in FLOW STEPS below — copy them exactly.
 - field_name in field_changes must be the bare field name exactly as shown (e.g. "carId"),
   NOT prefixed with location (e.g. NOT "body.carId", NOT "path.carId").
+- new_value in field_changes MUST be a concrete scalar (string or number), NEVER copy the
+  source description. For example: write "00000000-0000-0000-0000-000000000000" not
+  "from_step:step_01 @ $.carId", write "INVALID_CURRENCY" not "static:USD".
 - If no meaningful semantic negatives exist, return an empty list.
 """
 
@@ -246,6 +258,25 @@ def _preceding_steps(flow_card: FlowCard, target_step_id: str) -> list[ScenarioS
     return result
 
 
+def _any_mutation_applies(
+    step: ScenarioStep,
+    changes: dict[str, str],
+    to_remove: set[str],
+    allow_context_override: bool,
+) -> bool:
+    """True if at least one mutation from changes/to_remove will actually be written to inputs."""
+    if to_remove:
+        return True
+    for name in changes:
+        binding = next((b for b in step.inputs if b.name == name), None)
+        if binding is None:
+            continue
+        protected = binding.source in (VarSource.FROM_STEP, VarSource.FROM_FLOW, VarSource.ENV)
+        if not protected or allow_context_override:
+            return True
+    return False
+
+
 def _apply_mutations(
     step: ScenarioStep,
     changes: dict[str, str],      # field_name -> new_value
@@ -313,6 +344,10 @@ _UUID_RE = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
     re.IGNORECASE,
 )
+_SOURCE_DESCRIPTOR_RE = re.compile(
+    r'^(generated|static|from_step|env|default|auto)\s*[=:]',
+    re.IGNORECASE,
+)
 _UUID_FIELD_SUFFIXES = ("id", "Id", "ID", "uuid", "UUID", "Uuid")
 
 
@@ -329,6 +364,27 @@ def _looks_like_uuid_field(binding: VariableBinding) -> bool:
         or gen == "uuid4"
         or (binding.source == VarSource.FROM_STEP and any(name.endswith(s) for s in ("Id", "ID", "id")))
     )
+
+
+def _is_source_descriptor(value: str) -> bool:
+    """True if the LLM accidentally returned a source-description string
+    (e.g. 'default:decimal_amount', 'static:RUB') instead of a concrete value."""
+    return bool(_SOURCE_DESCRIPTOR_RE.match(value))
+
+
+_GENERATOR_EXAMPLES: dict[str, str] = {
+    "uuid4": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "future_datetime": "2026-06-01T10:00:00",
+    "future_datetime_start": "2026-06-01T10:00:00",
+    "future_datetime_end": "2026-06-02T10:00:00",
+    "decimal_amount": "1499.99",
+    "fake_email": "user_test@example.com",
+    "random_string": "test_abc1234567",
+}
+
+
+def _example_for_generator(gen: str) -> str:
+    return _GENERATOR_EXAMPLES.get(gen, "...")
 
 
 def _fake_value_for_binding(binding: VariableBinding) -> str:
@@ -372,13 +428,14 @@ def _steps_text(flow_card: FlowCard, ep_map: dict) -> str:
         lines.append("  Inputs:")
         for b in step.inputs:
             if b.source == VarSource.STATIC:
-                src_desc = f'static="{b.value}"'
+                src_desc = f'current value: "{b.value}"'
             elif b.source == VarSource.GENERATED:
-                src_desc = f"generated:{b.generator}"
+                example = _example_for_generator(b.generator or "uuid4")
+                src_desc = f'auto-generated (example: "{example}")'
             elif b.source == VarSource.FROM_STEP:
-                src_desc = f"from_step:{b.source_ref} @ {b.source_field}"
+                src_desc = f"[DO NOT CHANGE: comes from {b.source_ref}]"
             elif b.source == VarSource.ENV:
-                src_desc = f"env:{b.value}"
+                src_desc = f"[DO NOT CHANGE: env variable]"
             else:
                 src_desc = str(b.source)
             c = ep.get("constraints", {}).get(b.name, {})
@@ -604,16 +661,38 @@ def _cases_from_llm_result(
             field_name = fc.field_name
             if "." in field_name and field_name not in input_names:
                 field_name = field_name.split(".")[-1]
-            if field_name in input_names:
-                changes[field_name] = fc.new_value
-            else:
+            if field_name not in input_names:
                 print(f"[test_designer] unknown field {fc.field_name!r} in LLM case, skipping")
+                continue
+            val = fc.new_value
+            if _is_source_descriptor(val):
+                print(f"[test_designer] dropping source-descriptor value {val!r} for field {field_name!r}")
+                continue
+            changes[field_name] = val
+
+        # Replace non-UUID strings only in fields that genuinely hold UUIDs:
+        # from_step/from_flow bindings (IDs propagated from other steps) or uuid4-generated fields.
+        # STATIC and numeric-enum fields (e.g. cityId=36) are intentionally excluded.
+        for b in step.inputs:
+            if b.name not in changes:
+                continue
+            is_uuid_field = (
+                b.source in (VarSource.FROM_STEP, VarSource.FROM_FLOW)
+                or b.generator == "uuid4"
+            )
+            if is_uuid_field and not _is_valid_uuid_format(changes[b.name]):
+                changes[b.name] = "00000000-0000-0000-0000-000000000000"
 
         to_remove = set()
         for f in llm_case.fields_to_remove:
             name = f if f in input_names else (f.split(".")[-1] if "." in f else f)
             if name in input_names:
                 to_remove.add(name)
+
+        if not _any_mutation_applies(step, changes, to_remove, allow_context_override):
+            print(f"[test_designer] skipping '{llm_case.title}': no mutations apply "
+                  f"(unknown or protected fields)")
+            continue
 
         modified = _apply_mutations(step, changes, to_remove, allow_context_override)
         setup = _preceding_steps(flow_card, step.step_id)

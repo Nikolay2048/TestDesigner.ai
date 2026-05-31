@@ -44,7 +44,12 @@
       "PowerShell(Invoke-WebRequest -Uri \"http://localhost:8000/api/v1/demo/payment-validate\" -Method POST -Body '{\"amount\": 1500.50, \"currency\": \"RUB\"}' -ContentType \"application/json\" -UseBasicParsing -TimeoutSec 5 | Select-Object -ExpandProperty Content)",
       "PowerShell(Invoke-WebRequest -Uri \"http://localhost:8000/api/v1/demo/payment-validate\" -Method POST -Body '{\"amount\": 1000, \"currency\": \"RUB\"}' -ContentType \"application/json\" -UseBasicParsing -TimeoutSec 5 | Select-Object -ExpandProperty StatusCode; Invoke-WebRequest -Uri \"http://localhost:8000/api/v1/demo/payment-validate\" -Method POST -Body '{\"amount\": 1500.50, \"currency\": \"USD\"}' -ContentType \"application/json\" -UseBasicParsing -TimeoutSec 5 2>$null | Select-Object -ExpandProperty StatusCode)",
       "Bash(dir C:\\\\Users\\\\Admin\\\\PycharmProjects\\\\TestDesignerAI\\\\output *)",
-      "PowerShell($f1 = \"C:\\\\Users\\\\Admin\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Admin-PycharmProjects-TestDesignerAI\\\\47b91a5f-b066-4140-a45d-30fcb740a14b\\\\tasks\\\\brtea86kf.output\"; $f2 = \"C:\\\\Users\\\\Admin\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Admin-PycharmProjects-TestDesignerAI\\\\47b91a5f-b066-4140-a45d-30fcb740a14b\\\\tasks\\\\bj96xf7nr.output\"; \\(Get-Item $f1\\).Length; \\(Get-Item $f2\\).Length)"
+      "PowerShell($f1 = \"C:\\\\Users\\\\Admin\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Admin-PycharmProjects-TestDesignerAI\\\\47b91a5f-b066-4140-a45d-30fcb740a14b\\\\tasks\\\\brtea86kf.output\"; $f2 = \"C:\\\\Users\\\\Admin\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Admin-PycharmProjects-TestDesignerAI\\\\47b91a5f-b066-4140-a45d-30fcb740a14b\\\\tasks\\\\bj96xf7nr.output\"; \\(Get-Item $f1\\).Length; \\(Get-Item $f2\\).Length)",
+      "Bash(tee output/run_full.log)",
+      "Bash(tee output/run_carsharing_full.log)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(echo \"exit=$?\")",
+      "Bash(echo \"DONE exit=$?\")"
     ]
   }
 }

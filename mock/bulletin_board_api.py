@@ -216,6 +216,10 @@ def create_ad(req: CreateAdRequest, authorization: Optional[str] = Header(None))
 
     if not req.title or not req.title.strip():
         return _err(400, "BB-AD-001", "title is required")
+    if len(req.title) > 200:
+        return _err(400, "BB-AD-001", "title must not exceed 200 characters")
+    if req.description is None or not req.description.strip():
+        return _err(400, "BB-AD-006", "description is required")
     if req.price is None or req.price <= 0:
         return _err(400, "BB-AD-002", "price must be a positive number")
     if not req.category or req.category not in AD_CATEGORIES:

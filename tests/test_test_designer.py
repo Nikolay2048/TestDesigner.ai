@@ -14,11 +14,13 @@ from src.models.test_design import TestCase, TestTechnique
 from src.nodes.test_designer import (
     _apply_mutations,
     _cases_from_llm_result,
+    _example_for_generator,
     _generate_boundary,
     _generate_happy_path,
     _generate_missing_field,
     _get_success_status,
     _invalid_enum_value,
+    _is_source_descriptor,
     _LLMCase,
     _LLMTechniqueResult,
     _StateTechniqueResult,
@@ -366,6 +368,38 @@ def test_missing_field_technique_is_negative():
     assert all(tc.technique == TestTechnique.NEGATIVE for tc in cases)
 
 
+# ─────────────── _is_source_descriptor ─────────────────────────────────────
+
+def test_source_descriptor_detects_generated():
+    assert _is_source_descriptor("generated:decimal_amount") is True
+
+def test_source_descriptor_detects_static_colon():
+    assert _is_source_descriptor("static:RUB") is True
+
+def test_source_descriptor_detects_default():
+    assert _is_source_descriptor("default:decimal_amount") is True
+
+def test_source_descriptor_accepts_real_values():
+    assert _is_source_descriptor("RUB") is False
+    assert _is_source_descriptor("1499.99") is False
+    assert _is_source_descriptor("36") is False
+    assert _is_source_descriptor("00000000-0000-0000-0000-000000000000") is False
+
+
+# ─────────────── _example_for_generator ──────────────────────────────────────
+
+def test_example_for_generator_decimal():
+    assert _example_for_generator("decimal_amount") == "1499.99"
+
+def test_example_for_generator_uuid():
+    import re
+    val = _example_for_generator("uuid4")
+    assert re.match(r'^[0-9a-f-]{36}$', val, re.IGNORECASE)
+
+def test_example_for_generator_unknown_returns_ellipsis():
+    assert _example_for_generator("nonexistent_gen") == "..."
+
+
 # ─────────────── _cases_from_llm_result ─────────────────────────────────────
 
 def test_llm_result_unknown_step_id_is_skipped():
@@ -388,7 +422,8 @@ def test_llm_result_unknown_field_is_dropped():
         ),
     ])
     cases = _cases_from_llm_result(result, TestTechnique.EQUIVALENCE, FLOW_CARD, EP_MAP, STEP_MAP)
-    assert len(cases) == 1  # case still created, but field change dropped
+    # All changes were to unknown fields → no mutations apply → case is skipped
+    assert len(cases) == 0
 
 
 def test_llm_result_applies_field_change():
@@ -418,8 +453,9 @@ def test_llm_result_protects_from_step_by_default():
         ),
     ])
     cases = _cases_from_llm_result(result, TestTechnique.EQUIVALENCE, FLOW_CARD, EP_MAP, STEP_MAP)
-    car = next(b for b in cases[0].modified_inputs if b.name == "carId")
-    assert car.source == VarSource.FROM_STEP  # not overridden
+    # carId is FROM_STEP (protected), override blocked without allow_context_override
+    # → no mutations apply → case is skipped (would be identical to happy path)
+    assert len(cases) == 0
 
 
 def test_llm_result_allows_from_step_override():
@@ -438,7 +474,72 @@ def test_llm_result_allows_from_step_override():
     )
     car = next(b for b in cases[0].modified_inputs if b.name == "carId")
     assert car.source == VarSource.STATIC
-    assert car.value == "fake-car"
+    # "fake-car" is not a valid UUID → UUID guard normalises it to the zero UUID
+    assert car.value == "00000000-0000-0000-0000-000000000000"
+
+
+def test_llm_result_allows_from_step_override_valid_uuid():
+    valid_uuid = "11111111-1111-1111-1111-111111111111"
+    result = _LLMTechniqueResult(cases=[
+        _LLMCase(
+            title="Test with fake carId",
+            target_step_id="step_02",
+            field_changes=[_FieldChange(field_name="carId", new_value=valid_uuid)],
+            expected_status=404,
+            reasoning="",
+        ),
+    ])
+    cases = _cases_from_llm_result(
+        result, TestTechnique.NEGATIVE, FLOW_CARD, EP_MAP, STEP_MAP,
+        allow_context_override=True,
+    )
+    car = next(b for b in cases[0].modified_inputs if b.name == "carId")
+    assert car.value == valid_uuid  # valid UUID is kept as-is
+
+
+def test_llm_result_drops_source_descriptor_value():
+    result = _LLMTechniqueResult(cases=[
+        _LLMCase(
+            title="Valid amount test",
+            target_step_id="step_01",
+            field_changes=[_FieldChange(field_name="cityId", new_value="default:decimal_amount")],
+            expected_status=200,
+            reasoning="",
+        ),
+    ])
+    cases = _cases_from_llm_result(result, TestTechnique.EQUIVALENCE, FLOW_CARD, EP_MAP, STEP_MAP)
+    # source-descriptor value dropped → no mutations apply → case skipped
+    assert len(cases) == 0
+
+
+def test_llm_result_drops_static_colon_descriptor():
+    result = _LLMTechniqueResult(cases=[
+        _LLMCase(
+            title="Test",
+            target_step_id="step_01",
+            field_changes=[_FieldChange(field_name="cityId", new_value="static:RUB")],
+            expected_status=400,
+            reasoning="",
+        ),
+    ])
+    cases = _cases_from_llm_result(result, TestTechnique.EQUIVALENCE, FLOW_CARD, EP_MAP, STEP_MAP)
+    assert len(cases) == 0
+
+
+def test_llm_result_accepts_real_value_not_descriptor():
+    result = _LLMTechniqueResult(cases=[
+        _LLMCase(
+            title="Valid city",
+            target_step_id="step_01",
+            field_changes=[_FieldChange(field_name="cityId", new_value="77")],
+            expected_status=200,
+            reasoning="",
+        ),
+    ])
+    cases = _cases_from_llm_result(result, TestTechnique.EQUIVALENCE, FLOW_CARD, EP_MAP, STEP_MAP)
+    assert len(cases) == 1
+    city = next(b for b in cases[0].modified_inputs if b.name == "cityId")
+    assert city.value == "77"
 
 
 # ─────────────── test_designer node ─────────────────────────────────────────

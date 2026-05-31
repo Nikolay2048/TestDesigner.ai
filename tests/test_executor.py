@@ -215,7 +215,7 @@ CONFIRM_EP = {
 
 def test_build_request_get_with_query_params():
     resolved = {"cityId": "77", "dateFrom": "2099-01-01T10:00:00"}
-    method, url, qp, body = build_request(SEARCH_STEP, SEARCH_EP, resolved, "http://localhost:8000")
+    method, url, qp, _headers, body = build_request(SEARCH_STEP, SEARCH_EP, resolved, "http://localhost:8000")
     assert method == "GET"
     assert url == "http://localhost:8000/api/v1/cars/availability"
     assert qp["cityId"] == "77"
@@ -224,14 +224,14 @@ def test_build_request_get_with_query_params():
 
 def test_build_request_path_param_substitution():
     resolved = {"reservationDraftId": "draft-id-123", "paymentId": "pay-id-456"}
-    method, url, qp, body = build_request(CONFIRM_STEP, CONFIRM_EP, resolved, "http://localhost:8000")
+    method, url, qp, _headers, body = build_request(CONFIRM_STEP, CONFIRM_EP, resolved, "http://localhost:8000")
     assert "draft-id-123" in url
     assert "{reservationDraftId}" not in url
 
 
 def test_build_request_post_body():
     resolved = {"reservationDraftId": "draft-id-123", "paymentId": "pay-id-456"}
-    method, url, qp, body = build_request(CONFIRM_STEP, CONFIRM_EP, resolved, "http://localhost:8000")
+    method, url, qp, _headers, body = build_request(CONFIRM_STEP, CONFIRM_EP, resolved, "http://localhost:8000")
     assert method == "POST"
     assert body is not None
     assert body["paymentId"] == "pay-id-456"
@@ -239,7 +239,7 @@ def test_build_request_post_body():
 
 def test_build_request_base_url_strip_trailing_slash():
     resolved = {"cityId": "77", "dateFrom": "2099-01-01T10:00:00"}
-    _, url, _, _ = build_request(SEARCH_STEP, SEARCH_EP, resolved, "http://localhost:8000/")
+    _, url, _, _, _ = build_request(SEARCH_STEP, SEARCH_EP, resolved, "http://localhost:8000/")
     assert not url.startswith("http://localhost:8000//")
 
 
@@ -394,7 +394,7 @@ def test_executor_node_passes_step_context_between_steps(mock_req):
                 "inputs": [
                     {"name": "carId", "source": "from_step", "source_ref": "step_01",
                      "source_field": "$.items[0].carId", "target_location": "body.carId"},
-                    {"name": "customerId", "source": "env", "value": "customerId",
+                    {"name": "customerId", "source": "static", "value": "customer-test-123",
                      "target_location": "body.customerId"},
                     {"name": "cityId", "source": "static", "value": "77",
                      "target_location": "body.cityId"},

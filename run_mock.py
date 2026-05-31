@@ -15,7 +15,7 @@ def main():
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
 
-    uvicorn.run("mock.api:app", host=args.host, port=args.port, reload=True)
+    uvicorn.run("mock.api:app", host=args.host, port=args.port, reload=False)
 
 
 if __name__ == "__main__":

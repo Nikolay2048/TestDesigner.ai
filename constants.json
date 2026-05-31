@@ -80,7 +80,9 @@
       "collection_name": "Bulletin Board API Test Suite",
       "env_vars": {
         "sellerEmail":    "testuser@example.com",
-        "sellerPassword": "TestPass123!"
+        "sellerPassword": "TestPass123!",
+        "buyerEmail":     "testbuyer@example.com",
+        "buyerPassword":  "BuyerPass456!"
       },
       "scenarios": {
         "UC_101": {

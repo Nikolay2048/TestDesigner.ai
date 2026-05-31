@@ -221,6 +221,7 @@ def create_draft(req: CreateDraftRequest):
     if not car:                return _err(404, "RESERVATION-DRAFT-002", "carId not found")
     if req.cityId is None:     return _err(400, "RESERVATION-DRAFT-005", "cityId is required")
     if req.cityId not in ALLOWED_CITY_IDS: return _err(400, "RESERVATION-DRAFT-004", "cityId must be 36 or 77")
+    if req.cityId != car["cityId"]: return _err(422, "RESERVATION-DRAFT-017", "cityId does not match the car's city")
     if req.customerId is None: return _err(400, "RESERVATION-DRAFT-006", "customerId is required")
     customer = DB["customers"].get(req.customerId)
     if not customer:           return _err(404, "RESERVATION-DRAFT-007", "customer not found")
