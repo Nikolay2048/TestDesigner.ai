@@ -1,0 +1,17 @@
+post:
+  tags: [incident]
+  summary: Register incident for active or recently closed rental
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema:
+          $ref: '../components/schemas.yaml#/IncidentRequest'
+  responses:
+    '201':
+      description: Incident registered
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas.yaml#/IncidentResponse'
+    '400': { $ref: '../components/responses.yaml#/BadRequest' }

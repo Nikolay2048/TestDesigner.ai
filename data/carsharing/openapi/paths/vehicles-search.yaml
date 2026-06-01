@@ -1,0 +1,17 @@
+post:
+  tags: [search]
+  summary: Search available vehicles
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema:
+          $ref: '../components/schemas.yaml#/SearchVehiclesRequest'
+  responses:
+    '200':
+      description: Available vehicles
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas.yaml#/SearchVehiclesResponse'
+    '400': { $ref: '../components/responses.yaml#/BadRequest' }

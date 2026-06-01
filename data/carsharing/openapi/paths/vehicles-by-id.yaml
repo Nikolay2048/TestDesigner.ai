@@ -1,0 +1,16 @@
+parameters:
+  - name: vehicleId
+    in: path
+    required: true
+    schema: { type: string }
+get:
+  tags: [search]
+  summary: Get vehicle details
+  responses:
+    '200':
+      description: Vehicle details
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas.yaml#/Vehicle'
+    '404': { $ref: '../components/responses.yaml#/NotFound' }

@@ -1,0 +1,23 @@
+parameters:
+  - name: reservationId
+    in: path
+    required: true
+    schema: { type: string }
+post:
+  tags: [pickup]
+  summary: Pick up reserved vehicle
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema:
+          $ref: '../components/schemas.yaml#/PickupRequest'
+  responses:
+    '200':
+      description: Rental started
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas.yaml#/PickupResponse'
+    '404': { $ref: '../components/responses.yaml#/NotFound' }
+    '409': { $ref: '../components/responses.yaml#/Conflict' }

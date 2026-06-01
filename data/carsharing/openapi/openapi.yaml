@@ -1,0 +1,45 @@
+openapi: 3.0.3
+info:
+  title: Synthetic Car Rental API for Autotest Stabilization
+  version: 1.0.0
+  description: |
+    Synthetic API for testing automatic test design and scenario stabilization.
+    Contains intentional differences between analyst specs, OpenAPI and mock-server behavior.
+servers:
+  - url: http://localhost:8080
+    description: Local mock server
+tags:
+  - name: search
+  - name: reservation
+  - name: loyalty
+  - name: payment
+  - name: pickup
+  - name: return
+  - name: incident
+paths:
+  /locations:
+    $ref: './paths/locations.yaml'
+  /vehicles/search:
+    $ref: './paths/vehicles-search.yaml'
+  /vehicles/{vehicleId}:
+    $ref: './paths/vehicles-by-id.yaml'
+  /reservations:
+    $ref: './paths/reservations.yaml'
+  /reservations/{reservationId}:
+    $ref: './paths/reservations-by-id.yaml'
+  /reservations/{reservationId}/extras:
+    $ref: './paths/reservation-extras.yaml'
+  /loyalty/validate:
+    $ref: './paths/loyalty-validate.yaml'
+  /payments/preauth:
+    $ref: './paths/payments-preauth.yaml'
+  /rentals/{reservationId}/pickup:
+    $ref: './paths/rentals-pickup.yaml'
+  /rentals/{rentalId}:
+    $ref: './paths/rentals-by-id.yaml'
+  /rentals/{rentalId}/extend:
+    $ref: './paths/rentals-extend.yaml'
+  /rentals/{rentalId}/return:
+    $ref: './paths/rentals-return.yaml'
+  /incidents:
+    $ref: './paths/incidents.yaml'

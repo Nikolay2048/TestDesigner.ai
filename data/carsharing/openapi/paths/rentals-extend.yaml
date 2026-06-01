@@ -1,0 +1,27 @@
+parameters:
+  - name: rentalId
+    in: path
+    required: true
+    schema: { type: string }
+post:
+  tags: [return]
+  summary: Extend active rental
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema:
+          $ref: '../components/schemas.yaml#/ExtendRequest'
+  responses:
+    '200':
+      description: Rental extended
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [rentalId, newReturnDate, extraAmount]
+            properties:
+              rentalId: { type: string }
+              newReturnDate: { type: string, format: date }
+              extraAmount: { type: number }
+    '409': { $ref: '../components/responses.yaml#/Conflict' }

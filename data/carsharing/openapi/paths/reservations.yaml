@@ -1,0 +1,18 @@
+post:
+  tags: [reservation]
+  summary: Create reservation
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema:
+          $ref: '../components/schemas.yaml#/ReservationCreateRequest'
+  responses:
+    '201':
+      description: Reservation created
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas.yaml#/Reservation'
+    '400': { $ref: '../components/responses.yaml#/BadRequest' }
+    '409': { $ref: '../components/responses.yaml#/Conflict' }

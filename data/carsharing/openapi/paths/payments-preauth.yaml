@@ -1,0 +1,17 @@
+post:
+  tags: [payment]
+  summary: Pre-authorize deposit and rental amount
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema:
+          $ref: '../components/schemas.yaml#/PreauthRequest'
+  responses:
+    '200':
+      description: Pre-authorization result
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas.yaml#/PreauthResponse'
+    '400': { $ref: '../components/responses.yaml#/BadRequest' }

@@ -1,0 +1,18 @@
+post:
+  tags: [loyalty]
+  summary: Validate loyalty card and apply discount
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema:
+          $ref: '../components/schemas.yaml#/LoyaltyValidateRequest'
+  responses:
+    '200':
+      description: Loyalty check result
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas.yaml#/LoyaltyValidateResponse'
+    '400': { $ref: '../components/responses.yaml#/BadRequest' }
+    '404': { $ref: '../components/responses.yaml#/NotFound' }

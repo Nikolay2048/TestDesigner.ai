@@ -1,0 +1,16 @@
+get:
+  tags: [search]
+  summary: List rental locations
+  responses:
+    '200':
+      description: Locations list
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [locations]
+            properties:
+              locations:
+                type: array
+                items:
+                  $ref: '../components/schemas.yaml#/Location'

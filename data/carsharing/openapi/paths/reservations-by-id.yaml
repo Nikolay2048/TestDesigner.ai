@@ -1,0 +1,16 @@
+parameters:
+  - name: reservationId
+    in: path
+    required: true
+    schema: { type: string }
+get:
+  tags: [reservation]
+  summary: Get reservation status and current payable amount
+  responses:
+    '200':
+      description: Reservation details
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas.yaml#/Reservation'
+    '404': { $ref: '../components/responses.yaml#/NotFound' }

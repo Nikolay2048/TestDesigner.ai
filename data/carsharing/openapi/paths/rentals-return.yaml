@@ -1,0 +1,22 @@
+parameters:
+  - name: rentalId
+    in: path
+    required: true
+    schema: { type: string }
+post:
+  tags: [return]
+  summary: Return active rental
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema:
+          $ref: '../components/schemas.yaml#/ReturnRequest'
+  responses:
+    '200':
+      description: Rental closed
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas.yaml#/ReturnResponse'
+    '404': { $ref: '../components/responses.yaml#/NotFound' }

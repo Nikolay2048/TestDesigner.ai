@@ -1,0 +1,172 @@
+Location:
+  type: object
+  required: [id, city, airport, openingHours]
+  properties:
+    id: { type: string, example: LOC-SVO }
+    city: { type: string, example: Moscow }
+    airport: { type: boolean }
+    openingHours: { type: string, example: '08:00-22:00' }
+Vehicle:
+  type: object
+  required: [id, category, transmission, fuelPolicy, dailyRate, deposit]
+  properties:
+    id: { type: string, example: CAR-EC-1 }
+    category:
+      type: string
+      enum: [ECONOMY, COMPACT, SUV, VAN]
+    transmission:
+      type: string
+      enum: [AUTO, MANUAL]
+    fuelPolicy:
+      type: string
+      enum: [FULL_TO_FULL, PREPAID]
+    dailyRate: { type: number, format: float, example: 3900 }
+    deposit: { type: number, format: float, example: 15000 }
+SearchVehiclesRequest:
+  type: object
+  required: [pickupLocationId, returnLocationId, pickupDate, returnDate, driverAge]
+  properties:
+    pickupLocationId: { type: string }
+    returnLocationId: { type: string }
+    pickupDate: { type: string, format: date }
+    returnDate: { type: string, format: date }
+    driverAge: { type: integer, minimum: 18 }
+    category:
+      type: string
+      enum: [ECONOMY, COMPACT, SUV, VAN]
+SearchVehiclesResponse:
+  type: object
+  required: [vehicles]
+  properties:
+    vehicles:
+      type: array
+      items:
+        $ref: '#/Vehicle'
+ReservationCreateRequest:
+  type: object
+  required: [vehicleId, pickupLocationId, returnLocationId, pickupDate, returnDate, customer]
+  properties:
+    vehicleId: { type: string }
+    pickupLocationId: { type: string }
+    returnLocationId: { type: string }
+    pickupDate: { type: string, format: date }
+    returnDate: { type: string, format: date }
+    customer:
+      $ref: '#/Customer'
+Reservation:
+  type: object
+  required: [id, status, vehicleId, totalAmount, depositAmount]
+  properties:
+    id: { type: string, example: RSV-1001 }
+    status:
+      type: string
+      enum: [DRAFT, CONFIRMED, CANCELLED]
+    vehicleId: { type: string }
+    totalAmount: { type: number, format: float }
+    depositAmount: { type: number, format: float }
+    loyaltyDiscountApplied: { type: boolean }
+Customer:
+  type: object
+  required: [firstName, lastName, phone, email, driverLicenseNo]
+  properties:
+    firstName: { type: string }
+    lastName: { type: string }
+    phone: { type: string }
+    email: { type: string, format: email }
+    driverLicenseNo: { type: string }
+ExtrasRequest:
+  type: object
+  required: [extras]
+  properties:
+    extras:
+      type: array
+      items:
+        type: string
+        enum: [CHILD_SEAT, ADDITIONAL_DRIVER, GPS, WINTER_TIRES]
+LoyaltyValidateRequest:
+  type: object
+  required: [loyaltyNumber, reservationId]
+  properties:
+    loyaltyNumber: { type: string, example: LC-100200 }
+    reservationId: { type: string }
+LoyaltyValidateResponse:
+  type: object
+  required: [valid, level, discountPercent]
+  properties:
+    valid: { type: boolean }
+    level: { type: string, enum: [NONE, SILVER, GOLD] }
+    discountPercent: { type: integer }
+PreauthRequest:
+  type: object
+  required: [reservationId, cardToken, amount]
+  properties:
+    reservationId: { type: string }
+    cardToken: { type: string }
+    amount: { type: number, format: float }
+PreauthResponse:
+  type: object
+  required: [paymentId, status, authorizedAmount]
+  properties:
+    paymentId: { type: string }
+    status: { type: string, enum: [AUTHORIZED, DECLINED] }
+    authorizedAmount: { type: number, format: float }
+PickupRequest:
+  type: object
+  required: [odometer, fuelLevelPercent, damageConfirmed]
+  properties:
+    odometer: { type: integer, minimum: 0 }
+    fuelLevelPercent: { type: integer, minimum: 0, maximum: 100 }
+    damageConfirmed: { type: boolean }
+PickupResponse:
+  type: object
+  required: [rentalId, status]
+  properties:
+    rentalId: { type: string }
+    status: { type: string, enum: [ACTIVE] }
+ExtendRequest:
+  type: object
+  required: [newReturnDate]
+  properties:
+    newReturnDate: { type: string, format: date }
+ReturnRequest:
+  type: object
+  required: [odometer, fuelLevelPercent]
+  properties:
+    odometer: { type: integer }
+    fuelLevelPercent: { type: integer }
+ReturnResponse:
+  type: object
+  required: [status, extraCharge]
+  properties:
+    status: { type: string, enum: [CLOSED, NEEDS_INSPECTION] }
+    extraCharge: { type: number, format: float }
+IncidentRequest:
+  type: object
+  required: [rentalId, type, description]
+  properties:
+    rentalId: { type: string }
+    type: { type: string, enum: [SCRATCH, ACCIDENT, LOST_KEY] }
+    description: { type: string }
+IncidentResponse:
+  type: object
+  required: [incidentId, status]
+  properties:
+    incidentId: { type: string }
+    status: { type: string, enum: [OPEN, WAIVED, CHARGED] }
+Error:
+  type: object
+  required: [code, message]
+  properties:
+    code: { type: string }
+    message: { type: string }
+    hint: { type: string }
+Rental:
+  type: object
+  required: [rentalId, reservationId, status, returnDate, odometerStart]
+  properties:
+    rentalId: { type: string }
+    reservationId: { type: string }
+    status: { type: string, enum: [ACTIVE, CLOSED] }
+    returnDate: { type: string, format: date }
+    odometerStart: { type: integer }
+    incidentBeforeClose: { type: boolean }
