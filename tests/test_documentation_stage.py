@@ -372,6 +372,54 @@ def test_patch_applier_replaces_request_binding() -> None:
     assert plan.steps[0].request_bindings[0].generator == "uuid"
 
 
+def test_patch_applier_rejects_patch_outside_suspected_binding() -> None:
+    plan = DataBindingPlan(
+        steps=[
+            StepDataBinding(
+                business_step="Search vehicles",
+                operation=OperationRef(method="POST", path="/vehicles/search"),
+                request_bindings=[
+                    RequestValueBinding(
+                        target="$.driverAge",
+                        location="body",
+                        source="generated",
+                        generator="random_int",
+                        params={"min": 26, "max": 100},
+                    )
+                ],
+            ),
+            StepDataBinding(
+                business_step="Create reservation",
+                operation=OperationRef(method="POST", path="/reservations"),
+                request_bindings=[
+                    RequestValueBinding(
+                        target="$.customer.driverLicenseNo",
+                        location="body",
+                        source="unknown",
+                    )
+                ],
+            ),
+        ]
+    )
+    patch = BindingPatch(
+        patch_type="replace_generated_params",
+        step_id="s02",
+        target="$.customer.driverLicenseNo",
+        params={"min": 1000000, "max": 9999999},
+    )
+
+    applied = apply_binding_patch(
+        plan,
+        patch,
+        {},
+        GeneratorRegistry(),
+        allowed_bindings=[{"step_id": "s01", "target": "$.driverAge"}],
+    )
+
+    assert applied is None
+    assert plan.steps[1].request_bindings[0].source == "unknown"
+
+
 def test_executor_uses_extracted_variable_in_later_path(monkeypatch) -> None:
     class FakeResponse:
         status_code = 200
@@ -428,3 +476,20 @@ def test_date_generator_can_return_openapi_date_format() -> None:
     assert len(value) == 10
     assert value.count("-") == 2
 
+
+def test_generator_registry_exposes_openai_tool_schema() -> None:
+    schema = GeneratorRegistry().tool_schema("random_int")
+
+    assert schema["type"] == "function"
+    assert schema["function"]["name"] == "random_int"
+    assert schema["function"]["parameters"]["properties"]["min"]["type"] == "integer"
+    assert schema["function"]["parameters"]["properties"]["max"]["type"] == "integer"
+
+
+def test_generator_registry_coerces_numeric_params() -> None:
+    registry = GeneratorRegistry()
+
+    assert registry.generate("random_int", {"min": "1", "max": "1"}) == 1
+    date_value = registry.generate("date_after_now", {"days": "1", "format": "date"})
+    assert len(date_value) == 10
+    assert date_value.count("-") == 2

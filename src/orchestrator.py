@@ -255,6 +255,7 @@ class AgenticTestDesignOrchestrator:
                         patch,
                         state.static_test_data,
                         self.generator_registry,
+                        allowed_bindings=diagnosis.suspected_bindings,
                     )
                 except Exception as exc:
                     state.stabilization.review_notes.append(

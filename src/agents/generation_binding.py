@@ -42,8 +42,10 @@ class GenerationBindingAgent(Agent):
                 "operation": task.operation.model_dump(mode="json"),
                 "need": task.need.model_dump(mode="json"),
                 "static_keys": task.static_keys,
-                "available_generators": [
-                    generator.model_dump(mode="json") for generator in task.available_generators
+                "available_generators": [generator.name for generator in task.available_generators],
+                "available_generator_tools": [
+                    self.generator_registry.tool_schema(generator.name)
+                    for generator in task.available_generators
                 ],
                 "business_context": task.business_context,
             }
@@ -87,6 +89,8 @@ Rules:
 - Return one decision for every task.
 - Use source=static only with a key from the task static_keys.
 - Use source=generated only with a name from the task available_generators.
+- Generator params must conform to the matching available_generator_tools schema.
+- Do not quote integer, number, or boolean generator params.
 - Use source=missing when the value must come from a human/test-data/mocked external system.
 - Use source=unknown when there is not enough information to choose safely.
 - Do not invent generators or static keys.

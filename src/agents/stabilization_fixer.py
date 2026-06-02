@@ -60,8 +60,11 @@ Previous attempts and fixes:
 Static test data keys:
 {json.dumps(sorted(state.static_test_data.keys()), ensure_ascii=False, indent=2)}
 
-Available generators:
-{json.dumps([item.model_dump(mode="json") for item in self.generator_registry.specs()], ensure_ascii=False, indent=2)}
+Available generator names:
+{json.dumps([item.name for item in self.generator_registry.specs()], ensure_ascii=False, indent=2)}
+
+Available generator tools:
+{json.dumps(self.generator_registry.tool_schemas(), ensure_ascii=False, indent=2)}
 
 Return JSON with this shape:
 {{
@@ -100,6 +103,9 @@ Rules:
 - If no safe patch exists, return one patch with patch_type=no_patch.
 - Do not change endpoints, step order, or business steps.
 - Use only available generator names and static keys.
+- Generator params must conform to the matching available_generator_tools schema.
+- Do not quote integer, number, or boolean generator params.
+- Patch only fields listed in diagnosis.suspected_bindings.
 - Patches based on server behavior should require human review.
 """.strip(),
             ),

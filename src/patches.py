@@ -9,12 +9,15 @@ def apply_binding_patch(
     patch: BindingPatch,
     static_test_data: dict,
     generator_registry: GeneratorRegistry,
+    allowed_bindings: list[dict] | None = None,
 ) -> BindingPatch | None:
     """Validate and apply one stabilization patch. Returns applied patch or None."""
 
     if patch.patch_type == "no_patch":
         return None
     if not patch.step_id:
+        return None
+    if allowed_bindings is not None and not _is_allowed_patch_target(patch, allowed_bindings):
         return None
 
     step = _find_step(plan, patch.step_id)
@@ -82,6 +85,28 @@ def _find_step(plan: DataBindingPlan, step_id: str):
     if 0 <= index < len(plan.steps):
         return plan.steps[index]
     return None
+
+
+def _is_allowed_patch_target(patch: BindingPatch, allowed_bindings: list[dict]) -> bool:
+    """Keep LLM fixes scoped to fields named by the diagnostician."""
+
+    if patch.patch_type == "add_response_extraction":
+        return any(item.get("step_id") == patch.step_id for item in allowed_bindings)
+
+    patch_target = patch.target or (patch.new_binding.target if patch.new_binding else None)
+    patch_variable = patch.variable or (
+        patch.new_extraction.variable if patch.new_extraction else None
+    )
+    for item in allowed_bindings:
+        if item.get("step_id") != patch.step_id:
+            continue
+        allowed_target = item.get("target")
+        allowed_variable = item.get("variable")
+        if allowed_target and patch_target == allowed_target:
+            return True
+        if allowed_variable and patch_variable == allowed_variable:
+            return True
+    return False
 
 
 def _validate_binding(binding, static_test_data: dict, generator_registry: GeneratorRegistry) -> None:

@@ -6,10 +6,40 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from langchain_core.utils.function_calling import convert_to_openai_tool
+
 from domain import GeneratorSpec
 
 
 PythonGenerator = Callable[..., Any]
+
+
+def uuid_generator() -> str:
+    """Return a random UUID string."""
+
+
+def email(domain: str = "example.test") -> str:
+    """Return a unique test email address for the provided domain."""
+
+
+def phone_number(country: str = "RU", format: str = "e164") -> str:
+    """Return a phone number string for a country and output format."""
+
+
+def full_name() -> str:
+    """Return a simple human full name."""
+
+
+def date_after_now(days: int = 1, format: str = "iso_datetime") -> str:
+    """Return a date or datetime after current time. Use format='date' for YYYY-MM-DD."""
+
+
+def random_int(min: int = 0, max: int = 1000) -> int:
+    """Return a random integer between min and max, inclusive."""
+
+
+def enum_value(values: list[Any]) -> Any:
+    """Select one value from a non-empty list of allowed values."""
 
 
 class GeneratorRegistry:
@@ -25,6 +55,20 @@ class GeneratorRegistry:
             "random_int": self._random_int,
             "enum_value": self._enum_value,
         }
+        self._tool_functions: dict[str, Callable[..., Any]] = {
+            "uuid": uuid_generator,
+            "email": email,
+            "phone_number": phone_number,
+            "full_name": full_name,
+            "date_after_now": date_after_now,
+            "random_int": random_int,
+            "enum_value": enum_value,
+        }
+        self._tool_schemas: dict[str, dict[str, Any]] = {
+            name: convert_to_openai_tool(function)
+            for name, function in self._tool_functions.items()
+        }
+        self._tool_schemas["uuid"]["function"]["name"] = "uuid"
         self._specs: dict[str, GeneratorSpec] = {
             "uuid": GeneratorSpec(name="uuid", description="Random UUID string."),
             "email": GeneratorSpec(
@@ -100,13 +144,40 @@ class GeneratorRegistry:
     def specs(self) -> list[GeneratorSpec]:
         return list(self._specs.values())
 
+    def tool_schemas(self) -> list[dict[str, Any]]:
+        """OpenAI-compatible tool schemas for LLM prompts and future LangGraph tools."""
+
+        return list(self._tool_schemas.values())
+
+    def tool_schema(self, name: str) -> dict[str, Any]:
+        if name not in self._tool_schemas:
+            raise KeyError(f"Unknown generator tool: {name}")
+        return self._tool_schemas[name]
+
     def has(self, name: str) -> bool:
         return name in self._python_generators and name in self._js_generators
 
     def generate(self, name: str, params: dict[str, Any] | None = None) -> Any:
         if name not in self._python_generators:
             raise KeyError(f"Unknown generator: {name}")
-        return self._python_generators[name](**(params or {}))
+        coerced_params = self.coerce_params(name, params or {})
+        return self._python_generators[name](**coerced_params)
+
+    def coerce_params(self, name: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Coerce simple LLM-produced parameter strings according to the tool schema."""
+
+        if name not in self._tool_schemas:
+            return params
+        properties = (
+            self._tool_schemas[name]
+            .get("function", {})
+            .get("parameters", {})
+            .get("properties", {})
+        )
+        return {
+            key: self._coerce_value(value, properties.get(key, {}))
+            for key, value in params.items()
+        }
 
     def js_source(self, name: str) -> str:
         if name not in self._js_generators:
@@ -148,3 +219,21 @@ class GeneratorRegistry:
         if not values:
             raise ValueError("values is required")
         return random.choice(values)
+
+    @staticmethod
+    def _coerce_value(value: Any, schema: dict[str, Any]) -> Any:
+        if not isinstance(value, str):
+            return value
+        if value.startswith("{{") and value.endswith("}}"):
+            return value
+        schema_type = schema.get("type")
+        if schema_type == "integer" and value.strip().lstrip("-").isdigit():
+            return int(value)
+        if schema_type == "number":
+            try:
+                return float(value)
+            except ValueError:
+                return value
+        if schema_type == "boolean" and value.lower() in {"true", "false"}:
+            return value.lower() == "true"
+        return value
