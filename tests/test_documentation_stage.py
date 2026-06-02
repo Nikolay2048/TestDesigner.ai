@@ -167,6 +167,26 @@ def test_data_dependency_graph_extracts_needs_and_producers() -> None:
     assert "$.customer.phone" in [need.target for need in graph.steps[1].needs]
 
 
+def test_data_dependency_graph_uses_path_namespace_for_path_params() -> None:
+    state = ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Demo", text="Demo"),
+        operations=load_openapi_operations("data/carsharing/openapi/openapi.yaml"),
+        endpoint_mapping=EndpointMappingResult(
+            mappings=[
+                StepOperationMapping(
+                    business_step="Open vehicle card",
+                    operations=[OperationRef(method="GET", path="/vehicles/{vehicleId}")],
+                )
+            ]
+        ),
+    )
+
+    graph = build_dependency_graph(state)
+
+    assert graph.steps[0].needs[0].target == "$.path.vehicleId"
+    assert graph.steps[0].needs[0].location == "path"
+
+
 def test_dependency_resolver_prompt_uses_candidate_tasks() -> None:
     state = ProjectState(
         scenario=ScenarioInput(path="scenario.md", title="Demo", text="Demo"),

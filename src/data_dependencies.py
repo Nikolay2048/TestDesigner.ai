@@ -225,7 +225,7 @@ def _path_needs(step_id: str, path: str) -> list[DataNeed]:
     return [
         DataNeed(
             step_id=step_id,
-            target=match.group(1),
+            target=f"$.path.{match.group(1)}",
             location="path",
             type="string",
             required=True,
