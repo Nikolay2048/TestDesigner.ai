@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from domain import ApiOperation, EndpointMappingResult, UnmappedStep
+from domain import ApiOperation, DataBindingPlan, EndpointMappingResult, UnmappedStep
+from generators import GeneratorRegistry
 
 
 def validate_endpoint_mapping(
@@ -40,3 +41,64 @@ def validate_endpoint_mapping(
 
     mapping.risks = global_risks
     return mapping
+
+
+def validate_data_binding(
+    data_binding: DataBindingPlan,
+    operations: list[ApiOperation],
+    static_test_data: dict,
+    generator_registry: GeneratorRegistry,
+) -> DataBindingPlan:
+    """Record invalid data references without hiding the model output."""
+
+    allowed_operations = {(operation.method, operation.path) for operation in operations}
+    static_keys = set(static_test_data)
+    global_risks = list(data_binding.risks)
+
+    for step in data_binding.steps:
+        operation_key = (step.operation.method, step.operation.path)
+        if operation_key not in allowed_operations:
+            risk = (
+                f"Data binding references operation {step.operation.method} {step.operation.path}, "
+                "but it is absent from OpenAPI."
+            )
+            step.risks.append(risk)
+            global_risks.append(risk)
+
+        for binding in step.request_bindings:
+            if binding.source == "static" and binding.static_key not in static_keys:
+                risk = (
+                    f"Binding {binding.target} references unknown static key: "
+                    f"{binding.static_key or '<empty>'}."
+                )
+                step.risks.append(risk)
+                global_risks.append(risk)
+
+            if binding.source == "generated":
+                if not binding.generator or not generator_registry.has(binding.generator):
+                    risk = (
+                        f"Binding {binding.target} references unknown generator: "
+                        f"{binding.generator or '<empty>'}."
+                    )
+                    step.risks.append(risk)
+                    global_risks.append(risk)
+
+            if binding.source == "response" and not binding.variable:
+                risk = f"Binding {binding.target} uses response source without variable name."
+                step.risks.append(risk)
+                global_risks.append(risk)
+
+        for extraction in step.response_extractions:
+            if not extraction.json_path.startswith("$"):
+                risk = (
+                    f"Extraction {extraction.variable} has invalid json_path: "
+                    f"{extraction.json_path}."
+                )
+                step.risks.append(risk)
+                global_risks.append(risk)
+
+    for missing in data_binding.missing_generators:
+        missing.human_review_required = True
+
+    data_binding.risks = global_risks
+    return data_binding

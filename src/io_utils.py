@@ -61,6 +61,19 @@ def load_yaml(path: Path) -> Any:
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
+def load_test_data(path: str | None) -> dict[str, Any]:
+    if not path:
+        return {}
+    data_path = Path(path)
+    if data_path.suffix.lower() == ".json":
+        data = json.loads(data_path.read_text(encoding="utf-8"))
+    else:
+        data = load_yaml(data_path)
+    if not isinstance(data, dict):
+        raise ValueError("Test data file must contain a JSON/YAML object at top level.")
+    return data
+
+
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -101,6 +101,160 @@ class EndpointMappingResult(BaseModel):
     risks: list[str] = Field(default_factory=list)
 
 
+class GeneratorSpec(BaseModel):
+    """Generator available both to Python executor and future Postman export."""
+
+    name: str
+    description: str = ""
+    parameters: dict[str, str] = Field(default_factory=dict)
+
+
+class RequestValueBinding(BaseModel):
+    """How to fill one request value before a REST call."""
+
+    target: str
+    location: Literal["path", "query", "header", "body"]
+    source: Literal["static", "generated", "response", "computed", "literal", "unknown"]
+    variable: str | None = None
+    static_key: str | None = None
+    generator: str | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+    json_path: str | None = None
+    expression: str | None = None
+    literal: Any = None
+    scope: Literal["step", "scenario"] = "step"
+    source_step_id: str | None = None
+    candidate_id: str | None = None
+    policy: str = ""
+    requires_human_review: bool = False
+    reason: str = ""
+
+
+class ResponseExtraction(BaseModel):
+    """Variable to save from a response after a REST call."""
+
+    variable: str
+    json_path: str
+    scope: Literal["step", "scenario"] = "scenario"
+    source_step_id: str | None = None
+    candidate_id: str | None = None
+    policy: str = ""
+    required: bool = True
+    reason: str = ""
+
+
+class StepDataBinding(BaseModel):
+    business_step: str
+    operation: OperationRef
+    request_bindings: list[RequestValueBinding] = Field(default_factory=list)
+    response_extractions: list[ResponseExtraction] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+
+
+class MissingGenerator(BaseModel):
+    name: str
+    reason: str
+    suggested_parameters: dict[str, str] = Field(default_factory=dict)
+    human_review_required: bool = True
+
+
+class DataBindingPlan(BaseModel):
+    """Data plan for executor and later Postman script generation."""
+
+    steps: list[StepDataBinding] = Field(default_factory=list)
+    missing_generators: list[MissingGenerator] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+
+
+class DataNeed(BaseModel):
+    step_id: str
+    target: str
+    location: Literal["path", "query", "header", "body"]
+    type: str = "unknown"
+    required: bool = True
+    field_schema: dict[str, Any] = Field(default_factory=dict)
+
+
+class DataProducer(BaseModel):
+    step_id: str
+    json_path: str
+    type: str = "unknown"
+    field_name: str = ""
+    operation: OperationRef
+
+
+class DataDependencyStep(BaseModel):
+    step_id: str
+    business_step: str
+    operation: OperationRef
+    needs: list[DataNeed] = Field(default_factory=list)
+    produces: list[DataProducer] = Field(default_factory=list)
+
+
+class DataDependencyGraph(BaseModel):
+    steps: list[DataDependencyStep] = Field(default_factory=list)
+
+
+class ResponseCandidate(BaseModel):
+    candidate_id: str
+    target: str
+    source_step_id: str
+    json_path: str
+    type: str = "unknown"
+    producer_operation: OperationRef
+    reason: str = ""
+
+
+class DependencyResolutionTask(BaseModel):
+    step_id: str
+    business_step: str
+    operation: OperationRef
+    need: DataNeed
+    candidates: list[ResponseCandidate] = Field(default_factory=list)
+
+
+class DependencyResolution(BaseModel):
+    step_id: str
+    target: str
+    selected_candidate_id: str | None = None
+    confidence: Literal["high", "medium", "low", "none"] = "none"
+    reason: str = ""
+
+
+class DependencyResolverResult(BaseModel):
+    resolutions: list[DependencyResolution] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+
+
+class GenerationBindingTask(BaseModel):
+    step_id: str
+    business_step: str
+    operation: OperationRef
+    need: DataNeed
+    static_keys: list[str] = Field(default_factory=list)
+    available_generators: list[GeneratorSpec] = Field(default_factory=list)
+    business_context: list[str] = Field(default_factory=list)
+
+
+class GenerationBindingDecision(BaseModel):
+    step_id: str
+    target: str
+    source: Literal["static", "generated", "computed", "literal", "missing", "unknown"]
+    static_key: str | None = None
+    generator: str | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+    expression: str | None = None
+    literal: Any = None
+    confidence: Literal["high", "medium", "low", "none"] = "none"
+    reason: str = ""
+    requires_human_review: bool = False
+
+
+class GenerationBindingResult(BaseModel):
+    decisions: list[GenerationBindingDecision] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+
+
 class AgentMessage(BaseModel):
     role: Literal["system", "user", "assistant"]
     content: str
@@ -117,7 +271,12 @@ class AgentRun(BaseModel):
 class ProjectState(BaseModel):
     scenario: ScenarioInput
     operations: list[ApiOperation] = Field(default_factory=list)
+    static_test_data: dict[str, Any] = Field(default_factory=dict)
     understanding: ScenarioUnderstanding | None = None
     endpoint_mapping: EndpointMappingResult | None = None
+    data_dependency_graph: DataDependencyGraph | None = None
+    dependency_resolutions: DependencyResolverResult | None = None
+    generation_bindings: GenerationBindingResult | None = None
+    data_binding: DataBindingPlan | None = None
     flow: FlowDraft | None = None
     agent_runs: list[AgentRun] = Field(default_factory=list)

@@ -1,0 +1,5 @@
+country_code: RU
+city: Moscow
+user_login: test_user
+user_password: test_password
+phone_format: e164
