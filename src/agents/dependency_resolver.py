@@ -5,7 +5,7 @@ from typing import Any
 
 from agents.base import Agent
 from data_dependencies import build_dependency_resolution_tasks
-from domain import AgentMessage, DependencyResolverResult, ProjectState
+from domain import AgentMessage, DependencyResolutionTask, DependencyResolverResult, ProjectState
 
 
 class DependencyResolverAgent(Agent):
@@ -14,9 +14,13 @@ class DependencyResolverAgent(Agent):
     name = "Dependency Resolver"
     output_model = DependencyResolverResult
 
+    def __init__(self, llm=None, tasks: list[DependencyResolutionTask] | None = None):
+        super().__init__(llm)
+        self.tasks = tasks
+
     def build_prompt(self, state: ProjectState) -> list[AgentMessage]:
         graph = state.data_dependency_graph
-        tasks = build_dependency_resolution_tasks(graph) if graph else []
+        tasks = self.tasks if self.tasks is not None else build_dependency_resolution_tasks(graph) if graph else []
         compact_tasks = [
             {
                 "step_id": task.step_id,

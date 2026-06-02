@@ -91,8 +91,8 @@ class ArtifactStore:
     def save_state(self, state: ProjectState) -> None:
         write_json(self.root / "state.json", state.model_dump(mode="json"))
 
-    def save_agent_run(self, run: AgentRun) -> None:
-        safe_name = run.agent_name.lower().replace(" ", "_")
+    def save_agent_run(self, run: AgentRun, artifact_name: str | None = None) -> None:
+        safe_name = artifact_name or run.agent_name.lower().replace(" ", "_")
         write_json(self.root / f"{safe_name}.run.json", run.model_dump(mode="json"))
         prompt_text = "\n\n".join(
             f"## {message.role.upper()}\n{message.content}" for message in run.prompt

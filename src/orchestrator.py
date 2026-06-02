@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from agents import (
     DependencyResolverAgent,
@@ -12,8 +13,9 @@ from data_dependencies import (
     assemble_data_binding_plan,
     build_dependency_graph,
     build_dependency_resolution_tasks,
+    build_generation_binding_tasks,
 )
-from domain import ProjectState
+from domain import AgentRun, DependencyResolverResult, GenerationBindingResult, ProjectState
 from generators import GeneratorRegistry
 from io_utils import ArtifactStore, load_scenario, load_test_data
 from llm import LLM
@@ -28,8 +30,7 @@ class AgenticTestDesignOrchestrator:
         self.generator_registry = GeneratorRegistry()
         self.documentation_analyst = DocumentationAnalystAgent(llm)
         self.endpoint_mapper = EndpointMapperAgent(llm)
-        self.dependency_resolver = DependencyResolverAgent(llm)
-        self.generation_binding = GenerationBindingAgent(llm, self.generator_registry)
+        self.llm = llm
 
     def run(
         self,
@@ -70,7 +71,7 @@ class AgenticTestDesignOrchestrator:
         dependency_tasks = build_dependency_resolution_tasks(state.data_dependency_graph)
 
         # Stage 4: choose previous response candidates for request fields.
-        state, run = self.dependency_resolver.run(state)
+        state, run = self._run_dependency_resolver_tasks(state, store, dependency_tasks)
         state.agent_runs.append(run)
         store.save_agent_run(run)
         if run.status != "completed":
@@ -78,7 +79,13 @@ class AgenticTestDesignOrchestrator:
             return state
 
         # Stage 5: choose static/generated/computed/literal sources for remaining fields.
-        state, run = self.generation_binding.run(state)
+        generation_tasks = build_generation_binding_tasks(
+            state.data_dependency_graph,
+            state.dependency_resolutions.resolutions if state.dependency_resolutions else [],
+            state,
+            self.generator_registry,
+        )
+        state, run = self._run_generation_binding_tasks(state, store, generation_tasks)
         state.agent_runs.append(run)
         store.save_agent_run(run)
         if run.status != "completed":
@@ -102,3 +109,72 @@ class AgenticTestDesignOrchestrator:
 
         store.save_state(state)
         return state
+
+    def _run_dependency_resolver_tasks(
+        self,
+        state: ProjectState,
+        store: ArtifactStore,
+        tasks,
+    ) -> tuple[ProjectState, AgentRun]:
+        resolutions = []
+        risks = []
+        summary = AgentRun(agent_name="Dependency Resolver", status="completed")
+
+        for task in tasks:
+            agent = DependencyResolverAgent(self.llm, tasks=[task])
+            state, run = agent.run(state)
+            artifact_name = f"dependency_resolver_tasks/{_task_artifact_name(task.step_id, task.need.target)}"
+            store.save_agent_run(run, artifact_name)
+            if run.status != "completed":
+                summary.status = run.status
+                summary.notes.append(f"{task.step_id} {task.need.target}: {run.status}")
+                summary.output = {"failed_task": task.model_dump(mode="json")}
+                return state, summary
+            if state.dependency_resolutions:
+                resolutions.extend(state.dependency_resolutions.resolutions)
+                risks.extend(state.dependency_resolutions.risks)
+
+        state.dependency_resolutions = DependencyResolverResult(
+            resolutions=resolutions,
+            risks=risks,
+        )
+        summary.output = state.dependency_resolutions.model_dump(mode="json")
+        summary.notes.append(f"Resolved {len(resolutions)} dependency tasks.")
+        return state, summary
+
+    def _run_generation_binding_tasks(
+        self,
+        state: ProjectState,
+        store: ArtifactStore,
+        tasks,
+    ) -> tuple[ProjectState, AgentRun]:
+        decisions = []
+        risks = []
+        summary = AgentRun(agent_name="Generation Binding", status="completed")
+
+        for task in tasks:
+            agent = GenerationBindingAgent(self.llm, self.generator_registry, tasks=[task])
+            state, run = agent.run(state)
+            artifact_name = f"generation_binding_tasks/{_task_artifact_name(task.step_id, task.need.target)}"
+            store.save_agent_run(run, artifact_name)
+            if run.status != "completed":
+                summary.status = run.status
+                summary.notes.append(f"{task.step_id} {task.need.target}: {run.status}")
+                summary.output = {"failed_task": task.model_dump(mode="json")}
+                return state, summary
+            if state.generation_bindings:
+                decisions.extend(state.generation_bindings.decisions)
+                risks.extend(state.generation_bindings.risks)
+
+        state.generation_bindings = GenerationBindingResult(
+            decisions=decisions,
+            risks=risks,
+        )
+        summary.output = state.generation_bindings.model_dump(mode="json")
+        summary.notes.append(f"Bound {len(decisions)} generation tasks.")
+        return state, summary
+
+
+def _task_artifact_name(step_id: str, target: str) -> str:
+    safe_target = re.sub(r"[^A-Za-z0-9]+", "_", target).strip("_") or "value"
+    return f"{step_id}_{safe_target}"

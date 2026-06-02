@@ -5,7 +5,7 @@ from typing import Any
 
 from agents.base import Agent
 from data_dependencies import build_generation_binding_tasks
-from domain import AgentMessage, GenerationBindingResult, ProjectState
+from domain import AgentMessage, GenerationBindingResult, GenerationBindingTask, ProjectState
 from generators import GeneratorRegistry
 
 
@@ -15,15 +15,23 @@ class GenerationBindingAgent(Agent):
     name = "Generation Binding"
     output_model = GenerationBindingResult
 
-    def __init__(self, llm=None, generator_registry: GeneratorRegistry | None = None):
+    def __init__(
+        self,
+        llm=None,
+        generator_registry: GeneratorRegistry | None = None,
+        tasks: list[GenerationBindingTask] | None = None,
+    ):
         super().__init__(llm)
         self.generator_registry = generator_registry or GeneratorRegistry()
+        self.tasks = tasks
 
     def build_prompt(self, state: ProjectState) -> list[AgentMessage]:
         graph = state.data_dependency_graph
         resolutions = state.dependency_resolutions.resolutions if state.dependency_resolutions else []
         tasks = (
-            build_generation_binding_tasks(graph, resolutions, state, self.generator_registry)
+            self.tasks
+            if self.tasks is not None
+            else build_generation_binding_tasks(graph, resolutions, state, self.generator_registry)
             if graph
             else []
         )
