@@ -22,10 +22,6 @@ rentals: Dict[str, Dict[str, Any]] = {}
 incidents: Dict[str, Dict[str, Any]] = {}
 
 
-def parse_date(value: str) -> date:
-    return datetime.strptime(value, "%Y-%m-%d").date()
-
-
 def vehicle_by_id(vehicle_id: str) -> Dict[str, Any]:
     for v in VEHICLES:
         if v["id"] == vehicle_id:
@@ -38,6 +34,18 @@ def error(status: int, code: str, message: str, hint: str | None = None):
     if hint:
         payload["hint"] = hint
     raise HTTPException(status_code=status, detail=payload)
+
+
+def parse_date(value: str, field_name: str = "date") -> date:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        error(
+            400,
+            "INVALID_DATE_FORMAT",
+            f"{field_name} must use YYYY-MM-DD format",
+            f"Use {field_name} like 2026-06-10, without time or timezone",
+        )
 
 
 class SearchVehiclesRequest(BaseModel):
@@ -114,8 +122,8 @@ def get_vehicle(vehicle_id: str):
 
 @app.post("/vehicles/search")
 def search_vehicles(req: SearchVehiclesRequest):
-    pickup = parse_date(req.pickupDate)
-    ret = parse_date(req.returnDate)
+    pickup = parse_date(req.pickupDate, "pickupDate")
+    ret = parse_date(req.returnDate, "returnDate")
     if ret <= pickup:
         error(400, "INVALID_DATES", "returnDate must be later than pickupDate", "Set returnDate to at least pickupDate + 1 day")
     if req.category == "SUV" and req.driverAge < 30:
@@ -127,8 +135,8 @@ def search_vehicles(req: SearchVehiclesRequest):
 @app.post("/reservations", status_code=201)
 def create_reservation(req: ReservationCreateRequest):
     vehicle = vehicle_by_id(req.vehicleId)
-    pickup = parse_date(req.pickupDate)
-    ret = parse_date(req.returnDate)
+    pickup = parse_date(req.pickupDate, "pickupDate")
+    ret = parse_date(req.returnDate, "returnDate")
     if ret <= pickup:
         error(400, "INVALID_DATES", "returnDate must be after pickupDate", "Use a rental period of at least one day")
     days = (ret - pickup).days
@@ -237,8 +245,8 @@ def extend(rental_id: str, req: ExtendRequest):
     rental = rentals.get(rental_id)
     if not rental:
         error(404, "RENTAL_NOT_FOUND", "Rental not found")
-    current = parse_date(rental["returnDate"])
-    new = parse_date(req.newReturnDate)
+    current = parse_date(rental["returnDate"], "returnDate")
+    new = parse_date(req.newReturnDate, "newReturnDate")
     if new <= current:
         error(409, "INVALID_EXTENSION_DATE", "New return date must be later than current return date", f"Use newReturnDate={(current + timedelta(days=1)).isoformat()}")
     if (new - current).days > 3:

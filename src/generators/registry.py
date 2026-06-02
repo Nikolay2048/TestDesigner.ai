@@ -43,8 +43,11 @@ class GeneratorRegistry:
             "full_name": GeneratorSpec(name="full_name", description="Simple human full name."),
             "date_after_now": GeneratorSpec(
                 name="date_after_now",
-                description="ISO datetime after current time.",
-                parameters={"days": "Days after now, default 1."},
+                description="Date or datetime after current time.",
+                parameters={
+                    "days": "Days after now, default 1.",
+                    "format": "date for YYYY-MM-DD or iso_datetime for full timestamp.",
+                },
             ),
             "random_int": GeneratorSpec(
                 name="random_int",
@@ -78,8 +81,9 @@ class GeneratorRegistry:
                 "return `Test User ${Math.floor(Math.random() * 100000)}`; }"
             ),
             "date_after_now": (
-                "function dateAfterNow(days = 1) { "
+                "function dateAfterNow(days = 1, format = 'iso_datetime') { "
                 "const d = new Date(Date.now() + days * 24 * 60 * 60 * 1000); "
+                "if (format === 'date') return d.toISOString().slice(0, 10); "
                 "return d.toISOString(); }"
             ),
             "random_int": (
@@ -129,8 +133,11 @@ class GeneratorRegistry:
         return f"Test User {random.randint(10000, 99999)}"
 
     @staticmethod
-    def _date_after_now(days: int = 1) -> str:
-        return (datetime.now(UTC) + timedelta(days=days)).isoformat()
+    def _date_after_now(days: int = 1, format: str = "iso_datetime") -> str:
+        value = datetime.now(UTC) + timedelta(days=days)
+        if format == "date":
+            return value.date().isoformat()
+        return value.isoformat()
 
     @staticmethod
     def _random_int(min: int = 0, max: int = 1000) -> int:

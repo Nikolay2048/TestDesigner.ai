@@ -420,3 +420,11 @@ def test_executor_uses_extracted_variable_in_later_path(monkeypatch) -> None:
 
     assert trace.status == "passed"
     assert calls[1][1] == "http://server/locations/LOC-1"
+
+
+def test_date_generator_can_return_openapi_date_format() -> None:
+    value = GeneratorRegistry().generate("date_after_now", {"days": 1, "format": "date"})
+
+    assert len(value) == 10
+    assert value.count("-") == 2
+
