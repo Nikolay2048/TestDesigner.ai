@@ -25,6 +25,7 @@ class StabilizationFixerAgent(Agent):
         self.generator_registry = generator_registry or GeneratorRegistry()
 
     def build_prompt(self, state: ProjectState) -> list[AgentMessage]:
+        fix_context = _build_fix_context(state, self.diagnosis)
         previous_attempts = [
             {
                 "attempt": attempt.attempt,
@@ -41,7 +42,8 @@ class StabilizationFixerAgent(Agent):
             AgentMessage(
                 role="system",
                 content=(
-                    "You propose one small patch to a DataBindingPlan to make the next executor retry pass. "
+                    "You propose one small patch to one failed REST step. "
+                    "Use only the suspected bindings from the diagnosis. "
                     "Return strict JSON only. Do not repeat previous failed fixes."
                 ),
             ),
@@ -51,8 +53,8 @@ class StabilizationFixerAgent(Agent):
 Diagnosis:
 {json.dumps(self.diagnosis.model_dump(mode="json") if self.diagnosis else None, ensure_ascii=False, indent=2)}
 
-Current data binding plan:
-{json.dumps(state.data_binding.model_dump(mode="json") if state.data_binding else None, ensure_ascii=False, indent=2)}
+Fix context:
+{json.dumps(fix_context, ensure_ascii=False, indent=2)}
 
 Previous attempts and fixes:
 {json.dumps(previous_attempts, ensure_ascii=False, indent=2)}
@@ -72,22 +74,12 @@ Return JSON with this shape:
   "patches": [
     {{
       "patch_type": "replace_request_binding|replace_response_extraction|add_response_extraction|replace_generated_params|replace_computed_expression|no_patch",
-      "step_id": "s04",
-      "target": "$.customer.driverLicenseNo",
+      "step_id": "step id from diagnosis.suspected_bindings",
+      "target": "target from diagnosis.suspected_bindings",
       "variable": null,
-      "new_binding": {{
-        "target": "$.customer.driverLicenseNo",
-        "location": "body",
-        "source": "generated",
-        "variable": "customer_driverLicenseNo",
-        "generator": "uuid",
-        "params": {{}},
-        "scope": "step",
-        "policy": "stabilization_uuid_driver_license",
-        "reason": "Server requires driverLicenseNo."
-      }},
+      "new_binding": null,
       "new_extraction": null,
-      "params": {{}},
+      "params": {{"days": 2, "format": "date"}},
       "expression": null,
       "reason": "why this patch should help",
       "why_not_repeating_previous_fix": "why this does not repeat a failed prior patch",
@@ -106,6 +98,7 @@ Rules:
 - Generator params must conform to the matching available_generator_tools schema.
 - Do not quote integer, number, or boolean generator params.
 - Patch only fields listed in diagnosis.suspected_bindings.
+- Prefer replace_generated_params when the current binding is generated and only params are wrong.
 - Patches based on server behavior should require human review.
 """.strip(),
             ),
@@ -113,3 +106,47 @@ Rules:
 
     def apply_output(self, state: ProjectState, output: Any) -> ProjectState:
         return state
+
+
+def _build_fix_context(
+    state: ProjectState,
+    diagnosis: StabilizationDiagnosis | None,
+) -> dict[str, Any]:
+    if not diagnosis or not state.stabilization or not state.stabilization.attempts:
+        return {}
+
+    latest_trace = state.stabilization.attempts[-1].trace
+    failed_step_trace = next(
+        (step for step in latest_trace.steps if step.step_id == diagnosis.failed_step_id),
+        None,
+    )
+    failed_plan_step = None
+    if state.data_binding:
+        try:
+            failed_index = int(diagnosis.failed_step_id.removeprefix("s")) - 1
+        except ValueError:
+            failed_index = -1
+        if 0 <= failed_index < len(state.data_binding.steps):
+            failed_plan_step = state.data_binding.steps[failed_index]
+
+    suspected_targets = {
+        item.get("target")
+        for item in diagnosis.suspected_bindings
+        if item.get("step_id") == diagnosis.failed_step_id and item.get("target")
+    }
+    suspected_bindings = []
+    sibling_bindings = []
+    if failed_plan_step:
+        for binding in failed_plan_step.request_bindings:
+            payload = binding.model_dump(mode="json")
+            if binding.target in suspected_targets:
+                suspected_bindings.append(payload)
+            else:
+                sibling_bindings.append(payload)
+
+    return {
+        "failed_step": failed_step_trace.model_dump(mode="json") if failed_step_trace else None,
+        "suspected_bindings": suspected_bindings,
+        "sibling_bindings_same_step": sibling_bindings,
+        "allowed_patch_targets": diagnosis.suspected_bindings,
+    }

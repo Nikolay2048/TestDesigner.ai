@@ -69,12 +69,12 @@ Return JSON with this shape:
 {{
   "decisions": [
     {{
-      "step_id": "s04",
-      "target": "$.customer.phone",
+      "step_id": "step id from the task",
+      "target": "target from the task",
       "source": "static|generated|computed|literal|missing|unknown",
       "static_key": null,
-      "generator": "phone_number",
-      "params": {{"country": "{{{{country_code}}}}", "format": "{{{{phone_format}}}}"}},
+      "generator": null,
+      "params": {{}},
       "expression": null,
       "literal": null,
       "confidence": "high|medium|low|none",
@@ -91,6 +91,7 @@ Rules:
 - Use source=generated only with a name from the task available_generators.
 - Generator params must conform to the matching available_generator_tools schema.
 - Do not quote integer, number, or boolean generator params.
+- Always return params as an object. Use params={{}} when source is not generated or no params are needed.
 - Use source=missing when the value must come from a human/test-data/mocked external system.
 - Use source=unknown when there is not enough information to choose safely.
 - Do not invent generators or static keys.

@@ -6,6 +6,7 @@ from agents.dependency_resolver import DependencyResolverAgent
 from agents.documentation_analyst import DocumentationAnalystAgent
 from agents.endpoint_mapper import EndpointMapperAgent
 from agents.generation_binding import GenerationBindingAgent
+from agents.stabilization_fixer import StabilizationFixerAgent
 from data_dependencies import (
     assemble_data_binding_plan,
     build_dependency_graph,
@@ -17,11 +18,17 @@ from domain import (
     DependencyResolverResult,
     DependencyResolution,
     EndpointMappingResult,
+    GenerationBindingDecision,
     OperationRef,
     ProjectState,
     RequestValueBinding,
+    ExecutorStepTrace,
+    ExecutorTrace,
     ResponseExtraction,
     ScenarioInput,
+    StabilizationAttempt,
+    StabilizationDiagnosis,
+    StabilizationResult,
     ScenarioUnderstanding,
     StepDataBinding,
     StepOperationMapping,
@@ -84,6 +91,10 @@ def test_orchestrator_without_llm_saves_documentation_prompt() -> None:
     assert Path(out_dir, "documentation_analyst.prompt.md").exists()
     assert Path(out_dir, "documentation_analyst.run.json").exists()
     assert Path(out_dir, "state.json").exists()
+    run_log = Path(out_dir, "run.log")
+    assert run_log.exists()
+    assert "Run started" in run_log.read_text(encoding="utf-8")
+    assert "documentation_analyst_failed" in run_log.read_text(encoding="utf-8")
 
 
 def test_endpoint_mapper_prompt_uses_compact_operations() -> None:
@@ -256,6 +267,24 @@ def test_generation_binding_prompt_uses_unresolved_fields() -> None:
     assert "phone_number" in prompt[1].content
     assert "country_code" in prompt[1].content
     assert first_task.need.target not in prompt[1].content
+    assert '"step_id": "s04"' not in prompt[1].content
+    assert "$.customer.phone" not in prompt[1].content
+
+
+def test_generation_binding_decision_accepts_null_params_as_empty_dict() -> None:
+    decision = GenerationBindingDecision.model_validate(
+        {
+            "step_id": "s05",
+            "target": "$.cardToken",
+            "source": "missing",
+            "params": None,
+            "confidence": "low",
+            "reason": "Provided by external payment system.",
+            "requires_human_review": True,
+        }
+    )
+
+    assert decision.params == {}
 
 
 def test_data_binding_assembler_places_extraction_on_source_step() -> None:
@@ -317,7 +346,7 @@ def test_data_binding_validator_records_unknown_static_key_and_generator() -> No
                         target="$.driverLicense",
                         location="body",
                         source="generated",
-                        generator="driver_license_number",
+                        generator="missing_driver_license_generator",
                     ),
                 ],
             )
@@ -420,6 +449,95 @@ def test_patch_applier_rejects_patch_outside_suspected_binding() -> None:
     assert plan.steps[1].request_bindings[0].source == "unknown"
 
 
+def test_stabilization_fixer_prompt_focuses_on_failed_step_only() -> None:
+    state = ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Demo", text=""),
+        data_binding=DataBindingPlan(
+            steps=[
+                StepDataBinding(
+                    business_step="Search vehicles",
+                    operation=OperationRef(method="POST", path="/vehicles/search"),
+                    request_bindings=[
+                        RequestValueBinding(
+                            target="$.pickupDate",
+                            location="body",
+                            source="generated",
+                            variable="pickupDate",
+                            generator="date_after_now",
+                            params={"days": 1, "format": "date"},
+                        ),
+                        RequestValueBinding(
+                            target="$.returnDate",
+                            location="body",
+                            source="generated",
+                            variable="returnDate",
+                            generator="date_after_now",
+                            params={"days": 1, "format": "date"},
+                        ),
+                    ],
+                ),
+                StepDataBinding(
+                    business_step="Create reservation",
+                    operation=OperationRef(method="POST", path="/reservations"),
+                    request_bindings=[
+                        RequestValueBinding(
+                            target="$.customer.driverLicenseNo",
+                            location="body",
+                            source="unknown",
+                        )
+                    ],
+                ),
+            ]
+        ),
+    )
+    trace = ExecutorTrace(
+        attempt=1,
+        base_url="http://server",
+        steps=[
+            ExecutorStepTrace(
+                step_id="s01",
+                business_step="Search vehicles",
+                operation=OperationRef(method="POST", path="/vehicles/search"),
+                resolved_path="/vehicles/search",
+                request={"body": {"pickupDate": "2026-06-03", "returnDate": "2026-06-03"}},
+                response_status=400,
+                response_body={"detail": {"code": "INVALID_DATES"}},
+                status="failed",
+                failure="Expected 2xx, got 400",
+            )
+        ],
+        status="failed",
+        failed_step_id="s01",
+        failure="Expected 2xx, got 400",
+    )
+    diagnosis = StabilizationDiagnosis(
+        attempt=1,
+        failed_step_id="s01",
+        failure_type="invalid_request_data",
+        summary="returnDate must be later than pickupDate",
+        suspected_bindings=[
+            {
+                "step_id": "s01",
+                "target": "$.returnDate",
+                "problem": "generated date is not after pickupDate",
+            }
+        ],
+        recommended_fix_type="replace_generated_params",
+        confidence="high",
+        requires_human_review=False,
+    )
+    state.stabilization = StabilizationResult(
+        attempts=[StabilizationAttempt(attempt=1, trace=trace, diagnosis=diagnosis)]
+    )
+
+    prompt = StabilizationFixerAgent(diagnosis=diagnosis).build_prompt(state)[1].content
+
+    assert "$.returnDate" in prompt
+    assert "$.pickupDate" in prompt
+    assert "$.customer.driverLicenseNo" not in prompt
+    assert '"step_id": "s04"' not in prompt
+
+
 def test_executor_uses_extracted_variable_in_later_path(monkeypatch) -> None:
     class FakeResponse:
         status_code = 200
@@ -484,6 +602,29 @@ def test_generator_registry_exposes_openai_tool_schema() -> None:
     assert schema["function"]["name"] == "random_int"
     assert schema["function"]["parameters"]["properties"]["min"]["type"] == "integer"
     assert schema["function"]["parameters"]["properties"]["max"]["type"] == "integer"
+
+
+def test_generator_registry_includes_driver_license_generator() -> None:
+    registry = GeneratorRegistry()
+    value = registry.generate("driver_license_number", {"country": "RU"})
+    schema = registry.tool_schema("driver_license_number")
+
+    assert value.isdigit()
+    assert len(value) == 10
+    assert registry.has("driver_license_number")
+    assert schema["function"]["name"] == "driver_license_number"
+    assert schema["function"]["parameters"]["properties"]["country"]["type"] == "string"
+
+
+def test_generator_registry_includes_payment_card_token_generator() -> None:
+    registry = GeneratorRegistry()
+    value = registry.generate("payment_card_token", {"provider": "mock"})
+    schema = registry.tool_schema("payment_card_token")
+
+    assert value.startswith("tok_approved_")
+    assert registry.has("payment_card_token")
+    assert schema["function"]["name"] == "payment_card_token"
+    assert schema["function"]["parameters"]["properties"]["provider"]["type"] == "string"
 
 
 def test_generator_registry_coerces_numeric_params() -> None:

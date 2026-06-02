@@ -30,6 +30,14 @@ def full_name() -> str:
     """Return a simple human full name."""
 
 
+def driver_license_number(country: str = "RU") -> str:
+    """Return a synthetic driver license number for test data."""
+
+
+def payment_card_token(provider: str = "mock") -> str:
+    """Return a valid payment card token for a mock payment provider."""
+
+
 def date_after_now(days: int = 1, format: str = "iso_datetime") -> str:
     """Return a date or datetime after current time. Use format='date' for YYYY-MM-DD."""
 
@@ -51,6 +59,8 @@ class GeneratorRegistry:
             "email": self._email,
             "phone_number": self._phone_number,
             "full_name": self._full_name,
+            "driver_license_number": self._driver_license_number,
+            "payment_card_token": self._payment_card_token,
             "date_after_now": self._date_after_now,
             "random_int": self._random_int,
             "enum_value": self._enum_value,
@@ -60,6 +70,8 @@ class GeneratorRegistry:
             "email": email,
             "phone_number": phone_number,
             "full_name": full_name,
+            "driver_license_number": driver_license_number,
+            "payment_card_token": payment_card_token,
             "date_after_now": date_after_now,
             "random_int": random_int,
             "enum_value": enum_value,
@@ -85,6 +97,16 @@ class GeneratorRegistry:
                 },
             ),
             "full_name": GeneratorSpec(name="full_name", description="Simple human full name."),
+            "driver_license_number": GeneratorSpec(
+                name="driver_license_number",
+                description="Synthetic driver license number for test data.",
+                parameters={"country": "Country code, for example RU."},
+            ),
+            "payment_card_token": GeneratorSpec(
+                name="payment_card_token",
+                description="Valid payment card token for happy-path payment authorization.",
+                parameters={"provider": "Payment provider name, default mock."},
+            ),
             "date_after_now": GeneratorSpec(
                 name="date_after_now",
                 description="Date or datetime after current time.",
@@ -123,6 +145,16 @@ class GeneratorRegistry:
             "full_name": (
                 "function fullName() { "
                 "return `Test User ${Math.floor(Math.random() * 100000)}`; }"
+            ),
+            "driver_license_number": (
+                "function driverLicenseNumber(country = 'RU') { "
+                "if (country === 'RU') return String(Math.floor(1000000000 + Math.random() * 9000000000)); "
+                "return `DL-${Date.now()}-${Math.floor(Math.random() * 10000)}`; }"
+            ),
+            "payment_card_token": (
+                "function paymentCardToken(provider = 'mock') { "
+                "if (provider === 'mock') return `tok_approved_${Date.now()}_${Math.floor(Math.random() * 10000)}`; "
+                "return `tok_${provider}_${Date.now()}`; }"
             ),
             "date_after_now": (
                 "function dateAfterNow(days = 1, format = 'iso_datetime') { "
@@ -202,6 +234,18 @@ class GeneratorRegistry:
     @staticmethod
     def _full_name() -> str:
         return f"Test User {random.randint(10000, 99999)}"
+
+    @staticmethod
+    def _driver_license_number(country: str = "RU") -> str:
+        if country.upper() == "RU":
+            return str(random.randint(1000000000, 9999999999))
+        return f"DL-{uuid.uuid4().hex[:12].upper()}"
+
+    @staticmethod
+    def _payment_card_token(provider: str = "mock") -> str:
+        if provider == "mock":
+            return f"tok_approved_{uuid.uuid4().hex[:12]}"
+        return f"tok_{provider}_{uuid.uuid4().hex[:12]}"
 
     @staticmethod
     def _date_after_now(days: int = 1, format: str = "iso_datetime") -> str:

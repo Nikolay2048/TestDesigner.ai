@@ -58,16 +58,33 @@ class AgenticTestDesignOrchestrator:
             static_test_data=load_test_data(test_data_path),
         )
         store = ArtifactStore(out_dir)
+        store.reset_log()
+        store.log_event(
+            "Run started",
+            scenario=scenario_path,
+            openapi=openapi_path,
+            base_url=base_url,
+            max_attempts=max_attempts,
+        )
+        store.log_event(
+            "Inputs loaded",
+            operations=len(state.operations),
+            static_keys=",".join(sorted(state.static_test_data.keys())) or "-",
+        )
 
         # Stage 1: understand the human-written scenario.
+        store.log_event("Stage started", stage="documentation_analyst")
         state, run = self.documentation_analyst.run(state)
         state.agent_runs.append(run)
         store.save_agent_run(run)
+        store.log_event("Stage finished", stage="documentation_analyst", status=run.status)
         if run.status != "completed":
             store.save_state(state)
+            store.log_event("Run stopped", reason="documentation_analyst_failed")
             return state
 
         # Stage 2: map extracted business steps to available OpenAPI operations.
+        store.log_event("Stage started", stage="endpoint_mapper")
         state, run = self.endpoint_mapper.run(state)
         if state.endpoint_mapping:
             state.endpoint_mapping = validate_endpoint_mapping(state.endpoint_mapping, state.operations)
@@ -75,20 +92,37 @@ class AgenticTestDesignOrchestrator:
                 run.output = state.endpoint_mapping.model_dump(mode="json")
         state.agent_runs.append(run)
         store.save_agent_run(run)
+        store.log_event(
+            "Stage finished",
+            stage="endpoint_mapper",
+            status=run.status,
+            mappings=len(state.endpoint_mapping.mappings) if state.endpoint_mapping else 0,
+        )
         if run.status != "completed":
             store.save_state(state)
+            store.log_event("Run stopped", reason="endpoint_mapper_failed")
             return state
 
         # Stage 3: extract request needs and response producers deterministically.
+        store.log_event("Stage started", stage="data_dependency_graph")
         state.data_dependency_graph = build_dependency_graph(state)
         dependency_tasks = build_dependency_resolution_tasks(state.data_dependency_graph)
+        store.log_event(
+            "Stage finished",
+            stage="data_dependency_graph",
+            steps=len(state.data_dependency_graph.steps) if state.data_dependency_graph else 0,
+            dependency_tasks=len(dependency_tasks),
+        )
 
         # Stage 4: choose previous response candidates for request fields.
+        store.log_event("Stage started", stage="dependency_resolver", tasks=len(dependency_tasks))
         state, run = self._run_dependency_resolver_tasks(state, store, dependency_tasks)
         state.agent_runs.append(run)
         store.save_agent_run(run)
+        store.log_event("Stage finished", stage="dependency_resolver", status=run.status)
         if run.status != "completed":
             store.save_state(state)
+            store.log_event("Run stopped", reason="dependency_resolver_failed")
             return state
 
         # Stage 5: choose static/generated/computed/literal sources for remaining fields.
@@ -98,14 +132,18 @@ class AgenticTestDesignOrchestrator:
             state,
             self.generator_registry,
         )
+        store.log_event("Stage started", stage="generation_binding", tasks=len(generation_tasks))
         state, run = self._run_generation_binding_tasks(state, store, generation_tasks)
         state.agent_runs.append(run)
         store.save_agent_run(run)
+        store.log_event("Stage finished", stage="generation_binding", status=run.status)
         if run.status != "completed":
             store.save_state(state)
+            store.log_event("Run stopped", reason="generation_binding_failed")
             return state
 
         # Stage 6: assemble the final plan in deterministic code.
+        store.log_event("Stage started", stage="data_binding_assembly")
         state.data_binding = assemble_data_binding_plan(
             state.data_dependency_graph,
             dependency_tasks,
@@ -119,9 +157,19 @@ class AgenticTestDesignOrchestrator:
                 state.static_test_data,
                 self.generator_registry,
             )
+        store.log_event(
+            "Stage finished",
+            stage="data_binding_assembly",
+            steps=len(state.data_binding.steps) if state.data_binding else 0,
+            risks=len(state.data_binding.risks) if state.data_binding else 0,
+        )
 
         state = self._run_stabilization_loop(state, store, base_url, max_attempts)
         store.save_state(state)
+        store.log_event(
+            "Run finished",
+            stabilization_status=state.stabilization.status if state.stabilization else "not_started",
+        )
         return state
 
     def _run_dependency_resolver_tasks(
@@ -135,10 +183,22 @@ class AgenticTestDesignOrchestrator:
         summary = AgentRun(agent_name="Dependency Resolver", status="completed")
 
         for task in tasks:
+            store.log_event(
+                "Dependency resolver task started",
+                step=task.step_id,
+                target=task.need.target,
+                candidates=len(task.candidates),
+            )
             agent = DependencyResolverAgent(self.llm, tasks=[task])
             state, run = agent.run(state)
             artifact_name = f"dependency_resolver_tasks/{_task_artifact_name(task.step_id, task.need.target)}"
             store.save_agent_run(run, artifact_name)
+            store.log_event(
+                "Dependency resolver task finished",
+                step=task.step_id,
+                target=task.need.target,
+                status=run.status,
+            )
             if run.status != "completed":
                 summary.status = run.status
                 summary.notes.append(f"{task.step_id} {task.need.target}: {run.status}")
@@ -167,10 +227,22 @@ class AgenticTestDesignOrchestrator:
         summary = AgentRun(agent_name="Generation Binding", status="completed")
 
         for task in tasks:
+            store.log_event(
+                "Generation binding task started",
+                step=task.step_id,
+                target=task.need.target,
+                type=task.need.type,
+            )
             agent = GenerationBindingAgent(self.llm, self.generator_registry, tasks=[task])
             state, run = agent.run(state)
             artifact_name = f"generation_binding_tasks/{_task_artifact_name(task.step_id, task.need.target)}"
             store.save_agent_run(run, artifact_name)
+            store.log_event(
+                "Generation binding task finished",
+                step=task.step_id,
+                target=task.need.target,
+                status=run.status,
+            )
             if run.status != "completed":
                 summary.status = run.status
                 summary.notes.append(f"{task.step_id} {task.need.target}: {run.status}")
@@ -196,6 +268,7 @@ class AgenticTestDesignOrchestrator:
         max_attempts: int,
     ) -> ProjectState:
         if not state.data_binding:
+            store.log_event("Stabilization skipped", reason="missing_data_binding")
             return state
 
         state.stabilization = StabilizationResult()
@@ -206,6 +279,7 @@ class AgenticTestDesignOrchestrator:
         )
 
         for attempt_number in range(1, max_attempts + 1):
+            store.log_event("Executor attempt started", attempt=attempt_number)
             trace = executor.execute(state.data_binding, attempt=attempt_number)
             attempt = StabilizationAttempt(attempt=attempt_number, trace=trace)
             state.stabilization.attempts.append(attempt)
@@ -218,65 +292,138 @@ class AgenticTestDesignOrchestrator:
                 ),
                 f"executor_attempts/attempt_{attempt_number:02d}",
             )
+            store.log_event(
+                "Executor attempt finished",
+                attempt=attempt_number,
+                status=trace.status,
+                failed_step=trace.failed_step_id or "-",
+                failure=trace.failure or "-",
+            )
 
             if trace.status == "passed":
                 state.stabilization.status = "passed"
                 state.stabilization.stable_plan = state.data_binding
+                store.log_event("Stabilization passed", attempt=attempt_number)
                 return state
 
+            store.log_event("Diagnosis started", attempt=attempt_number)
             diagnostician = StabilizationDiagnosticianAgent(self.llm)
             state, diagnosis_run = diagnostician.run(state)
             store.save_agent_run(diagnosis_run, f"stabilization_diagnosis/attempt_{attempt_number:02d}")
+            store.log_event("Diagnosis finished", attempt=attempt_number, status=diagnosis_run.status)
             if diagnosis_run.status != "completed":
                 state.stabilization.review_notes.append(
                     f"Diagnosis failed on attempt {attempt_number}: {diagnosis_run.notes}"
                 )
+                store.log_event("Stabilization stopped", reason="diagnosis_failed", attempt=attempt_number)
                 return state
 
             diagnosis = diagnostician.output_model.model_validate(diagnosis_run.output)
             attempt.diagnosis = diagnosis
+            store.log_event(
+                "Diagnosis accepted",
+                attempt=attempt_number,
+                failed_step=diagnosis.failed_step_id,
+                failure_type=diagnosis.failure_type,
+                suspected=len(diagnosis.suspected_bindings),
+            )
 
-            fixer = StabilizationFixerAgent(self.llm, diagnosis, self.generator_registry)
-            state, fix_run = fixer.run(state)
-            store.save_agent_run(fix_run, f"stabilization_fixes/attempt_{attempt_number:02d}")
-            if fix_run.status != "completed":
-                state.stabilization.review_notes.append(
-                    f"Fixer failed on attempt {attempt_number}: {fix_run.notes}"
-                )
-                return state
-
-            fix = fixer.output_model.model_validate(fix_run.output)
-            attempt.fix = fix
             applied = []
-            for patch in fix.patches[:1]:
-                try:
-                    applied_patch = apply_binding_patch(
-                        state.data_binding,
-                        patch,
-                        state.static_test_data,
-                        self.generator_registry,
-                        allowed_bindings=diagnosis.suspected_bindings,
-                    )
-                except Exception as exc:
+            for fixer_try in range(1, 4):
+                store.log_event("Fixer try started", attempt=attempt_number, try_number=fixer_try)
+                fixer = StabilizationFixerAgent(self.llm, diagnosis, self.generator_registry)
+                state, fix_run = fixer.run(state)
+                store.save_agent_run(
+                    fix_run,
+                    f"stabilization_fixes/attempt_{attempt_number:02d}_try_{fixer_try:02d}",
+                )
+                store.log_event(
+                    "Fixer try finished",
+                    attempt=attempt_number,
+                    try_number=fixer_try,
+                    status=fix_run.status,
+                )
+                if fix_run.status != "completed":
                     state.stabilization.review_notes.append(
-                        f"Patch rejected on attempt {attempt_number}: {exc}"
+                        f"Fixer failed on attempt {attempt_number}, try {fixer_try}: {fix_run.notes}"
                     )
-                    applied_patch = None
-                if applied_patch:
-                    applied.append(applied_patch)
-                    if applied_patch.requires_human_review:
+                    store.log_event("Stabilization stopped", reason="fixer_failed", attempt=attempt_number)
+                    return state
+
+                fix = fixer.output_model.model_validate(fix_run.output)
+                attempt.fix = fix
+                for patch in fix.patches[:1]:
+                    if patch.patch_type == "no_patch" and patch.requires_human_review:
                         state.stabilization.review_required = True
-                        state.stabilization.review_notes.append(applied_patch.reason)
+                        state.stabilization.review_notes.append(patch.reason)
+                        store.log_event(
+                            "Human review requested",
+                            attempt=attempt_number,
+                            try_number=fixer_try,
+                            step=patch.step_id or "-",
+                            target=patch.target or patch.variable or "-",
+                            reason=patch.reason,
+                        )
+                    store.log_event(
+                        "Patch proposed",
+                        attempt=attempt_number,
+                        try_number=fixer_try,
+                        patch_type=patch.patch_type,
+                        step=patch.step_id or "-",
+                        target=patch.target or patch.variable or "-",
+                    )
+                    try:
+                        applied_patch = apply_binding_patch(
+                            state.data_binding,
+                            patch,
+                            state.static_test_data,
+                            self.generator_registry,
+                            allowed_bindings=diagnosis.suspected_bindings,
+                        )
+                    except Exception as exc:
+                        state.stabilization.review_notes.append(
+                            f"Patch rejected on attempt {attempt_number}, try {fixer_try}: {exc}"
+                        )
+                        store.log_event(
+                            "Patch rejected",
+                            attempt=attempt_number,
+                            try_number=fixer_try,
+                            reason=exc,
+                        )
+                        applied_patch = None
+                    if applied_patch:
+                        applied.append(applied_patch)
+                        store.log_event(
+                            "Patch applied",
+                            attempt=attempt_number,
+                            try_number=fixer_try,
+                            patch_type=applied_patch.patch_type,
+                            step=applied_patch.step_id or "-",
+                            target=applied_patch.target or applied_patch.variable or "-",
+                        )
+                        if applied_patch.requires_human_review:
+                            state.stabilization.review_required = True
+                            state.stabilization.review_notes.append(applied_patch.reason)
+
+                if applied:
+                    break
+
+                state.stabilization.review_notes.append(
+                    f"No valid patch from fixer on attempt {attempt_number}, try {fixer_try}."
+                )
+                store.log_event("No valid patch from fixer", attempt=attempt_number, try_number=fixer_try)
 
             attempt.applied_patches = applied
             if not applied:
                 state.stabilization.review_notes.append(
                     f"No patch applied on attempt {attempt_number}; stopping stabilization."
                 )
+                store.log_event("Stabilization stopped", reason="no_patch_applied", attempt=attempt_number)
                 return state
 
         state.stabilization.status = "failed"
         state.stabilization.review_notes.append(f"Reached max_attempts={max_attempts}.")
+        store.log_event("Stabilization failed", reason="max_attempts_reached", max_attempts=max_attempts)
         return state
 
 

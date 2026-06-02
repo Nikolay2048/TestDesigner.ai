@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +88,19 @@ def write_text(path: Path, text: str) -> None:
 class ArtifactStore:
     def __init__(self, root: str | Path):
         self.root = Path(root)
+
+    def reset_log(self) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / "run.log").write_text("", encoding="utf-8")
+
+    def log_event(self, message: str, **fields: Any) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        details = ""
+        if fields:
+            details = " | " + " ".join(f"{key}={value}" for key, value in fields.items())
+        with (self.root / "run.log").open("a", encoding="utf-8") as file:
+            file.write(f"[{timestamp}] {message}{details}\n")
 
     def save_state(self, state: ProjectState) -> None:
         write_json(self.root / "state.json", state.model_dump(mode="json"))

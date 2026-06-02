@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ApiOperation(BaseModel):
@@ -347,6 +347,11 @@ class GenerationBindingDecision(BaseModel):
     confidence: Literal["high", "medium", "low", "none"] = "none"
     reason: str = ""
     requires_human_review: bool = False
+
+    @field_validator("params", mode="before")
+    @classmethod
+    def empty_params_when_null(cls, value):
+        return {} if value is None else value
 
 
 class GenerationBindingResult(BaseModel):
