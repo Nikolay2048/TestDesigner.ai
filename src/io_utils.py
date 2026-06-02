@@ -1,0 +1,87 @@
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from domain import AgentRun, ProjectState, RawEndpointMention, ScenarioInput
+
+
+ENDPOINT_PATTERN = re.compile(
+    r"(?:(?P<method>GET|POST|PUT|PATCH|DELETE)\s+)?"
+    r"(?P<path>/[A-Za-z0-9_{}.-]+(?:/[A-Za-z0-9_{}.-]+)*)",
+    re.IGNORECASE,
+)
+
+
+def load_scenario(path: str) -> ScenarioInput:
+    scenario_path = Path(path)
+    text = scenario_path.read_text(encoding="utf-8")
+    title = scenario_path.stem
+    for line in text.splitlines():
+        cleaned = line.strip()
+        if cleaned.startswith("#"):
+            title = cleaned.strip("# ").strip()
+            break
+    return ScenarioInput(
+        path=str(scenario_path),
+        title=title,
+        text=text,
+        raw_endpoint_mentions=extract_raw_endpoint_mentions(text),
+    )
+
+
+def extract_raw_endpoint_mentions(text: str) -> list[RawEndpointMention]:
+    mentions: list[RawEndpointMention] = []
+    seen: set[tuple[str | None, str, int]] = set()
+
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        for match in ENDPOINT_PATTERN.finditer(line):
+            method = match.group("method")
+            path = match.group("path").rstrip(".,;)")
+            key = (method.upper() if method else None, path, line_number)
+            if key in seen:
+                continue
+            seen.add(key)
+            mentions.append(
+                RawEndpointMention(
+                    method=method.upper() if method else None,
+                    path=path,
+                    raw_text=match.group(0),
+                    line_number=line_number,
+                )
+            )
+    return mentions
+
+
+def load_yaml(path: Path) -> Any:
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+class ArtifactStore:
+    def __init__(self, root: str | Path):
+        self.root = Path(root)
+
+    def save_state(self, state: ProjectState) -> None:
+        write_json(self.root / "state.json", state.model_dump(mode="json"))
+
+    def save_agent_run(self, run: AgentRun) -> None:
+        safe_name = run.agent_name.lower().replace(" ", "_")
+        write_json(self.root / f"{safe_name}.run.json", run.model_dump(mode="json"))
+        prompt_text = "\n\n".join(
+            f"## {message.role.upper()}\n{message.content}" for message in run.prompt
+        )
+        write_text(self.root / f"{safe_name}.prompt.md", prompt_text)

@@ -6,6 +6,7 @@ __pycache__/
 
 # project files
 output
+runs/
 
 # C extensions
 *.so

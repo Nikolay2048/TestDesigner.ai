@@ -1,0 +1,27 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from agents import DocumentationAnalystAgent
+from domain import ProjectState
+from io_utils import ArtifactStore, load_scenario
+from llm import LLM
+
+
+class AgenticTestDesignOrchestrator:
+    """Runs the currently implemented learning stage."""
+
+    def __init__(self, llm: LLM | None = None):
+        self.documentation_analyst = DocumentationAnalystAgent(llm)
+
+    def run(self, scenario_path: str, out_dir: str | Path) -> ProjectState:
+        state = ProjectState(scenario=load_scenario(scenario_path))
+        store = ArtifactStore(out_dir)
+
+        # Stage 1: understand the human-written scenario.
+        state, run = self.documentation_analyst.run(state)
+        state.agent_runs.append(run)
+        store.save_agent_run(run)
+        store.save_state(state)
+        return state
+
