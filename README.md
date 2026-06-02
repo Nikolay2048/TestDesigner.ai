@@ -38,6 +38,8 @@ Endpoint-упоминания сначала извлекает обычный �
 
 После агента обычный код проверяет, что выбранные endpoint'ы реально есть в OpenAPI. Выдуманные endpoint'ы удаляются и попадают в risks.
 
+Если для бизнес-шага нет отдельного REST endpoint'а, агент не должен выдумывать его. Такой шаг попадает в `unmapped_steps` с причиной.
+
 ## Будущие этапы
 
 Пока это заглушки:
@@ -69,4 +71,3 @@ python src/main.py --scenario data/carsharing/specs/01-basic-economy-rental.md -
 - `runs/latest/endpoint_mapper.prompt.md`
 - `runs/latest/endpoint_mapper.run.json`
 - `runs/latest/state.json`
-

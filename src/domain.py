@@ -85,14 +85,19 @@ class StepOperationMapping(BaseModel):
     business_step: str
     operations: list[OperationRef] = Field(default_factory=list)
     source: Literal["explicit_mention", "semantic_match", "none"] = "none"
-    confidence: Literal["high", "medium", "low"] = "low"
+    confidence: Literal["high", "medium", "low", "none"] = "low"
     reason: str = ""
     risks: list[str] = Field(default_factory=list)
 
 
+class UnmappedStep(BaseModel):
+    business_step: str
+    reason: str
+
+
 class EndpointMappingResult(BaseModel):
     mappings: list[StepOperationMapping] = Field(default_factory=list)
-    unmapped_steps: list[str] = Field(default_factory=list)
+    unmapped_steps: list[UnmappedStep] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
 
 

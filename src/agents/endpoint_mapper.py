@@ -58,7 +58,12 @@ Return JSON with this shape:
       "risks": ["risk or uncertainty"]
     }}
   ],
-  "unmapped_steps": ["business step that has no matching operation"],
+  "unmapped_steps": [
+    {{
+      "business_step": "business step that has no matching operation",
+      "reason": "why no separate API operation is needed or why no OpenAPI operation matches"
+    }}
+  ],
   "risks": ["global mapping risk"]
 }}
 
@@ -69,6 +74,9 @@ Rules:
 - If an endpoint mention is absent from OpenAPI, do not use it; add a risk.
 - One business step may map to zero, one, or multiple operations.
 - Every business step must appear either in mappings or unmapped_steps.
+- Do not put a step into unmapped_steps just because matching is hard.
+- Use unmapped_steps only when a separate API call is not needed, the behavior is an expected outcome of a previous API call, the action is manual/non-API, or OpenAPI has no matching operation.
+- For every unmapped step, write a concrete reason.
 """.strip(),
             ),
         ]
@@ -76,4 +84,3 @@ Rules:
     def apply_output(self, state: ProjectState, output: Any) -> ProjectState:
         state.endpoint_mapping = output
         return state
-

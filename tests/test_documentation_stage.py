@@ -83,6 +83,7 @@ def test_endpoint_mapper_prompt_uses_compact_operations() -> None:
 
     assert "Available OpenAPI operations" in prompt[1].content
     assert "Do not invent endpoints" in prompt[1].content
+    assert "Do not put a step into unmapped_steps just because matching is hard" in prompt[1].content
     assert "request_schema" not in prompt[1].content
 
 
@@ -102,5 +103,27 @@ def test_endpoint_mapping_validator_removes_invented_operations() -> None:
     )
 
     assert validated.mappings[0].operations == []
-    assert validated.unmapped_steps == ["Create booking"]
+    assert validated.unmapped_steps[0].business_step == "Create booking"
+    assert validated.unmapped_steps[0].reason
     assert "absent from OpenAPI" in validated.risks[0]
+
+
+def test_endpoint_mapping_accepts_none_confidence_for_unmapped_steps() -> None:
+    mapping = EndpointMappingResult(
+        mappings=[
+            StepOperationMapping(
+                business_step="System closes rental",
+                operations=[],
+                source="none",
+                confidence="none",
+                reason="Expected outcome of return operation, no separate endpoint.",
+            )
+        ]
+    )
+
+    validated = validate_endpoint_mapping(
+        mapping,
+        load_openapi_operations("data/carsharing/openapi/openapi.yaml"),
+    )
+
+    assert validated.unmapped_steps[0].business_step == "System closes rental"

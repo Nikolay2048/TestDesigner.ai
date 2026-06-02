@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from domain import ApiOperation, EndpointMappingResult
+from domain import ApiOperation, EndpointMappingResult, UnmappedStep
 
 
 def validate_endpoint_mapping(
@@ -11,6 +11,7 @@ def validate_endpoint_mapping(
 
     allowed = {(operation.method, operation.path) for operation in operations}
     global_risks = list(mapping.risks)
+    unmapped_by_step = {item.business_step: item for item in mapping.unmapped_steps}
 
     for step_mapping in mapping.mappings:
         valid_operations = []
@@ -25,9 +26,17 @@ def validate_endpoint_mapping(
                 step_mapping.risks.append(risk)
                 global_risks.append(risk)
         step_mapping.operations = valid_operations
-        if not valid_operations and step_mapping.business_step not in mapping.unmapped_steps:
-            mapping.unmapped_steps.append(step_mapping.business_step)
+        if not valid_operations and step_mapping.business_step not in unmapped_by_step:
+            reason = step_mapping.reason or "No valid OpenAPI operation was mapped for this business step."
+            unmapped = UnmappedStep(business_step=step_mapping.business_step, reason=reason)
+            mapping.unmapped_steps.append(unmapped)
+            unmapped_by_step[unmapped.business_step] = unmapped
+            global_risks.append(f"Business step is unmapped: {step_mapping.business_step}")
+
+    for unmapped in mapping.unmapped_steps:
+        if not unmapped.reason.strip():
+            unmapped.reason = "No reason was provided by the model."
+            global_risks.append(f"Unmapped step has no reason: {unmapped.business_step}")
 
     mapping.risks = global_risks
     return mapping
-
