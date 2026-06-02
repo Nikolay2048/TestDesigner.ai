@@ -8,6 +8,8 @@ from agents import (
     DocumentationAnalystAgent,
     EndpointMapperAgent,
     GenerationBindingAgent,
+    StabilizationDiagnosticianAgent,
+    StabilizationFixerAgent,
 )
 from data_dependencies import (
     assemble_data_binding_plan,
@@ -15,11 +17,20 @@ from data_dependencies import (
     build_dependency_resolution_tasks,
     build_generation_binding_tasks,
 )
-from domain import AgentRun, DependencyResolverResult, GenerationBindingResult, ProjectState
+from domain import (
+    AgentRun,
+    DependencyResolverResult,
+    GenerationBindingResult,
+    StabilizationAttempt,
+    StabilizationResult,
+    ProjectState,
+)
+from executor import FlowExecutor
 from generators import GeneratorRegistry
 from io_utils import ArtifactStore, load_scenario, load_test_data
 from llm import LLM
 from openapi import load_openapi_operations
+from patches import apply_binding_patch
 from validators import validate_data_binding, validate_endpoint_mapping
 
 
@@ -38,6 +49,8 @@ class AgenticTestDesignOrchestrator:
         openapi_path: str,
         out_dir: str | Path,
         test_data_path: str | None = None,
+        base_url: str = "http://localhost:8080",
+        max_attempts: int = 7,
     ) -> ProjectState:
         state = ProjectState(
             scenario=load_scenario(scenario_path),
@@ -107,6 +120,7 @@ class AgenticTestDesignOrchestrator:
                 self.generator_registry,
             )
 
+        state = self._run_stabilization_loop(state, store, base_url, max_attempts)
         store.save_state(state)
         return state
 
@@ -173,6 +187,96 @@ class AgenticTestDesignOrchestrator:
         summary.output = state.generation_bindings.model_dump(mode="json")
         summary.notes.append(f"Bound {len(decisions)} generation tasks.")
         return state, summary
+
+    def _run_stabilization_loop(
+        self,
+        state: ProjectState,
+        store: ArtifactStore,
+        base_url: str,
+        max_attempts: int,
+    ) -> ProjectState:
+        if not state.data_binding:
+            return state
+
+        state.stabilization = StabilizationResult()
+        executor = FlowExecutor(
+            base_url=base_url,
+            static_test_data=state.static_test_data,
+            generator_registry=self.generator_registry,
+        )
+
+        for attempt_number in range(1, max_attempts + 1):
+            trace = executor.execute(state.data_binding, attempt=attempt_number)
+            attempt = StabilizationAttempt(attempt=attempt_number, trace=trace)
+            state.stabilization.attempts.append(attempt)
+            store.save_state(state)
+            store.save_agent_run(
+                AgentRun(
+                    agent_name="Flow Executor",
+                    status="completed" if trace.status == "passed" else "failed",
+                    output=trace.model_dump(mode="json"),
+                ),
+                f"executor_attempts/attempt_{attempt_number:02d}",
+            )
+
+            if trace.status == "passed":
+                state.stabilization.status = "passed"
+                state.stabilization.stable_plan = state.data_binding
+                return state
+
+            diagnostician = StabilizationDiagnosticianAgent(self.llm)
+            state, diagnosis_run = diagnostician.run(state)
+            store.save_agent_run(diagnosis_run, f"stabilization_diagnosis/attempt_{attempt_number:02d}")
+            if diagnosis_run.status != "completed":
+                state.stabilization.review_notes.append(
+                    f"Diagnosis failed on attempt {attempt_number}: {diagnosis_run.notes}"
+                )
+                return state
+
+            diagnosis = diagnostician.output_model.model_validate(diagnosis_run.output)
+            attempt.diagnosis = diagnosis
+
+            fixer = StabilizationFixerAgent(self.llm, diagnosis, self.generator_registry)
+            state, fix_run = fixer.run(state)
+            store.save_agent_run(fix_run, f"stabilization_fixes/attempt_{attempt_number:02d}")
+            if fix_run.status != "completed":
+                state.stabilization.review_notes.append(
+                    f"Fixer failed on attempt {attempt_number}: {fix_run.notes}"
+                )
+                return state
+
+            fix = fixer.output_model.model_validate(fix_run.output)
+            attempt.fix = fix
+            applied = []
+            for patch in fix.patches[:1]:
+                try:
+                    applied_patch = apply_binding_patch(
+                        state.data_binding,
+                        patch,
+                        state.static_test_data,
+                        self.generator_registry,
+                    )
+                except Exception as exc:
+                    state.stabilization.review_notes.append(
+                        f"Patch rejected on attempt {attempt_number}: {exc}"
+                    )
+                    applied_patch = None
+                if applied_patch:
+                    applied.append(applied_patch)
+                    if applied_patch.requires_human_review:
+                        state.stabilization.review_required = True
+                        state.stabilization.review_notes.append(applied_patch.reason)
+
+            attempt.applied_patches = applied
+            if not applied:
+                state.stabilization.review_notes.append(
+                    f"No patch applied on attempt {attempt_number}; stopping stabilization."
+                )
+                return state
+
+        state.stabilization.status = "failed"
+        state.stabilization.review_notes.append(f"Reached max_attempts={max_attempts}.")
+        return state
 
 
 def _task_artifact_name(step_id: str, target: str) -> str:

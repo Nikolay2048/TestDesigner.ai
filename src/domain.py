@@ -166,6 +166,105 @@ class DataBindingPlan(BaseModel):
     risks: list[str] = Field(default_factory=list)
 
 
+class ResolvedBindingTrace(BaseModel):
+    target: str
+    source: str
+    variable: str | None = None
+    static_key: str | None = None
+    generator: str | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+    expression: str | None = None
+    value_preview: Any = None
+    policy: str = ""
+    error: str | None = None
+
+
+class ExecutorStepTrace(BaseModel):
+    step_id: str
+    business_step: str
+    operation: OperationRef
+    resolved_path: str
+    resolved_bindings: list[ResolvedBindingTrace] = Field(default_factory=list)
+    request: dict[str, Any] = Field(default_factory=dict)
+    response_status: int | None = None
+    response_body: Any = None
+    extracted_variables: dict[str, Any] = Field(default_factory=dict)
+    status: Literal["passed", "failed"] = "failed"
+    failure: str | None = None
+
+
+class ExecutorTrace(BaseModel):
+    attempt: int
+    base_url: str
+    steps: list[ExecutorStepTrace] = Field(default_factory=list)
+    status: Literal["passed", "failed"] = "failed"
+    failed_step_id: str | None = None
+    failure: str | None = None
+    variables: dict[str, Any] = Field(default_factory=dict)
+
+
+class StabilizationDiagnosis(BaseModel):
+    attempt: int
+    failed_step_id: str
+    failure_type: Literal[
+        "missing_request_data",
+        "invalid_request_data",
+        "bad_response_extraction",
+        "http_error",
+        "unknown",
+    ] = "unknown"
+    summary: str
+    evidence: list[str] = Field(default_factory=list)
+    suspected_bindings: list[dict[str, Any]] = Field(default_factory=list)
+    recommended_fix_type: str | None = None
+    confidence: Literal["high", "medium", "low", "none"] = "none"
+    requires_human_review: bool = True
+
+
+class BindingPatch(BaseModel):
+    patch_type: Literal[
+        "replace_request_binding",
+        "replace_response_extraction",
+        "add_response_extraction",
+        "replace_generated_params",
+        "replace_computed_expression",
+        "no_patch",
+    ]
+    step_id: str | None = None
+    target: str | None = None
+    variable: str | None = None
+    new_binding: RequestValueBinding | None = None
+    new_extraction: ResponseExtraction | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+    expression: str | None = None
+    reason: str = ""
+    why_not_repeating_previous_fix: str = ""
+    requires_human_review: bool = True
+
+
+class StabilizationFix(BaseModel):
+    attempt: int
+    patches: list[BindingPatch] = Field(default_factory=list)
+    reason: str = ""
+    risks: list[str] = Field(default_factory=list)
+
+
+class StabilizationAttempt(BaseModel):
+    attempt: int
+    trace: ExecutorTrace
+    diagnosis: StabilizationDiagnosis | None = None
+    fix: StabilizationFix | None = None
+    applied_patches: list[BindingPatch] = Field(default_factory=list)
+
+
+class StabilizationResult(BaseModel):
+    status: Literal["passed", "failed"] = "failed"
+    attempts: list[StabilizationAttempt] = Field(default_factory=list)
+    stable_plan: DataBindingPlan | None = None
+    review_required: bool = False
+    review_notes: list[str] = Field(default_factory=list)
+
+
 class DataNeed(BaseModel):
     step_id: str
     target: str
@@ -278,5 +377,6 @@ class ProjectState(BaseModel):
     dependency_resolutions: DependencyResolverResult | None = None
     generation_bindings: GenerationBindingResult | None = None
     data_binding: DataBindingPlan | None = None
+    stabilization: StabilizationResult | None = None
     flow: FlowDraft | None = None
     agent_runs: list[AgentRun] = Field(default_factory=list)

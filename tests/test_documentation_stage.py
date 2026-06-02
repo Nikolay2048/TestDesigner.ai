@@ -12,6 +12,7 @@ from data_dependencies import (
     build_dependency_resolution_tasks,
 )
 from domain import (
+    BindingPatch,
     DataBindingPlan,
     DependencyResolverResult,
     DependencyResolution,
@@ -19,15 +20,18 @@ from domain import (
     OperationRef,
     ProjectState,
     RequestValueBinding,
+    ResponseExtraction,
     ScenarioInput,
     ScenarioUnderstanding,
     StepDataBinding,
     StepOperationMapping,
 )
+from executor import FlowExecutor
 from generators import GeneratorRegistry
 from io_utils import extract_raw_endpoint_mentions
 from openapi import load_openapi_operations
 from orchestrator import AgenticTestDesignOrchestrator
+from patches import apply_binding_patch
 from validators import validate_data_binding, validate_endpoint_mapping
 
 
@@ -329,3 +333,90 @@ def test_data_binding_validator_records_unknown_static_key_and_generator() -> No
 
     assert "unknown static key" in validated.risks[0]
     assert "unknown generator" in validated.risks[1]
+
+
+def test_patch_applier_replaces_request_binding() -> None:
+    plan = DataBindingPlan(
+        steps=[
+            StepDataBinding(
+                business_step="Create reservation",
+                operation=OperationRef(method="POST", path="/reservations"),
+                request_bindings=[
+                    RequestValueBinding(
+                        target="$.customer.driverLicenseNo",
+                        location="body",
+                        source="unknown",
+                    )
+                ],
+            )
+        ]
+    )
+    patch = BindingPatch(
+        patch_type="replace_request_binding",
+        step_id="s01",
+        target="$.customer.driverLicenseNo",
+        new_binding=RequestValueBinding(
+            target="$.customer.driverLicenseNo",
+            location="body",
+            source="generated",
+            variable="customer_driver_license_no",
+            generator="uuid",
+            policy="test_patch",
+        ),
+    )
+
+    applied = apply_binding_patch(plan, patch, {}, GeneratorRegistry())
+
+    assert applied is not None
+    assert plan.steps[0].request_bindings[0].source == "generated"
+    assert plan.steps[0].request_bindings[0].generator == "uuid"
+
+
+def test_executor_uses_extracted_variable_in_later_path(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def __init__(self, body):
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    calls = []
+
+    def fake_request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        if url.endswith("/locations"):
+            return FakeResponse({"locations": [{"id": "LOC-1"}]})
+        return FakeResponse({"ok": True})
+
+    monkeypatch.setattr("executor.httpx.request", fake_request)
+    plan = DataBindingPlan(
+        steps=[
+            StepDataBinding(
+                business_step="List locations",
+                operation=OperationRef(method="GET", path="/locations"),
+                response_extractions=[
+                    ResponseExtraction(variable="location_id", json_path="$.locations[].id")
+                ],
+            ),
+            StepDataBinding(
+                business_step="Open location",
+                operation=OperationRef(method="GET", path="/locations/{locationId}"),
+                request_bindings=[
+                    RequestValueBinding(
+                        target="$.path.locationId",
+                        location="path",
+                        source="response",
+                        variable="location_id",
+                    )
+                ],
+            ),
+        ]
+    )
+
+    trace = FlowExecutor("http://server", {}, GeneratorRegistry()).execute(plan, attempt=1)
+
+    assert trace.status == "passed"
+    assert calls[1][1] == "http://server/locations/LOC-1"

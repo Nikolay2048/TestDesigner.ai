@@ -13,6 +13,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--openapi", required=True, help="Path to openapi.yaml")
     parser.add_argument("--out", default="runs/latest", help="Directory for agent prompts and state")
     parser.add_argument("--test-data", default=None, help="Optional JSON/YAML file with tester-provided constants")
+    parser.add_argument("--base-url", default="http://localhost:8000", help="Base URL for happy-path execution")
+    parser.add_argument("--max-attempts", type=int, default=7, help="Maximum stabilization attempts")
     parser.add_argument("--llm", choices=["none", "ollama"], default="ollama")
     parser.add_argument("--model", default="qwen3:14b", help="Ollama model name")
     parser.add_argument("--ollama-url", default="http://localhost:11434")
@@ -24,7 +26,14 @@ def main() -> None:
     llm = NoLLM() if args.llm == "none" else OllamaLLM(model=args.model, base_url=args.ollama_url)
 
     orchestrator = AgenticTestDesignOrchestrator(llm=llm)
-    state = orchestrator.run(args.scenario, args.openapi, args.out, args.test_data)
+    state = orchestrator.run(
+        args.scenario,
+        args.openapi,
+        args.out,
+        args.test_data,
+        base_url=args.base_url,
+        max_attempts=args.max_attempts,
+    )
 
     last_run = state.agent_runs[-1] if state.agent_runs else None
     print("TestDesignerAI")
@@ -41,6 +50,9 @@ def main() -> None:
         print(f"Dep steps:  {len(state.data_dependency_graph.steps)}")
     if state.data_binding:
         print(f"Bindings:   {len(state.data_binding.steps)}")
+    if state.stabilization:
+        print(f"Happy path: {state.stabilization.status}")
+        print(f"Attempts:   {len(state.stabilization.attempts)}")
     if last_run:
         print(f"Last agent: {last_run.agent_name} -> {last_run.status}")
         if last_run.status == "needs_llm":
