@@ -2,7 +2,7 @@
 
 Учебный проект агентной системы для автоматического тест-дизайна REST API.
 
-Мы развиваем систему поэтапно. Сейчас реализован только первый агент, остальные этапы оставлены заглушками, чтобы архитектура была понятна и не разрасталась раньше времени.
+Мы развиваем систему поэтапно. Сейчас реализованы первые два агента, остальные этапы оставлены заглушками, чтобы архитектура была понятна и не разрасталась раньше времени.
 
 ## Текущий этап
 
@@ -18,27 +18,30 @@
 - выделить ordered business steps;
 - выделить бизнес-правила;
 - выделить критерии успеха и негативные условия;
-- классифицировать endpoint-упоминания, если они прямо написаны в постановке.
+- классифицировать endpoint-упоминания, если они прямо написаны в постановке;
 - зафиксировать зависимости сценария, если для выполнения нужен другой сценарий, существующее состояние или подготовленные данные.
 
 Endpoint-упоминания сначала извлекает обычный код по регулярному выражению. LLM не должна придумывать endpoint'ы, она только классифицирует найденные.
 
-Endpoint может быть:
+### Endpoint Mapper Agent
 
-- в шапке файла;
-- в конкретном шаге;
-- в бизнес-правиле;
-- без понятного места использования.
+Файл: `src/agents/endpoint_mapper.py`
 
-Поэтому агент возвращает `endpoint_mentions`.
+Задача агента:
 
-Если сценарий зависит от другого сценария или состояния системы, агент возвращает `scenario_dependencies`.
+- взять `business_steps` из результата Documentation Analyst;
+- взять `endpoint_mentions` из постановки;
+- взять компактный список OpenAPI operations;
+- сопоставить каждый бизнес-шаг с одним или несколькими endpoint'ами.
+
+Агент не получает request/response schema. Это важно, чтобы не перегружать маленькую модель.
+
+После агента обычный код проверяет, что выбранные endpoint'ы реально есть в OpenAPI. Выдуманные endpoint'ы удаляются и попадают в risks.
 
 ## Будущие этапы
 
 Пока это заглушки:
 
-- `Flow Designer` - выберет REST operations для бизнес-шагов.
 - `Data Binding` - заполнит body/path/query и связи переменных.
 - `FlowExecutor` - выполнит HTTP-запросы.
 - `Stabilization Diagnostician` - объяснит падения.
@@ -50,17 +53,20 @@ Endpoint может быть:
 Генерирует prompt первого агента:
 
 ```bash
-python src/main.py --scenario data/carsharing/specs/01-basic-economy-rental.md --out runs/latest --llm none
+python src/main.py --scenario data/carsharing/specs/01-basic-economy-rental.md --openapi data/carsharing/openapi/openapi.yaml --out runs/latest --llm none
 ```
 
 ## Запуск через Ollama
 
 ```bash
-python src/main.py --scenario data/carsharing/specs/01-basic-economy-rental.md --out runs/latest --llm ollama --model qwen3:14b
+python src/main.py --scenario data/carsharing/specs/01-basic-economy-rental.md --openapi data/carsharing/openapi/openapi.yaml --out runs/latest --llm ollama --model qwen3:14b
 ```
 
 Артефакты:
 
 - `runs/latest/documentation_analyst.prompt.md`
 - `runs/latest/documentation_analyst.run.json`
+- `runs/latest/endpoint_mapper.prompt.md`
+- `runs/latest/endpoint_mapper.run.json`
 - `runs/latest/state.json`
+

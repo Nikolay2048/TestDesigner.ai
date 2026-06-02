@@ -3,9 +3,19 @@ from __future__ import annotations
 from pathlib import Path
 
 from agents.documentation_analyst import DocumentationAnalystAgent
-from domain import ProjectState, ScenarioInput
+from agents.endpoint_mapper import EndpointMapperAgent
+from domain import (
+    EndpointMappingResult,
+    OperationRef,
+    ProjectState,
+    ScenarioInput,
+    ScenarioUnderstanding,
+    StepOperationMapping,
+)
 from io_utils import extract_raw_endpoint_mentions
+from openapi import load_openapi_operations
 from orchestrator import AgenticTestDesignOrchestrator
+from validators import validate_endpoint_mapping
 
 
 def test_raw_endpoint_mentions_are_extracted_deterministically() -> None:
@@ -48,6 +58,7 @@ def test_orchestrator_without_llm_saves_documentation_prompt() -> None:
 
     state = AgenticTestDesignOrchestrator().run(
         scenario_path="data/carsharing/specs/01-basic-economy-rental.md",
+        openapi_path="data/carsharing/openapi/openapi.yaml",
         out_dir=out_dir,
     )
 
@@ -56,3 +67,40 @@ def test_orchestrator_without_llm_saves_documentation_prompt() -> None:
     assert Path(out_dir, "documentation_analyst.prompt.md").exists()
     assert Path(out_dir, "documentation_analyst.run.json").exists()
     assert Path(out_dir, "state.json").exists()
+
+
+def test_endpoint_mapper_prompt_uses_compact_operations() -> None:
+    state = ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Demo", text="Demo"),
+        operations=load_openapi_operations("data/carsharing/openapi/openapi.yaml"),
+        understanding=ScenarioUnderstanding(
+            title="Demo",
+            business_steps=["User searches available cars"],
+        ),
+    )
+
+    prompt = EndpointMapperAgent().build_prompt(state)
+
+    assert "Available OpenAPI operations" in prompt[1].content
+    assert "Do not invent endpoints" in prompt[1].content
+    assert "request_schema" not in prompt[1].content
+
+
+def test_endpoint_mapping_validator_removes_invented_operations() -> None:
+    mapping = EndpointMappingResult(
+        mappings=[
+            StepOperationMapping(
+                business_step="Create booking",
+                operations=[OperationRef(method="POST", path="/invented")],
+            )
+        ]
+    )
+
+    validated = validate_endpoint_mapping(
+        mapping,
+        load_openapi_operations("data/carsharing/openapi/openapi.yaml"),
+    )
+
+    assert validated.mappings[0].operations == []
+    assert validated.unmapped_steps == ["Create booking"]
+    assert "absent from OpenAPI" in validated.risks[0]

@@ -76,6 +76,26 @@ class FlowDraft(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class OperationRef(BaseModel):
+    method: str
+    path: str
+
+
+class StepOperationMapping(BaseModel):
+    business_step: str
+    operations: list[OperationRef] = Field(default_factory=list)
+    source: Literal["explicit_mention", "semantic_match", "none"] = "none"
+    confidence: Literal["high", "medium", "low"] = "low"
+    reason: str = ""
+    risks: list[str] = Field(default_factory=list)
+
+
+class EndpointMappingResult(BaseModel):
+    mappings: list[StepOperationMapping] = Field(default_factory=list)
+    unmapped_steps: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+
+
 class AgentMessage(BaseModel):
     role: Literal["system", "user", "assistant"]
     content: str
@@ -91,6 +111,8 @@ class AgentRun(BaseModel):
 
 class ProjectState(BaseModel):
     scenario: ScenarioInput
+    operations: list[ApiOperation] = Field(default_factory=list)
     understanding: ScenarioUnderstanding | None = None
+    endpoint_mapping: EndpointMappingResult | None = None
     flow: FlowDraft | None = None
     agent_runs: list[AgentRun] = Field(default_factory=list)
