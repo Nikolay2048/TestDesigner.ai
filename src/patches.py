@@ -59,8 +59,8 @@ def apply_binding_patch(
         if not patch.target:
             return None
         for binding in step.request_bindings:
-            if binding.target == patch.target and binding.source == "generated":
-                binding.params = patch.params
+            if _targets_match(binding.target, patch.target) and binding.source == "generated":
+                binding.params = _normalize_generated_params(binding.generator, patch.params)
                 binding.policy = "stabilization_replace_generated_params"
                 binding.reason = patch.reason
                 binding.requires_human_review = patch.requires_human_review
@@ -125,7 +125,7 @@ def _is_allowed_patch_target(patch: BindingPatch, allowed_bindings: list[dict]) 
             continue
         allowed_target = item.get("target")
         allowed_variable = item.get("variable")
-        if allowed_target and patch_target == allowed_target:
+        if allowed_target and _targets_match(allowed_target, patch_target):
             return True
         if allowed_variable and patch_variable == allowed_variable:
             return True
@@ -160,3 +160,24 @@ def _normalize_step_id(step_id: str | None) -> str:
     if len(raw) >= 2 and raw[0].lower() == "s" and raw[1:].isdigit():
         return f"s{int(raw[1:]):02d}"
     return raw
+
+
+def _targets_match(binding_target: str | None, patch_target: str | None) -> bool:
+    return _normalize_target(binding_target) == _normalize_target(patch_target)
+
+
+def _normalize_target(target: str | None) -> str:
+    if not target:
+        return ""
+    raw = str(target).strip()
+    if raw.startswith("$."):
+        return raw
+    return f"$.{raw}"
+
+
+def _normalize_generated_params(generator: str | None, params: dict) -> dict:
+    if generator == "random_int" and isinstance(params.get("values"), list) and len(params["values"]) == 1:
+        value = params["values"][0]
+        if isinstance(value, int):
+            return {"min": value, "max": value}
+    return params

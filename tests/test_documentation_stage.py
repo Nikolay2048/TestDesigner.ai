@@ -334,6 +334,8 @@ def test_generation_binding_prompt_uses_unresolved_fields() -> None:
     assert first_task.need.target not in prompt[1].content
     assert '"step_id": "s04"' not in prompt[1].content
     assert "$.customer.phone" not in prompt[1].content
+    assert "happy-path boolean confirmation or flag fields" in prompt[1].content
+    assert '"values": [true]' in prompt[1].content
 
 
 def test_generation_binding_decision_accepts_null_params_as_empty_dict() -> None:
@@ -569,6 +571,43 @@ def test_binding_patch_ignores_string_new_binding_for_generated_params() -> None
     assert patch.patch_type == "replace_generated_params"
     assert patch.new_binding is None
     assert patch.params == {"days": 2, "format": "date"}
+
+
+def test_patch_applier_converts_single_value_random_int_params() -> None:
+    plan = DataBindingPlan(
+        steps=[
+            StepDataBinding(
+                business_step="Pickup rental",
+                operation=OperationRef(method="POST", path="/rentals/{reservationId}/pickup"),
+                request_bindings=[
+                    RequestValueBinding(
+                        target="$.fuelLevelPercent",
+                        location="body",
+                        source="generated",
+                        generator="random_int",
+                        params={"min": 0, "max": 100},
+                    )
+                ],
+            )
+        ]
+    )
+    patch = BindingPatch(
+        patch_type="replace_generated_params",
+        step_id="s01",
+        target="fuelLevelPercent",
+        params={"values": [100]},
+    )
+
+    applied = apply_binding_patch(
+        plan,
+        patch,
+        {},
+        GeneratorRegistry(),
+        allowed_bindings=[{"step_id": "s01", "target": "$.fuelLevelPercent"}],
+    )
+
+    assert applied is not None
+    assert plan.steps[0].request_bindings[0].params == {"min": 100, "max": 100}
 
 
 def test_patch_applier_uses_existing_response_variable() -> None:

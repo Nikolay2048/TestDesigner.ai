@@ -95,6 +95,8 @@ Rules:
 - Generator params must conform to the matching available_generator_tools schema.
 - Do not quote integer, number, or boolean generator params.
 - Always return params as an object. Use params={{}} when source is not generated or no params are needed.
+- For happy-path boolean confirmation or flag fields, prefer source=generated with enum_value and a single business-positive value when the business step/context says the condition is confirmed, accepted, enabled, present, successful, or explicitly absent as an expected good state.
+- Example: a boolean request field meaning "condition confirmed" in a happy-path step should use generator=enum_value params={{"values": [true]}}.
 - Use source=missing when the value must come from a human/test-data/mocked external system.
 - Use source=unknown when there is not enough information to choose safely.
 - Do not invent generators, static keys, or external context keys.
