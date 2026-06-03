@@ -117,6 +117,7 @@ def build_generation_binding_tasks(
                     operation=step.operation,
                     need=need,
                     static_keys=sorted(state.static_test_data.keys()),
+                    external_context_keys=sorted(state.external_context.keys()),
                     available_generators=generator_registry.specs(),
                     business_context=business_context,
                 )
@@ -357,7 +358,13 @@ def _binding_from_generation_decision(
         target=need.target,
         location=need.location,
         source=source,
-        variable=_target_variable_name(need.target) if source == "generated" else None,
+        variable=(
+            _target_variable_name(need.target)
+            if source == "generated"
+            else decision.external_key
+            if source == "external_context"
+            else None
+        ),
         static_key=decision.static_key,
         generator=decision.generator,
         params=decision.params,

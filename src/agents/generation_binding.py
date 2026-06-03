@@ -42,6 +42,7 @@ class GenerationBindingAgent(Agent):
                 "operation": task.operation.model_dump(mode="json"),
                 "need": task.need.model_dump(mode="json"),
                 "static_keys": task.static_keys,
+                "external_context_keys": task.external_context_keys,
                 "available_generators": [generator.name for generator in task.available_generators],
                 "available_generator_tools": [
                     self.generator_registry.tool_schema(generator.name)
@@ -56,7 +57,7 @@ class GenerationBindingAgent(Agent):
                 role="system",
                 content=(
                     "You choose a data source for request fields that were not resolved from previous responses. "
-                    "Use only provided static keys and generator names. Return strict JSON only."
+                    "Use only provided static keys, external context keys, and generator names. Return strict JSON only."
                 ),
             ),
             AgentMessage(
@@ -71,8 +72,9 @@ Return JSON with this shape:
     {{
       "step_id": "step id from the task",
       "target": "target from the task",
-      "source": "static|generated|computed|literal|missing|unknown",
+      "source": "static|generated|external_context|computed|literal|missing|unknown",
       "static_key": null,
+      "external_key": null,
       "generator": null,
       "params": {{}},
       "expression": null,
@@ -88,13 +90,14 @@ Return JSON with this shape:
 Rules:
 - Return one decision for every task.
 - Use source=static only with a key from the task static_keys.
+- Use source=external_context only with a key from the task external_context_keys, and put that key into external_key.
 - Use source=generated only with a name from the task available_generators.
 - Generator params must conform to the matching available_generator_tools schema.
 - Do not quote integer, number, or boolean generator params.
 - Always return params as an object. Use params={{}} when source is not generated or no params are needed.
 - Use source=missing when the value must come from a human/test-data/mocked external system.
 - Use source=unknown when there is not enough information to choose safely.
-- Do not invent generators or static keys.
+- Do not invent generators, static keys, or external context keys.
 - Do not provide concrete random values.
 """.strip(),
             ),

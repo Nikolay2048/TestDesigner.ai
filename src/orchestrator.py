@@ -21,6 +21,7 @@ from domain import (
     AgentRun,
     DependencyResolverResult,
     GenerationBindingResult,
+    ScenarioRunOutput,
     StabilizationAttempt,
     StabilizationResult,
     ProjectState,
@@ -31,6 +32,7 @@ from io_utils import ArtifactStore, load_scenario, load_test_data
 from llm import LLM
 from openapi import load_openapi_operations
 from patches import apply_binding_patch
+from stable import build_provided_state, publish_stable_package
 from validators import validate_data_binding, validate_endpoint_mapping
 
 
@@ -51,14 +53,20 @@ class AgenticTestDesignOrchestrator:
         test_data_path: str | None = None,
         base_url: str = "http://localhost:8080",
         max_attempts: int = 7,
+        external_context: dict | None = None,
+        stable_dir: str | Path | None = None,
+        publish_stable: bool = True,
+        reset_log: bool = True,
     ) -> ProjectState:
         state = ProjectState(
             scenario=load_scenario(scenario_path),
             operations=load_openapi_operations(openapi_path),
             static_test_data=load_test_data(test_data_path),
+            external_context=external_context or {},
         )
         store = ArtifactStore(out_dir)
-        store.reset_log()
+        if reset_log:
+            store.reset_log()
         store.log_event(
             "Run started",
             scenario=scenario_path,
@@ -70,6 +78,7 @@ class AgenticTestDesignOrchestrator:
             "Inputs loaded",
             operations=len(state.operations),
             static_keys=",".join(sorted(state.static_test_data.keys())) or "-",
+            external_keys=",".join(sorted(state.external_context.keys())) or "-",
         )
 
         # Stage 1: understand the human-written scenario.
@@ -156,6 +165,7 @@ class AgenticTestDesignOrchestrator:
                 state.operations,
                 state.static_test_data,
                 self.generator_registry,
+                state.external_context,
             )
         store.log_event(
             "Stage finished",
@@ -165,6 +175,17 @@ class AgenticTestDesignOrchestrator:
         )
 
         state = self._run_stabilization_loop(state, store, base_url, max_attempts)
+        self._save_scenario_output(state, store)
+        if publish_stable and stable_dir:
+            package_dir = publish_stable_package(
+                state,
+                stable_dir=stable_dir,
+                openapi_path=openapi_path,
+                test_data_path=test_data_path,
+                base_url=base_url,
+            )
+            if package_dir:
+                store.log_event("Stable package published", path=package_dir)
         store.save_state(state)
         store.log_event(
             "Run finished",
@@ -275,6 +296,7 @@ class AgenticTestDesignOrchestrator:
         executor = FlowExecutor(
             base_url=base_url,
             static_test_data=state.static_test_data,
+            external_context=state.external_context,
             generator_registry=self.generator_registry,
         )
 
@@ -425,6 +447,22 @@ class AgenticTestDesignOrchestrator:
         state.stabilization.review_notes.append(f"Reached max_attempts={max_attempts}.")
         store.log_event("Stabilization failed", reason="max_attempts_reached", max_attempts=max_attempts)
         return state
+
+
+    def _save_scenario_output(self, state: ProjectState, store: ArtifactStore) -> None:
+        status = state.stabilization.status if state.stabilization else "failed"
+        output = ScenarioRunOutput(
+            scenario_path=state.scenario.path,
+            status=status,
+            provided_state=build_provided_state(state),
+            stable_plan=state.stabilization.stable_plan if state.stabilization else None,
+        )
+        store.save_json("provided_state.json", output.model_dump(mode="json"))
+        store.log_event(
+            "Scenario output saved",
+            status=output.status,
+            provided_state=len(output.provided_state),
+        )
 
 
 def _task_artifact_name(step_id: str, target: str) -> str:

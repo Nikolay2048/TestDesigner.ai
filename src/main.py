@@ -5,6 +5,7 @@ from pathlib import Path
 
 from llm import NoLLM, OllamaLLM
 from orchestrator import AgenticTestDesignOrchestrator
+from scenario_dependencies import ScenarioDependencyRunner
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -15,6 +16,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-data", default=None, help="Optional JSON/YAML file with tester-provided constants")
     parser.add_argument("--base-url", default="http://localhost:8000", help="Base URL for happy-path execution")
     parser.add_argument("--max-attempts", type=int, default=7, help="Maximum stabilization attempts")
+    parser.add_argument("--stable-dir", default="runs/stable", help="Directory with published stable scenarios")
+    parser.add_argument(
+        "--resolve-dependencies",
+        action="store_true",
+        help="Run only with already-published stable scenario dependencies",
+    )
     parser.add_argument("--llm", choices=["none", "ollama"], default="ollama")
     parser.add_argument("--model", default="qwen3:14b", help="Ollama model name")
     parser.add_argument("--ollama-url", default="http://localhost:11434")
@@ -25,15 +32,29 @@ def main() -> None:
     args = build_parser().parse_args()
     llm = NoLLM() if args.llm == "none" else OllamaLLM(model=args.model, base_url=args.ollama_url)
 
-    orchestrator = AgenticTestDesignOrchestrator(llm=llm)
-    state = orchestrator.run(
-        args.scenario,
-        args.openapi,
-        args.out,
-        args.test_data,
-        base_url=args.base_url,
-        max_attempts=args.max_attempts,
-    )
+    if args.resolve_dependencies:
+        runner = ScenarioDependencyRunner(llm=llm)
+        state = runner.run(
+            args.scenario,
+            args.openapi,
+            args.out,
+            args.test_data,
+            base_url=args.base_url,
+            max_attempts=args.max_attempts,
+            stable_dir=args.stable_dir,
+        )
+    else:
+        orchestrator = AgenticTestDesignOrchestrator(llm=llm)
+        state = orchestrator.run(
+            args.scenario,
+            args.openapi,
+            args.out,
+            args.test_data,
+            base_url=args.base_url,
+            max_attempts=args.max_attempts,
+            stable_dir=args.stable_dir,
+            publish_stable=True,
+        )
 
     last_run = state.agent_runs[-1] if state.agent_runs else None
     print("TestDesignerAI")
@@ -41,6 +62,7 @@ def main() -> None:
     print(f"Scenario:   {state.scenario.title}")
     print(f"Operations: {len(state.operations)}")
     print(f"Artifacts:  {Path(args.out).resolve()}")
+    print(f"Stable dir: {Path(args.stable_dir).resolve()}")
     if state.understanding:
         print(f"Steps:      {len(state.understanding.business_steps)}")
         print(f"Endpoints:  {len(state.understanding.endpoint_mentions)}")

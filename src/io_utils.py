@@ -105,6 +105,9 @@ class ArtifactStore:
     def save_state(self, state: ProjectState) -> None:
         write_json(self.root / "state.json", state.model_dump(mode="json"))
 
+    def save_json(self, relative_path: str, data: Any) -> None:
+        write_json(self.root / relative_path, data)
+
     def save_agent_run(self, run: AgentRun, artifact_name: str | None = None) -> None:
         safe_name = artifact_name or run.agent_name.lower().replace(" ", "_")
         write_json(self.root / f"{safe_name}.run.json", run.model_dump(mode="json"))

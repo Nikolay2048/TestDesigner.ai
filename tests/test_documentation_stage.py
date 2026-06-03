@@ -13,6 +13,7 @@ from data_dependencies import (
     build_dependency_resolution_tasks,
 )
 from domain import (
+    AgentRun,
     BindingPatch,
     DataBindingPlan,
     DependencyResolverResult,
@@ -26,10 +27,11 @@ from domain import (
     ExecutorTrace,
     ResponseExtraction,
     ScenarioInput,
+    ScenarioDependency,
+    ScenarioUnderstanding,
     StabilizationAttempt,
     StabilizationDiagnosis,
     StabilizationResult,
-    ScenarioUnderstanding,
     StepDataBinding,
     StepOperationMapping,
 )
@@ -39,6 +41,8 @@ from io_utils import extract_raw_endpoint_mentions
 from openapi import load_openapi_operations
 from orchestrator import AgenticTestDesignOrchestrator
 from patches import apply_binding_patch
+from scenario_dependencies import ScenarioDependencyRunner
+from stable import publish_stable_package, stable_package_dir
 from validators import validate_data_binding, validate_endpoint_mapping
 
 
@@ -648,10 +652,143 @@ def test_executor_uses_extracted_variable_in_later_path(monkeypatch) -> None:
         ]
     )
 
-    trace = FlowExecutor("http://server", {}, GeneratorRegistry()).execute(plan, attempt=1)
+    trace = FlowExecutor(
+        "http://server",
+        {},
+        generator_registry=GeneratorRegistry(),
+    ).execute(plan, attempt=1)
 
     assert trace.status == "passed"
     assert calls[1][1] == "http://server/locations/LOC-1"
+
+
+def test_executor_uses_external_context_variable(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"status": "CANCELLED"}
+
+    calls = []
+
+    def fake_request(method, url, params=None, headers=None, json=None, timeout=None):
+        calls.append((method, url, json))
+        return FakeResponse()
+
+    monkeypatch.setattr("executor.httpx.request", fake_request)
+    plan = DataBindingPlan(
+        steps=[
+            StepDataBinding(
+                business_step="Cancel reservation",
+                operation=OperationRef(method="POST", path="/reservations/{reservationId}/cancel"),
+                request_bindings=[
+                    RequestValueBinding(
+                        target="$.path.reservationId",
+                        location="path",
+                        source="external_context",
+                        variable="reservation_id",
+                    )
+                ],
+            )
+        ]
+    )
+
+    trace = FlowExecutor(
+        "http://server",
+        {},
+        external_context={"reservation_id": "RSV-1"},
+        generator_registry=GeneratorRegistry(),
+    ).execute(plan, attempt=1)
+
+    assert trace.status == "passed"
+    assert calls[0][1] == "http://server/reservations/RSV-1/cancel"
+
+
+def test_publish_stable_package_writes_executable_artifacts(tmp_path) -> None:
+    plan = DataBindingPlan(
+        steps=[
+            StepDataBinding(
+                business_step="Create reservation",
+                operation=OperationRef(method="POST", path="/reservations"),
+                response_extractions=[
+                    ResponseExtraction(variable="reservation_id", json_path="$.id")
+                ],
+            )
+        ]
+    )
+    trace = ExecutorTrace(
+        attempt=1,
+        base_url="http://server",
+        status="passed",
+        variables={"reservation_id": "RSV-1"},
+        steps=[
+            ExecutorStepTrace(
+                step_id="s01",
+                business_step="Create reservation",
+                operation=OperationRef(method="POST", path="/reservations"),
+                resolved_path="/reservations",
+                extracted_variables={"reservation_id": "RSV-1"},
+                status="passed",
+            )
+        ],
+    )
+    state = ProjectState(
+        scenario=ScenarioInput(
+            path="data/carsharing/specs/01-basic-economy-rental.md",
+            title="Basic",
+            text="",
+        ),
+        stabilization=StabilizationResult(
+            status="passed",
+            attempts=[StabilizationAttempt(attempt=1, trace=trace)],
+            stable_plan=plan,
+        ),
+        data_binding=plan,
+    )
+
+    package_dir = publish_stable_package(
+        state,
+        stable_dir=tmp_path,
+        openapi_path="data/carsharing/openapi/openapi.yaml",
+        test_data_path=None,
+        base_url="http://server",
+    )
+
+    assert package_dir is not None
+    assert Path(package_dir, "stable_plan.json").exists()
+    assert Path(package_dir, "last_success_trace.json").exists()
+    assert Path(package_dir, "provided_state.json").exists()
+    assert Path(package_dir, "metadata.json").exists()
+
+
+def test_dependency_runner_blocks_when_dependency_is_not_stable(tmp_path, monkeypatch) -> None:
+    def fake_run(self, state):
+        state.understanding = ScenarioUnderstanding(
+            title="Cancel reservation",
+            scenario_dependencies=[
+                ScenarioDependency(
+                    kind="requires_scenario",
+                    reference="missing-prerequisite.md",
+                    reason="Cancellation requires an existing reservation.",
+                )
+            ],
+        )
+        return state, AgentRun(agent_name="Documentation Analyst", status="completed")
+
+    monkeypatch.setattr("scenario_dependencies.DocumentationAnalystAgent.run", fake_run)
+
+    state = ScenarioDependencyRunner().run(
+        scenario_path="data/carsharing/specs/01-basic-economy-rental.md",
+        openapi_path="data/carsharing/openapi/openapi.yaml",
+        out_dir=tmp_path / "run",
+        stable_dir=tmp_path / "stable",
+        base_url="http://server",
+    )
+
+    assert state.agent_runs[-1].agent_name == "Scenario Dependency Runner"
+    assert state.agent_runs[-1].status == "failed"
+    assert "Cannot resolve dependency scenario" in state.agent_runs[-1].notes[0]
 
 
 def test_date_generator_can_return_openapi_date_format() -> None:

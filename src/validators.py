@@ -48,11 +48,13 @@ def validate_data_binding(
     operations: list[ApiOperation],
     static_test_data: dict,
     generator_registry: GeneratorRegistry,
+    external_context: dict | None = None,
 ) -> DataBindingPlan:
     """Record invalid data references without hiding the model output."""
 
     allowed_operations = {(operation.method, operation.path) for operation in operations}
     static_keys = set(static_test_data)
+    external_keys = set(external_context or {})
     global_risks = list(data_binding.risks)
 
     for step in data_binding.steps:
@@ -87,6 +89,15 @@ def validate_data_binding(
                 risk = f"Binding {binding.target} uses response source without variable name."
                 step.risks.append(risk)
                 global_risks.append(risk)
+
+            if binding.source == "external_context":
+                if not binding.variable or binding.variable not in external_keys:
+                    risk = (
+                        f"Binding {binding.target} references unknown external context key: "
+                        f"{binding.variable or '<empty>'}."
+                    )
+                    step.risks.append(risk)
+                    global_risks.append(risk)
 
         for extraction in step.response_extractions:
             if not extraction.json_path.startswith("$"):

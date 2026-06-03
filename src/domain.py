@@ -114,7 +114,7 @@ class RequestValueBinding(BaseModel):
 
     target: str
     location: Literal["path", "query", "header", "body"]
-    source: Literal["static", "generated", "response", "computed", "literal", "unknown"]
+    source: Literal["static", "generated", "response", "external_context", "computed", "literal", "unknown"]
     variable: str | None = None
     static_key: str | None = None
     generator: str | None = None
@@ -281,6 +281,22 @@ class StabilizationResult(BaseModel):
     review_notes: list[str] = Field(default_factory=list)
 
 
+class ProvidedState(BaseModel):
+    name: str
+    value: Any
+    semantic_type: str | None = None
+    source_scenario: str
+    source_step_id: str | None = None
+    json_path: str | None = None
+
+
+class ScenarioRunOutput(BaseModel):
+    scenario_path: str
+    status: Literal["passed", "failed"]
+    provided_state: list[ProvidedState] = Field(default_factory=list)
+    stable_plan: DataBindingPlan | None = None
+
+
 class DataNeed(BaseModel):
     step_id: str
     target: str
@@ -347,6 +363,7 @@ class GenerationBindingTask(BaseModel):
     operation: OperationRef
     need: DataNeed
     static_keys: list[str] = Field(default_factory=list)
+    external_context_keys: list[str] = Field(default_factory=list)
     available_generators: list[GeneratorSpec] = Field(default_factory=list)
     business_context: list[str] = Field(default_factory=list)
 
@@ -354,8 +371,9 @@ class GenerationBindingTask(BaseModel):
 class GenerationBindingDecision(BaseModel):
     step_id: str
     target: str
-    source: Literal["static", "generated", "computed", "literal", "missing", "unknown"]
+    source: Literal["static", "generated", "external_context", "computed", "literal", "missing", "unknown"]
     static_key: str | None = None
+    external_key: str | None = None
     generator: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)
     expression: str | None = None
@@ -392,6 +410,7 @@ class ProjectState(BaseModel):
     scenario: ScenarioInput
     operations: list[ApiOperation] = Field(default_factory=list)
     static_test_data: dict[str, Any] = Field(default_factory=dict)
+    external_context: dict[str, Any] = Field(default_factory=dict)
     understanding: ScenarioUnderstanding | None = None
     endpoint_mapping: EndpointMappingResult | None = None
     data_dependency_graph: DataDependencyGraph | None = None

@@ -23,11 +23,13 @@ class FlowExecutor:
         self,
         base_url: str,
         static_test_data: dict[str, Any],
+        external_context: dict[str, Any] | None = None,
         generator_registry: GeneratorRegistry | None = None,
         timeout: float = 10.0,
     ):
         self.base_url = base_url.rstrip("/")
         self.static_test_data = static_test_data
+        self.external_context = external_context or {}
         self.generator_registry = generator_registry or GeneratorRegistry()
         self.timeout = timeout
 
@@ -149,6 +151,10 @@ class FlowExecutor:
                 if not binding.variable or binding.variable not in variables:
                     raise KeyError(f"Unknown response variable: {binding.variable}")
                 value = variables[binding.variable]
+            elif binding.source == "external_context":
+                if not binding.variable or binding.variable not in self.external_context:
+                    raise KeyError(f"Unknown external context variable: {binding.variable}")
+                value = self.external_context[binding.variable]
             elif binding.source == "computed":
                 if not binding.expression:
                     raise ValueError(f"Computed binding has no expression: {binding.target}")
