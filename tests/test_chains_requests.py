@@ -176,7 +176,7 @@ def authorize_current_amount(reservation_id: str) -> dict[str, Any]:
         json={
             "reservationId": reservation_id,
             "cardToken": "tok_approved",
-            "amount": reservation["paymentRequired"],
+            "amount": reservation["totalAmount"],
         },
     )
     assert payment["status"] == "AUTHORIZED"

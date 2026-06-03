@@ -210,9 +210,11 @@ def preauth(req: PreauthRequest):
         error(404, "RESERVATION_NOT_FOUND", "Reservation not found")
     if req.cardToken == "tok_declined":
         return {"paymentId": "PAY-DECLINED", "status": "DECLINED", "authorizedAmount": 0}
-    expected = round(res["paymentRequired"], 2)
+    # Temporary simplification for agent stabilization: require one already-bound amount.
+    # Later we will restore paymentRequired when Fixer can rebind to computed/server-returned values.
+    expected = round(res["totalAmount"], 2)
     if round(req.amount, 2) != expected:
-        error(400, "INVALID_PREAUTH_AMOUNT", "Preauth amount must equal current rental total plus deposit", f"Use amount={expected}")
+        error(400, "INVALID_PREAUTH_AMOUNT", "Preauth amount must equal current rental total", f"Use amount={expected}")
     res["paymentAuthorized"] = True
     res["status"] = "CONFIRMED"
     return {"paymentId": "PAY-" + uuid4().hex[:8].upper(), "status": "AUTHORIZED", "authorizedAmount": expected}

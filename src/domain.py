@@ -255,6 +255,12 @@ class BindingPatch(BaseModel):
             value["patch_type"] = "use_existing_variable"
             value["variable"] = value.get("variable") or value["new_binding"]
             value["new_binding"] = None
+        elif (
+            value.get("patch_type") != "replace_request_binding"
+            and isinstance(value.get("new_binding"), str)
+        ):
+            value = value.copy()
+            value["new_binding"] = None
         return value
 
 

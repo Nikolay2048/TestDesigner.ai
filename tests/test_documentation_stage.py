@@ -16,6 +16,10 @@ from domain import (
     AgentRun,
     BindingPatch,
     DataBindingPlan,
+    DataDependencyGraph,
+    DataDependencyStep,
+    DataNeed,
+    DataProducer,
     DependencyResolverResult,
     DependencyResolution,
     EndpointMappingResult,
@@ -79,6 +83,8 @@ def test_documentation_analyst_prompt_mentions_endpoint_capture() -> None:
     assert "header|step|rule|unknown" in prompt[1].content
     assert "scenario_dependencies" in prompt[1].content
     assert "requires_scenario|requires_state|requires_data" in prompt[1].content
+    assert "preserve the main action of each step" in prompt[1].content
+    assert "vehicle pickup/start rental" in prompt[1].content
 
 
 def test_orchestrator_without_llm_saves_documentation_prompt() -> None:
@@ -116,6 +122,8 @@ def test_endpoint_mapper_prompt_uses_compact_operations() -> None:
     assert "Available OpenAPI operations" in prompt[1].content
     assert "Do not invent endpoints" in prompt[1].content
     assert "Do not put a step into unmapped_steps just because matching is hard" in prompt[1].content
+    assert "Preserve lifecycle API steps that create IDs needed later" in prompt[1].content
+    assert "vehicle pickup/start rental" in prompt[1].content
     assert "request_schema" not in prompt[1].content
 
 
@@ -231,6 +239,59 @@ def test_dependency_resolver_prompt_uses_candidate_tasks() -> None:
     assert "$.pickupLocationId" in prompt[1].content
     assert "$.locations[].id" in prompt[1].content
     assert "Do not create new variables" in prompt[1].content
+    assert "target must exactly match task.need.target" in prompt[1].content
+
+
+def test_dependency_resolver_normalizes_path_param_target_from_task() -> None:
+    task = build_dependency_resolution_tasks(
+        DataDependencyGraph(
+            steps=[
+                DataDependencyStep(
+                    step_id="s04",
+                    business_step="Create reservation",
+                    operation=OperationRef(method="POST", path="/reservations"),
+                    produces=[
+                        DataProducer(
+                            step_id="s04",
+                            json_path="$.id",
+                            type="string",
+                            operation=OperationRef(method="POST", path="/reservations"),
+                        )
+                    ],
+                ),
+                DataDependencyStep(
+                    step_id="s05",
+                    business_step="Open reservation",
+                    operation=OperationRef(method="GET", path="/reservations/{reservationId}"),
+                    needs=[
+                        DataNeed(
+                            step_id="s05",
+                            target="$.path.reservationId",
+                            location="path",
+                            type="string",
+                        )
+                    ],
+                ),
+            ]
+        )
+    )[0]
+    state = ProjectState(scenario=ScenarioInput(path="scenario.md", title="Demo", text="Demo"))
+    output = DependencyResolverResult(
+        resolutions=[
+            DependencyResolution(
+                step_id="s05",
+                target="$.reservationId",
+                selected_candidate_id=task.candidates[0].candidate_id,
+                confidence="high",
+            )
+        ]
+    )
+
+    state = DependencyResolverAgent(tasks=[task]).apply_output(state, output)
+
+    resolution = state.dependency_resolutions.resolutions[0]
+    assert resolution.target == "$.path.reservationId"
+    assert resolution.selected_candidate_id == "c_s04_id"
 
 
 def test_generation_binding_prompt_uses_unresolved_fields() -> None:
@@ -451,6 +512,63 @@ def test_patch_applier_rejects_patch_outside_suspected_binding() -> None:
 
     assert applied is None
     assert plan.steps[1].request_bindings[0].source == "unknown"
+
+
+def test_patch_applier_accepts_unpadded_step_id_from_fixer() -> None:
+    plan = DataBindingPlan(
+        steps=[
+            StepDataBinding(
+                business_step="List locations",
+                operation=OperationRef(method="GET", path="/locations"),
+            ),
+            StepDataBinding(
+                business_step="Search vehicles",
+                operation=OperationRef(method="POST", path="/vehicles/search"),
+                request_bindings=[
+                    RequestValueBinding(
+                        target="$.returnDate",
+                        location="body",
+                        source="generated",
+                        generator="date_after_now",
+                        params={"days": 1, "format": "date"},
+                    )
+                ],
+            ),
+        ]
+    )
+    patch = BindingPatch(
+        patch_type="replace_generated_params",
+        step_id="s2",
+        target="$.returnDate",
+        params={"days": 2, "format": "date"},
+    )
+
+    applied = apply_binding_patch(
+        plan,
+        patch,
+        {},
+        GeneratorRegistry(),
+        allowed_bindings=[{"step_id": "s02", "target": "$.returnDate"}],
+    )
+
+    assert applied is not None
+    assert plan.steps[1].request_bindings[0].params == {"days": 2, "format": "date"}
+
+
+def test_binding_patch_ignores_string_new_binding_for_generated_params() -> None:
+    patch = BindingPatch.model_validate(
+        {
+            "patch_type": "replace_generated_params",
+            "step_id": "s02",
+            "target": "$.returnDate",
+            "new_binding": "date_after_now",
+            "params": {"days": 2, "format": "date"},
+        }
+    )
+
+    assert patch.patch_type == "replace_generated_params"
+    assert patch.new_binding is None
+    assert patch.params == {"days": 2, "format": "date"}
 
 
 def test_patch_applier_uses_existing_response_variable() -> None:

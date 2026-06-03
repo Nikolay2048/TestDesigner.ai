@@ -100,7 +100,7 @@ def apply_binding_patch(
 
 def _find_step(plan: DataBindingPlan, step_id: str):
     try:
-        index = int(step_id.removeprefix("s")) - 1
+        index = int(_normalize_step_id(step_id).removeprefix("s")) - 1
     except ValueError:
         return None
     if 0 <= index < len(plan.steps):
@@ -112,14 +112,16 @@ def _is_allowed_patch_target(patch: BindingPatch, allowed_bindings: list[dict]) 
     """Keep LLM fixes scoped to fields named by the diagnostician."""
 
     if patch.patch_type == "add_response_extraction":
-        return any(item.get("step_id") == patch.step_id for item in allowed_bindings)
+        patch_step_id = _normalize_step_id(patch.step_id)
+        return any(_normalize_step_id(item.get("step_id")) == patch_step_id for item in allowed_bindings)
 
+    patch_step_id = _normalize_step_id(patch.step_id)
     patch_target = patch.target or (patch.new_binding.target if patch.new_binding else None)
     patch_variable = patch.variable or (
         patch.new_extraction.variable if patch.new_extraction else None
     )
     for item in allowed_bindings:
-        if item.get("step_id") != patch.step_id:
+        if _normalize_step_id(item.get("step_id")) != patch_step_id:
             continue
         allowed_target = item.get("target")
         allowed_variable = item.get("variable")
@@ -132,7 +134,7 @@ def _is_allowed_patch_target(patch: BindingPatch, allowed_bindings: list[dict]) 
 
 def _variable_exists_before_step(plan: DataBindingPlan, step_id: str, variable: str) -> bool:
     try:
-        step_index = int(step_id.removeprefix("s")) - 1
+        step_index = int(_normalize_step_id(step_id).removeprefix("s")) - 1
     except ValueError:
         return False
     if step_index <= 0:
@@ -149,3 +151,12 @@ def _validate_binding(binding, static_test_data: dict, generator_registry: Gener
         raise ValueError(f"Unknown static key: {binding.static_key}")
     if binding.source == "generated" and (not binding.generator or not generator_registry.has(binding.generator)):
         raise ValueError(f"Unknown generator: {binding.generator}")
+
+
+def _normalize_step_id(step_id: str | None) -> str:
+    if not step_id:
+        return ""
+    raw = str(step_id).strip()
+    if len(raw) >= 2 and raw[0].lower() == "s" and raw[1:].isdigit():
+        return f"s{int(raw[1:]):02d}"
+    return raw

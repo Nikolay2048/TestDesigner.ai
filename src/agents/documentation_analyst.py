@@ -72,6 +72,12 @@ Endpoint rules:
 - If the deterministic list is empty, return "endpoint_mentions": [].
 - You may only classify each provided endpoint by location, related_step, and note.
 
+Business step rules:
+- Keep the original scenario order and preserve the main action of each step.
+- Do not summarize away lifecycle actions such as create reservation, authorize payment, pick up/start rental, return/close rental, cancel, extend, add extras, validate loyalty, or register incident.
+- If a step says an employee hands over/issues a vehicle and records odometer, fuel, or damage, keep the meaning as vehicle pickup/start rental, not only as a manual record/check.
+- Business steps may be translated to English, but the operational meaning must stay intact.
+
 Dependency examples:
 - "To cancel a booking, an active booking must already exist" -> requires_state.
 - "Run after UC-001 Create reservation" -> requires_scenario.

@@ -36,7 +36,8 @@ class DependencyResolverAgent(Agent):
                 role="system",
                 content=(
                     "You choose whether a request field should be filled from a previous API response. "
-                    "Choose only candidate_id values from the provided candidates. Return strict JSON only."
+                    "Choose only candidate_id values from the provided candidates. Return strict JSON only. "
+                    "Copy step_id and target exactly from task.need."
                 ),
             ),
             AgentMessage(
@@ -50,7 +51,7 @@ Return JSON with this shape:
   "resolutions": [
     {{
       "step_id": "s05",
-      "target": "$.reservationId",
+      "target": "$.path.reservationId",
       "selected_candidate_id": "c_s04_id",
       "confidence": "high|medium|low|none",
       "reason": "why this response field is the best source, or why no candidate fits"
@@ -61,6 +62,7 @@ Return JSON with this shape:
 
 Rules:
 - Return one resolution for every task.
+- target must exactly match task.need.target.
 - selected_candidate_id must be one of the task candidates or null.
 - Use null and confidence=none when candidates do not describe the required value.
 - Do not create new variables, json paths, generators, or static keys.
@@ -69,5 +71,44 @@ Rules:
         ]
 
     def apply_output(self, state: ProjectState, output: Any) -> ProjectState:
+        tasks = self.tasks
+        if tasks is None and state.data_dependency_graph:
+            tasks = build_dependency_resolution_tasks(state.data_dependency_graph)
+        if tasks:
+            output = _normalize_resolutions(output, tasks)
         state.dependency_resolutions = output
         return state
+
+
+def _normalize_resolutions(
+    output: DependencyResolverResult,
+    tasks: list[DependencyResolutionTask],
+) -> DependencyResolverResult:
+    """Keep task identity deterministic even when the LLM rewrites target names."""
+
+    by_step = {resolution.step_id: resolution for resolution in output.resolutions}
+    normalized = []
+    risks = list(output.risks)
+
+    for task in tasks:
+        resolution = by_step.get(task.step_id)
+        if not resolution:
+            risks.append(f"{task.step_id} {task.need.target}: missing dependency resolution.")
+            continue
+
+        candidate_ids = {candidate.candidate_id for candidate in task.candidates}
+        selected = resolution.selected_candidate_id
+        if selected and selected not in candidate_ids:
+            risks.append(
+                f"{task.step_id} {task.need.target}: ignored unknown candidate_id {selected}."
+            )
+            selected = None
+
+        resolution.step_id = task.step_id
+        resolution.target = task.need.target
+        resolution.selected_candidate_id = selected
+        if not selected:
+            resolution.confidence = "none"
+        normalized.append(resolution)
+
+    return DependencyResolverResult(resolutions=normalized, risks=risks)

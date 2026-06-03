@@ -76,6 +76,8 @@ Rules:
 - Every business step must appear either in mappings or unmapped_steps.
 - Do not put a step into unmapped_steps just because matching is hard.
 - Use unmapped_steps only when a separate API call is not needed, the behavior is an expected outcome of a previous API call, the action is manual/non-API, or OpenAPI has no matching operation.
+- Preserve lifecycle API steps that create IDs needed later. If a later operation needs a path parameter like rentalId, bookingId, reservationId, paymentId, or incidentId, include the earlier operation that creates or starts that resource.
+- Do not skip API-like business actions such as payment authorization, vehicle pickup/start rental, vehicle return/close rental, add extras, validate loyalty, extend rental, or register incident when OpenAPI has a matching operation.
 - For every unmapped step, write a concrete reason.
 """.strip(),
             ),
