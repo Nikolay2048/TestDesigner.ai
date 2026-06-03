@@ -73,7 +73,7 @@ Return JSON with this shape:
   "attempt": 1,
   "patches": [
     {{
-      "patch_type": "replace_request_binding|replace_response_extraction|add_response_extraction|replace_generated_params|replace_computed_expression|no_patch",
+      "patch_type": "use_existing_variable|replace_request_binding|replace_response_extraction|add_response_extraction|replace_generated_params|replace_computed_expression|no_patch",
       "step_id": "step id from diagnosis.suspected_bindings",
       "target": "target from diagnosis.suspected_bindings",
       "variable": null,
@@ -98,6 +98,7 @@ Rules:
 - Generator params must conform to the matching available_generator_tools schema.
 - Do not quote integer, number, or boolean generator params.
 - Patch only fields listed in diagnosis.suspected_bindings.
+- Prefer use_existing_variable when the current binding source is unknown and a suitable variable already exists in failed_step.resolved_bindings or sibling_bindings_same_step.
 - Prefer replace_generated_params when the current binding is generated and only params are wrong.
 - Patches based on server behavior should require human review.
 """.strip(),

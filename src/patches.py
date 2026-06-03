@@ -24,6 +24,27 @@ def apply_binding_patch(
     if step is None:
         return None
 
+    if patch.patch_type == "use_existing_variable":
+        if not patch.target or not patch.variable:
+            return None
+        if not _variable_exists_before_step(plan, patch.step_id, patch.variable):
+            return None
+        for binding in step.request_bindings:
+            if binding.target == patch.target:
+                binding.source = "response"
+                binding.variable = patch.variable
+                binding.static_key = None
+                binding.generator = None
+                binding.params = {}
+                binding.json_path = None
+                binding.expression = None
+                binding.literal = None
+                binding.policy = "stabilization_use_existing_variable"
+                binding.reason = patch.reason
+                binding.requires_human_review = patch.requires_human_review
+                return patch
+        return None
+
     if patch.patch_type == "replace_request_binding":
         if not patch.target or not patch.new_binding:
             return None
@@ -106,6 +127,20 @@ def _is_allowed_patch_target(patch: BindingPatch, allowed_bindings: list[dict]) 
             return True
         if allowed_variable and patch_variable == allowed_variable:
             return True
+    return False
+
+
+def _variable_exists_before_step(plan: DataBindingPlan, step_id: str, variable: str) -> bool:
+    try:
+        step_index = int(step_id.removeprefix("s")) - 1
+    except ValueError:
+        return False
+    if step_index <= 0:
+        return False
+    for step in plan.steps[:step_index]:
+        for extraction in step.response_extractions:
+            if extraction.variable == variable:
+                return True
     return False
 
 

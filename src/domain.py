@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ApiOperation(BaseModel):
@@ -223,6 +223,7 @@ class StabilizationDiagnosis(BaseModel):
 
 class BindingPatch(BaseModel):
     patch_type: Literal[
+        "use_existing_variable",
         "replace_request_binding",
         "replace_response_extraction",
         "add_response_extraction",
@@ -240,6 +241,21 @@ class BindingPatch(BaseModel):
     reason: str = ""
     why_not_repeating_previous_fix: str = ""
     requires_human_review: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_simple_variable_patch(cls, value):
+        if not isinstance(value, dict):
+            return value
+        if (
+            value.get("patch_type") == "replace_request_binding"
+            and isinstance(value.get("new_binding"), str)
+        ):
+            value = value.copy()
+            value["patch_type"] = "use_existing_variable"
+            value["variable"] = value.get("variable") or value["new_binding"]
+            value["new_binding"] = None
+        return value
 
 
 class StabilizationFix(BaseModel):

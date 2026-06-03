@@ -449,6 +449,72 @@ def test_patch_applier_rejects_patch_outside_suspected_binding() -> None:
     assert plan.steps[1].request_bindings[0].source == "unknown"
 
 
+def test_patch_applier_uses_existing_response_variable() -> None:
+    plan = DataBindingPlan(
+        steps=[
+            StepDataBinding(
+                business_step="List locations",
+                operation=OperationRef(method="GET", path="/locations"),
+                response_extractions=[
+                    ResponseExtraction(variable="locations_id", json_path="$.locations[].id")
+                ],
+            ),
+            StepDataBinding(
+                business_step="Create reservation",
+                operation=OperationRef(method="POST", path="/reservations"),
+                request_bindings=[
+                    RequestValueBinding(
+                        target="$.pickupLocationId",
+                        location="body",
+                        source="unknown",
+                    )
+                ],
+            ),
+        ]
+    )
+    patch = BindingPatch(
+        patch_type="use_existing_variable",
+        step_id="s02",
+        target="$.pickupLocationId",
+        variable="locations_id",
+        reason="Use location id extracted from /locations.",
+        requires_human_review=False,
+    )
+
+    applied = apply_binding_patch(
+        plan,
+        patch,
+        {},
+        GeneratorRegistry(),
+        allowed_bindings=[{"step_id": "s02", "target": "$.pickupLocationId"}],
+    )
+
+    binding = plan.steps[1].request_bindings[0]
+    assert applied is not None
+    assert binding.source == "response"
+    assert binding.variable == "locations_id"
+    assert binding.location == "body"
+    assert binding.target == "$.pickupLocationId"
+
+
+def test_binding_patch_normalizes_string_new_binding_to_existing_variable_patch() -> None:
+    patch = BindingPatch.model_validate(
+        {
+            "patch_type": "replace_request_binding",
+            "step_id": "s04",
+            "target": "$.pickupLocationId",
+            "variable": "locations_id",
+            "new_binding": "locations_id",
+            "reason": "Use existing location variable.",
+            "requires_human_review": False,
+        }
+    )
+
+    assert patch.patch_type == "use_existing_variable"
+    assert patch.variable == "locations_id"
+    assert patch.new_binding is None
+
+
 def test_stabilization_fixer_prompt_focuses_on_failed_step_only() -> None:
     state = ProjectState(
         scenario=ScenarioInput(path="scenario.md", title="Demo", text=""),
