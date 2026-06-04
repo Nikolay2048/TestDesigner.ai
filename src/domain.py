@@ -341,8 +341,19 @@ class TestBasis(BaseModel):
 class TestMutation(BaseModel):
     step_id: str
     target: str
-    action: Literal["set_value", "omit_field"]
+    action: Literal[
+        "set_value",
+        "omit_field",
+        "replace_binding_value",
+        "skip_setup_step",
+        "repeat_step",
+        "replace_static_data",
+    ]
     value: Any = None
+    replacement: RequestValueBinding | None = None
+    skipped_step_id: str | None = None
+    repeat_count: int = 1
+    rationale: str = ""
 
 
 class TestExpectation(BaseModel):
@@ -378,6 +389,37 @@ class TestIdeaRefinementResult(BaseModel):
     risks: list[str] = Field(default_factory=list)
 
 
+class BusinessRuleAttackIdea(BaseModel):
+    rule_id: str
+    title: str
+    intent: str
+    mutation_type: Literal[
+        "set_field_value",
+        "omit_field",
+        "replace_binding_value",
+        "skip_setup_step",
+        "repeat_step",
+        "replace_static_data",
+    ]
+    target_step_id: str
+    target: str | None = None
+    value: Any = None
+    skipped_step_id: str | None = None
+    repeat_count: int = 1
+    static_key: str | None = None
+    generator: str | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+    expected_behavior: str = ""
+    rationale: str = ""
+    confidence: Literal["high", "medium", "low", "none"] = "none"
+    requires_human_review: bool = True
+
+
+class BusinessRuleAttackResult(BaseModel):
+    ideas: list[BusinessRuleAttackIdea] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+
+
 class DesignedTestCase(BaseModel):
     case_id: str
     title: str
@@ -398,7 +440,16 @@ class DesignedTestCase(BaseModel):
 
 class TestCaseExecutionRecord(BaseModel):
     case_id: str
-    status: Literal["not_run", "passed", "failed", "review_required", "blocked", "contract_mismatch"] = "not_run"
+    status: Literal[
+        "not_run",
+        "passed",
+        "failed",
+        "review_required",
+        "blocked",
+        "contract_mismatch",
+        "oracle_incomplete",
+        "weak_attack",
+    ] = "not_run"
     mode: Literal["planned", "http"] = "planned"
     setup_until_step: str | None = None
     mutated_step_id: str

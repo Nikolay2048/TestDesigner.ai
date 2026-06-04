@@ -4,9 +4,16 @@ import json
 
 from pydantic import ValidationError
 
-from domain import AgentMessage, AgentRun, ProjectState, TestDesignResult, TestIdeaRefinementResult
+from domain import (
+    AgentMessage,
+    AgentRun,
+    BusinessRuleAttackResult,
+    ProjectState,
+    TestDesignResult,
+    TestIdeaRefinementResult,
+)
 from llm import LLM, NoLLM, extract_json
-from test_design import build_test_design
+from test_design import append_business_rule_attack_ideas, build_test_design
 
 
 class TestDesignerAgent:
@@ -27,20 +34,147 @@ class TestDesignerAgent:
             )
 
         state.test_design = build_test_design(state)
+        business_prompt = _build_business_attack_prompt(state)
+        business_notes = _add_business_attacks_with_llm(state, self.llm, business_prompt)
         prompt = _build_refinement_prompt(state)
         notes = _refine_with_llm(state.test_design, self.llm, prompt)
         return state, AgentRun(
             agent_name=self.name,
             status="completed",
-            prompt=prompt,
+            prompt=[*business_prompt, *prompt],
             output=state.test_design.model_dump(mode="json"),
             notes=[
                 f"Fields analyzed: {len(state.test_design.basis.fields)}.",
                 f"Test ideas generated: {len(state.test_design.ideas)}.",
                 f"Test cases assembled: {len(state.test_design.test_cases)}.",
+                *business_notes,
                 *notes,
             ],
         )
+
+
+def _build_business_attack_prompt(state: ProjectState) -> list[AgentMessage]:
+    if not state.test_design:
+        return []
+    rules = [
+        rule.model_dump(mode="json")
+        for rule in state.test_design.basis.rules
+        if rule.text
+    ][:8]
+    if not rules:
+        return []
+
+    steps = []
+    if state.data_binding:
+        for index, step in enumerate(state.data_binding.steps, start=1):
+            bindings = [
+                {
+                    "target": binding.target,
+                    "location": binding.location,
+                    "source": binding.source,
+                }
+                for binding in step.request_bindings
+            ]
+            steps.append(
+                {
+                    "step_id": f"s{index:02d}",
+                    "business_step": step.business_step,
+                    "operation": step.operation.model_dump(mode="json"),
+                    "request_bindings": bindings,
+                }
+            )
+
+    return [
+        AgentMessage(
+            role="system",
+            content=(
+                "You propose business-rule test attacks for a stable REST happy path. "
+                "Be creative about business intent, but return only attacks that can be mapped to the allowed mutation types. "
+                "Return strict JSON only."
+            ),
+        ),
+        AgentMessage(
+            role="user",
+            content=f"""
+Business rules:
+{json.dumps(rules, ensure_ascii=False, indent=2)}
+
+Stable REST steps:
+{json.dumps(steps, ensure_ascii=False, indent=2)}
+
+Allowed mutation_type values:
+- set_field_value: change an existing request field value.
+- omit_field: remove an existing request field.
+- replace_binding_value: replace an existing request field/path value with generated uuid or another generated value.
+- skip_setup_step: skip an earlier setup step before executing the target step.
+- repeat_step: execute the same target step more than once.
+- replace_static_data: replace an existing request field with a tester-provided static key.
+
+Return JSON with this shape:
+{{
+  "ideas": [
+    {{
+      "rule_id": "BR-001",
+      "title": "TMS-friendly business test title",
+      "intent": "what business rule is being attacked",
+      "mutation_type": "set_field_value",
+      "target_step_id": "s07",
+      "target": "$.fieldName or $.path.id; null only for repeat_step/skip_setup_step",
+      "value": "new literal value for set_field_value, otherwise null",
+      "skipped_step_id": "s04 or null",
+      "repeat_count": 2,
+      "static_key": "key from tester constants or null",
+      "generator": "uuid or null",
+      "params": {{}},
+      "expected_behavior": "business-level expected result; do not invent exact status unless documented",
+      "rationale": "why this attack validates the rule",
+      "confidence": "high|medium|low|none",
+      "requires_human_review": true
+    }}
+  ],
+  "risks": ["risk"]
+}}
+
+Rules:
+- Use only step_id and target values present in Stable REST steps.
+- Use JSON values with the correct type: numbers as numbers, booleans as booleans, not strings.
+- For replace_binding_value use generator="uuid" unless another listed generator is clearly better.
+- For repeat_step use repeat_count >= 2.
+- Use skip_setup_step only for skipping state-changing setup operations such as create/confirm/start/pay.
+- Do not use skip_setup_step to skip lookup/search/list operations; use set_field_value or replace_binding_value instead.
+- If the rule is about two existing values being different, mutate one of those request fields directly.
+- Prefer 1-3 high-value business attacks total.
+- Do not create schema-validation duplicates when a business-state attack is possible.
+""".strip(),
+        ),
+    ]
+
+
+def _add_business_attacks_with_llm(
+    state: ProjectState,
+    llm: LLM,
+    prompt: list[AgentMessage],
+) -> list[str]:
+    if not prompt or not state.test_design:
+        return ["Business-rule attack generation skipped: no business rules found."]
+    try:
+        raw = llm.complete(prompt)
+    except RuntimeError as exc:
+        return [f"Business-rule attack generation skipped: {exc}"]
+
+    try:
+        parsed = extract_json(raw)
+        result = BusinessRuleAttackResult.model_validate(parsed)
+    except (ValueError, ValidationError) as exc:
+        state.test_design.risks.append(f"LLM business-rule attacks ignored: {exc}")
+        return ["Business-rule attack generation ignored because output did not match schema."]
+
+    state.test_design.risks.extend(result.risks)
+    notes = append_business_rule_attack_ideas(state.test_design, result.ideas, state)
+    return [
+        f"LLM business-rule attacks proposed: {len(result.ideas)}.",
+        *notes,
+    ]
 
 
 def _build_refinement_prompt(state: ProjectState) -> list[AgentMessage]:

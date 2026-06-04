@@ -22,6 +22,7 @@ from domain import (
     AgentRun,
     ApiOperation,
     BindingPatch,
+    BusinessRuleAttackIdea,
     DataBindingPlan,
     DataDependencyGraph,
     DataDependencyStep,
@@ -61,7 +62,13 @@ from scenario_dependencies import (
     _stable_setup_step_limit,
 )
 from stabilization_rules import patch_from_server_hint
-from test_design import build_case_execution_plan, build_test_basis, build_test_design, execute_test_cases
+from test_design import (
+    append_business_rule_attack_ideas,
+    build_case_execution_plan,
+    build_test_basis,
+    build_test_design,
+    execute_test_cases,
+)
 from stable import publish_stable_package, stable_package_dir, validate_stable_package
 from validators import validate_data_binding, validate_endpoint_mapping
 
@@ -1528,7 +1535,13 @@ def test_test_designer_generates_reviewable_cases_from_stable_path() -> None:
 
 def test_test_designer_llm_refines_wording_without_changing_mutation() -> None:
     class FakeLLM:
+        def __init__(self):
+            self.calls = 0
+
         def complete(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return json.dumps({"ideas": [], "risks": []})
             return json.dumps(
                 {
                     "refinements": [
@@ -1552,6 +1565,146 @@ def test_test_designer_llm_refines_wording_without_changing_mutation() -> None:
     assert state.test_design.test_cases[0].title == "TMS refined title"
     assert state.test_design.test_cases[0].mutation.target == "$.attemptCount"
     assert state.test_design.test_cases[0].expected.description == "Refined expected result"
+
+
+def test_test_designer_adds_valid_llm_business_attack() -> None:
+    class FakeLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return json.dumps(
+                    {
+                        "ideas": [
+                            {
+                                "rule_id": "BR-001",
+                                "title": "Reject completion without approval",
+                                "intent": "Verify the service enforces approval as a business condition.",
+                                "mutation_type": "set_field_value",
+                                "target_step_id": "s01",
+                                "target": "$.approved",
+                                "value": False,
+                                "expected_behavior": "Completion is rejected or routed to review.",
+                                "rationale": "The stable path uses approval=true; approval=false attacks the rule.",
+                                "confidence": "high",
+                                "requires_human_review": True,
+                            }
+                        ],
+                        "risks": [],
+                    }
+                )
+            return json.dumps({"refinements": [], "risks": []})
+
+    state = _stable_generic_completion_state()
+    state, run = TestDesignerAgent(FakeLLM()).run(state)
+
+    assert run.status == "completed"
+    business_cases = [
+        case
+        for case in state.test_design.test_cases
+        if case.technique == "business_rule_violation"
+        and case.title == "Reject completion without approval"
+    ]
+    assert business_cases
+    assert business_cases[0].mutation.action == "set_value"
+    assert business_cases[0].mutation.target == "$.approved"
+    assert business_cases[0].mutation.value is False
+
+
+def test_business_attack_replace_binding_value_uses_generated_uuid() -> None:
+    state = _stable_generic_completion_state()
+    result = build_test_design(state)
+
+    notes = append_business_rule_attack_ideas(
+        result,
+        [
+            BusinessRuleAttackIdea(
+                rule_id="BR-001",
+                title="Use unknown task id",
+                intent="Verify unknown entity state is rejected.",
+                mutation_type="replace_binding_value",
+                target_step_id="s01",
+                target="$.path.taskId",
+                generator="uuid",
+                expected_behavior="Request is rejected for unknown entity.",
+                rationale="A generated UUID should not reference an existing task.",
+                confidence="high",
+            )
+        ],
+        state,
+    )
+
+    assert notes[-1] == "Business-rule executable attacks accepted: 1."
+    case = next(case for case in result.test_cases if case.title == "Use unknown task id")
+    plan = build_case_execution_plan(state.stabilization.stable_plan, case)
+    binding = next(item for item in plan.steps[0].request_bindings if item.target == "$.path.taskId")
+
+    assert binding.source == "generated"
+    assert binding.generator == "uuid"
+    assert binding.location == "path"
+
+
+def test_business_attack_skip_setup_replaces_missing_producer_value_with_uuid() -> None:
+    state = _stable_two_step_state()
+    result = build_test_design(state)
+
+    append_business_rule_attack_ideas(
+        result,
+        [
+            BusinessRuleAttackIdea(
+                rule_id="BR-001",
+                title="Complete without created task",
+                intent="Verify action is rejected when required setup entity was not created.",
+                mutation_type="skip_setup_step",
+                target_step_id="s02",
+                skipped_step_id="s01",
+                expected_behavior="Action is rejected because the entity is missing.",
+                rationale="Skipping the producer step attacks business state.",
+                confidence="high",
+            )
+        ],
+        state,
+    )
+
+    case = next(case for case in result.test_cases if case.title == "Complete without created task")
+    plan = build_case_execution_plan(state.stabilization.stable_plan, case)
+    binding = next(item for item in plan.steps[0].request_bindings if item.target == "$.path.taskId")
+
+    assert len(plan.steps) == 1
+    assert binding.source == "generated"
+    assert binding.generator == "uuid"
+    assert binding.location == "path"
+
+
+def test_business_attack_repeat_step_appends_duplicate_step() -> None:
+    state = _stable_generic_completion_state()
+    result = build_test_design(state)
+
+    append_business_rule_attack_ideas(
+        result,
+        [
+            BusinessRuleAttackIdea(
+                rule_id="BR-001",
+                title="Complete task twice",
+                intent="Verify repeated state-changing action is rejected or idempotent.",
+                mutation_type="repeat_step",
+                target_step_id="s01",
+                repeat_count=2,
+                expected_behavior="Second execution is rejected or returns documented idempotent result.",
+                rationale="Repeating the same action attacks state transition handling.",
+                confidence="medium",
+            )
+        ],
+        state,
+    )
+
+    case = next(case for case in result.test_cases if case.title == "Complete task twice")
+    plan = build_case_execution_plan(state.stabilization.stable_plan, case)
+
+    assert len(plan.steps) == 2
+    assert plan.steps[0].operation == plan.steps[1].operation
 
 
 def test_test_designer_does_not_use_conflict_status_for_validation_case() -> None:
@@ -1618,6 +1771,92 @@ def test_execute_test_cases_marks_expected_negative_status_as_passed(monkeypatch
     assert records[0].status == "passed"
     assert records[0].actual_status == 400
     assert records[0].trace is not None
+
+
+def test_execute_business_case_marks_2xx_as_weak_attack(monkeypatch) -> None:
+    state = _stable_generic_completion_state()
+    result = build_test_design(state)
+    append_business_rule_attack_ideas(
+        result,
+        [
+            BusinessRuleAttackIdea(
+                rule_id="BR-001",
+                title="Business condition still accepted",
+                intent="Attack a business condition.",
+                mutation_type="set_field_value",
+                target_step_id="s01",
+                target="$.approved",
+                value=False,
+                expected_behavior="Request should be rejected or require review.",
+                rationale="2xx means this mutation may be too weak.",
+                confidence="medium",
+            )
+        ],
+        state,
+    )
+    result.test_cases = [next(case for case in result.test_cases if case.title == "Business condition still accepted")]
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {"status": "accepted"}
+
+    monkeypatch.setattr("executor.httpx.request", lambda *args, **kwargs: Response())
+
+    records = execute_test_cases(
+        result,
+        state.stabilization.stable_plan,
+        base_url="http://server",
+        static_test_data={},
+        external_context={"task_id": "TASK-1"},
+    )
+
+    assert records[0].status == "weak_attack"
+
+
+def test_execute_business_case_marks_4xx_without_oracle_as_oracle_incomplete(monkeypatch) -> None:
+    state = _stable_generic_completion_state()
+    result = build_test_design(state)
+    append_business_rule_attack_ideas(
+        result,
+        [
+            BusinessRuleAttackIdea(
+                rule_id="BR-001",
+                title="Business condition rejected without oracle",
+                intent="Attack a business condition.",
+                mutation_type="set_field_value",
+                target_step_id="s01",
+                target="$.approved",
+                value=False,
+                expected_behavior="Request should be rejected or require review.",
+                rationale="4xx is useful, but exact business oracle is not formalized.",
+                confidence="medium",
+            )
+        ],
+        state,
+    )
+    result.test_cases = [
+        next(case for case in result.test_cases if case.title == "Business condition rejected without oracle")
+    ]
+
+    class Response:
+        status_code = 409
+
+        def json(self):
+            return {"code": "BUSINESS_RULE_VIOLATION"}
+
+    monkeypatch.setattr("executor.httpx.request", lambda *args, **kwargs: Response())
+
+    records = execute_test_cases(
+        result,
+        state.stabilization.stable_plan,
+        base_url="http://server",
+        static_test_data={},
+        external_context={"task_id": "TASK-1"},
+    )
+
+    assert records[0].status == "oracle_incomplete"
 
 
 def _stable_generic_completion_state() -> ProjectState:
@@ -1708,6 +1947,115 @@ def _stable_generic_completion_state() -> ProjectState:
         understanding=ScenarioUnderstanding(
             title="Scenario",
             business_rules=["Completion requires full progress and explicit approval."],
+        ),
+        stabilization=StabilizationResult(
+            status="passed",
+            attempts=[StabilizationAttempt(attempt=1, trace=trace)],
+            stable_plan=plan,
+        ),
+    )
+
+
+def _stable_two_step_state() -> ProjectState:
+    create_operation = ApiOperation(
+        method="POST",
+        path="/tasks",
+        operation_id="createTask",
+        request_schema={
+            "type": "object",
+            "required": ["name"],
+            "properties": {"name": {"type": "string"}},
+        },
+        response_statuses=["201", "400"],
+    )
+    complete_operation = ApiOperation(
+        method="POST",
+        path="/tasks/{taskId}/complete",
+        operation_id="completeTask",
+        request_schema={
+            "type": "object",
+            "required": ["approved"],
+            "properties": {"approved": {"type": "boolean"}},
+        },
+        response_statuses=["200", "400", "404", "409"],
+    )
+    plan = DataBindingPlan(
+        steps=[
+            StepDataBinding(
+                business_step="Create task",
+                operation=OperationRef(method="POST", path="/tasks"),
+                request_bindings=[
+                    RequestValueBinding(
+                        target="$.name",
+                        location="body",
+                        source="literal",
+                        literal="test task",
+                    )
+                ],
+                response_extractions=[
+                    ResponseExtraction(variable="task_id", json_path="$.id", source_step_id="s01")
+                ],
+            ),
+            StepDataBinding(
+                business_step="Complete created task",
+                operation=OperationRef(method="POST", path="/tasks/{taskId}/complete"),
+                request_bindings=[
+                    RequestValueBinding(
+                        target="$.path.taskId",
+                        location="path",
+                        source="response",
+                        variable="task_id",
+                        source_step_id="s01",
+                    ),
+                    RequestValueBinding(
+                        target="$.approved",
+                        location="body",
+                        source="literal",
+                        literal=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    trace = ExecutorTrace(
+        attempt=1,
+        base_url="http://server",
+        status="passed",
+        steps=[
+            ExecutorStepTrace(
+                step_id="s01",
+                business_step="Create task",
+                operation=OperationRef(method="POST", path="/tasks"),
+                resolved_path="/tasks",
+                request={"method": "POST", "path": "/tasks", "body": {"name": "test task"}},
+                response_status=201,
+                response_body={"id": "TASK-1"},
+                extracted_variables={"task_id": "TASK-1"},
+                status="passed",
+            ),
+            ExecutorStepTrace(
+                step_id="s02",
+                business_step="Complete created task",
+                operation=OperationRef(method="POST", path="/tasks/{taskId}/complete"),
+                resolved_path="/tasks/TASK-1/complete",
+                request={
+                    "method": "POST",
+                    "path": "/tasks/TASK-1/complete",
+                    "body": {"approved": True},
+                },
+                response_status=200,
+                response_body={"status": "completed"},
+                status="passed",
+            ),
+        ],
+    )
+    return ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Two-step scenario", text=""),
+        operations=[create_operation, complete_operation],
+        data_binding=plan,
+        understanding=ScenarioUnderstanding(
+            title="Two-step scenario",
+            business_rules=["A task can be completed only after it exists."],
         ),
         stabilization=StabilizationResult(
             status="passed",
