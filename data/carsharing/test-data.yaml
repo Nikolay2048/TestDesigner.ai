@@ -3,3 +3,7 @@ city: Moscow
 user_login: test_user
 user_password: test_password
 phone_format: e164
+loyalty_number: LOYAL-GOLD-777
+reservation_extras:
+  - CHILD_SEAT
+  - ADDITIONAL_DRIVER

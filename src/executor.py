@@ -141,12 +141,18 @@ class FlowExecutor:
                     raise KeyError(f"Unknown static key: {binding.static_key}")
                 value = self.static_test_data[binding.static_key]
             elif binding.source == "generated":
+                if binding.scope == "scenario" and binding.variable in variables:
+                    value = variables[binding.variable]
+                    binding_trace.value_preview = _preview(value)
+                    return value, binding_trace
                 if not binding.generator:
                     raise ValueError(f"Generated binding has no generator: {binding.target}")
                 value = self.generator_registry.generate(
                     binding.generator,
                     _resolve_template_values(binding.params, self.static_test_data, variables),
                 )
+                if binding.scope == "scenario" and binding.variable:
+                    variables[binding.variable] = value
             elif binding.source == "response":
                 if not binding.variable or binding.variable not in variables:
                     raise KeyError(f"Unknown response variable: {binding.variable}")

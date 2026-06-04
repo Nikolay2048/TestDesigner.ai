@@ -13,16 +13,20 @@ from agents import (
 )
 from data_dependencies import (
     assemble_data_binding_plan,
+    build_external_context_binding_decisions,
     build_dependency_graph,
     build_dependency_resolution_tasks,
     build_generation_binding_tasks,
+    build_static_test_data_binding_decisions,
 )
+from dependency_context import apply_dependency_context_to_endpoint_mapping
 from domain import (
     AgentRun,
     DependencyResolverResult,
     GenerationBindingResult,
     ScenarioRunOutput,
     StabilizationAttempt,
+    StabilizationFix,
     StabilizationResult,
     ProjectState,
 )
@@ -33,6 +37,7 @@ from llm import LLM
 from openapi import load_openapi_operations
 from patches import apply_binding_patch
 from stable import build_provided_state, publish_stable_package
+from stabilization_rules import patch_from_server_hint
 from validators import validate_data_binding, validate_endpoint_mapping
 
 
@@ -54,6 +59,7 @@ class AgenticTestDesignOrchestrator:
         base_url: str = "http://localhost:8080",
         max_attempts: int = 7,
         external_context: dict | None = None,
+        external_context_factory=None,
         stable_dir: str | Path | None = None,
         publish_stable: bool = True,
         reset_log: bool = True,
@@ -97,8 +103,11 @@ class AgenticTestDesignOrchestrator:
         state, run = self.endpoint_mapper.run(state)
         if state.endpoint_mapping:
             state.endpoint_mapping = validate_endpoint_mapping(state.endpoint_mapping, state.operations)
+            dependency_notes = apply_dependency_context_to_endpoint_mapping(state)
             if run.output is not None:
                 run.output = state.endpoint_mapping.model_dump(mode="json")
+            for note in dependency_notes:
+                run.notes.append(note)
         state.agent_runs.append(run)
         store.save_agent_run(run)
         store.log_event(
@@ -135,14 +144,44 @@ class AgenticTestDesignOrchestrator:
             return state
 
         # Stage 5: choose static/generated/computed/literal sources for remaining fields.
+        external_decisions = build_external_context_binding_decisions(
+            state.data_dependency_graph,
+            state.dependency_resolutions.resolutions if state.dependency_resolutions else [],
+            state,
+        )
+        if external_decisions:
+            store.log_event(
+                "External context bindings selected",
+                count=len(external_decisions),
+                targets=",".join(f"{item.step_id}:{item.target}" for item in external_decisions),
+            )
+        static_decisions = build_static_test_data_binding_decisions(
+            state.data_dependency_graph,
+            state.dependency_resolutions.resolutions if state.dependency_resolutions else [],
+            external_decisions,
+            state,
+        )
+        if static_decisions:
+            store.log_event(
+                "Static test data bindings selected",
+                count=len(static_decisions),
+                targets=",".join(f"{item.step_id}:{item.target}" for item in static_decisions),
+            )
+        deterministic_decisions = [*external_decisions, *static_decisions]
         generation_tasks = build_generation_binding_tasks(
             state.data_dependency_graph,
             state.dependency_resolutions.resolutions if state.dependency_resolutions else [],
             state,
             self.generator_registry,
+            existing_decisions=deterministic_decisions,
         )
         store.log_event("Stage started", stage="generation_binding", tasks=len(generation_tasks))
-        state, run = self._run_generation_binding_tasks(state, store, generation_tasks)
+        state, run = self._run_generation_binding_tasks(
+            state,
+            store,
+            generation_tasks,
+            initial_decisions=deterministic_decisions,
+        )
         state.agent_runs.append(run)
         store.save_agent_run(run)
         store.log_event("Stage finished", stage="generation_binding", status=run.status)
@@ -174,7 +213,13 @@ class AgenticTestDesignOrchestrator:
             risks=len(state.data_binding.risks) if state.data_binding else 0,
         )
 
-        state = self._run_stabilization_loop(state, store, base_url, max_attempts)
+        state = self._run_stabilization_loop(
+            state,
+            store,
+            base_url,
+            max_attempts,
+            external_context_factory=external_context_factory,
+        )
         self._save_scenario_output(state, store)
         if publish_stable and stable_dir:
             package_dir = publish_stable_package(
@@ -242,8 +287,9 @@ class AgenticTestDesignOrchestrator:
         state: ProjectState,
         store: ArtifactStore,
         tasks,
+        initial_decisions=None,
     ) -> tuple[ProjectState, AgentRun]:
-        decisions = []
+        decisions = list(initial_decisions or [])
         risks = []
         summary = AgentRun(agent_name="Generation Binding", status="completed")
 
@@ -287,6 +333,7 @@ class AgenticTestDesignOrchestrator:
         store: ArtifactStore,
         base_url: str,
         max_attempts: int,
+        external_context_factory=None,
     ) -> ProjectState:
         if not state.data_binding:
             store.log_event("Stabilization skipped", reason="missing_data_binding")
@@ -301,6 +348,14 @@ class AgenticTestDesignOrchestrator:
         )
 
         for attempt_number in range(1, max_attempts + 1):
+            if external_context_factory:
+                state.external_context = external_context_factory(attempt_number)
+                executor.external_context = state.external_context
+                store.log_event(
+                    "External context refreshed",
+                    attempt=attempt_number,
+                    keys=",".join(sorted(state.external_context.keys())) or "-",
+                )
             store.log_event("Executor attempt started", attempt=attempt_number)
             trace = executor.execute(state.data_binding, attempt=attempt_number)
             attempt = StabilizationAttempt(attempt=attempt_number, trace=trace)
@@ -351,6 +406,42 @@ class AgenticTestDesignOrchestrator:
             )
 
             applied = []
+            deterministic_patch = patch_from_server_hint(state, diagnosis)
+            if deterministic_patch:
+                store.log_event(
+                    "Deterministic patch proposed",
+                    attempt=attempt_number,
+                    patch_type=deterministic_patch.patch_type,
+                    step=deterministic_patch.step_id or "-",
+                    target=deterministic_patch.target or "-",
+                )
+                applied_patch = apply_binding_patch(
+                    state.data_binding,
+                    deterministic_patch,
+                    state.static_test_data,
+                    self.generator_registry,
+                    allowed_bindings=diagnosis.suspected_bindings,
+                )
+                if applied_patch:
+                    applied.append(applied_patch)
+                    attempt.fix = StabilizationFix(
+                        attempt=attempt_number,
+                        patches=[applied_patch],
+                        reason=applied_patch.reason,
+                    )
+                    attempt.applied_patches = applied
+                    if applied_patch.requires_human_review:
+                        state.stabilization.review_required = True
+                        state.stabilization.review_notes.append(applied_patch.reason)
+                    store.log_event(
+                        "Deterministic patch applied",
+                        attempt=attempt_number,
+                        patch_type=applied_patch.patch_type,
+                        step=applied_patch.step_id or "-",
+                        target=applied_patch.target or "-",
+                    )
+                    continue
+
             for fixer_try in range(1, 4):
                 store.log_event("Fixer try started", attempt=attempt_number, try_number=fixer_try)
                 fixer = StabilizationFixerAgent(self.llm, diagnosis, self.generator_registry)

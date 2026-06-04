@@ -80,6 +80,7 @@ def build_dependency_resolution_tasks(graph: DataDependencyGraph) -> list[Depend
                 )
                 for producer in previous_producers
                 if _types_compatible(need.type, producer.type)
+                and _candidate_semantically_plausible(need, producer)
             ]
             if candidates:
                 tasks.append(
@@ -101,14 +102,20 @@ def build_generation_binding_tasks(
     dependency_resolutions: list[DependencyResolution],
     state: ProjectState,
     generator_registry: GeneratorRegistry,
+    existing_decisions: list[GenerationBindingDecision] | None = None,
 ) -> list[GenerationBindingTask]:
     resolved = {(item.step_id, item.target) for item in dependency_resolutions if item.selected_candidate_id}
+    already_bound = {
+        (item.step_id, item.target)
+        for item in (existing_decisions or [])
+        if item.source not in {"missing", "unknown"}
+    }
     business_context = _business_context(state)
     tasks: list[GenerationBindingTask] = []
 
     for step in graph.steps:
         for need in step.needs:
-            if (step.step_id, need.target) in resolved:
+            if (step.step_id, need.target) in resolved or (step.step_id, need.target) in already_bound:
                 continue
             tasks.append(
                 GenerationBindingTask(
@@ -124,6 +131,80 @@ def build_generation_binding_tasks(
             )
 
     return tasks
+
+
+def build_external_context_binding_decisions(
+    graph: DataDependencyGraph,
+    dependency_resolutions: list[DependencyResolution],
+    state: ProjectState,
+) -> list[GenerationBindingDecision]:
+    """Bind obvious request needs to stable dependency context without asking the LLM."""
+
+    resolved = {(item.step_id, item.target) for item in dependency_resolutions if item.selected_candidate_id}
+    decisions: list[GenerationBindingDecision] = []
+
+    for step in graph.steps:
+        for need in step.needs:
+            if (step.step_id, need.target) in resolved:
+                continue
+            external_key = _external_context_key_for_need(need, state.external_context)
+            if not external_key:
+                continue
+            decisions.append(
+                GenerationBindingDecision(
+                    step_id=need.step_id,
+                    target=need.target,
+                    source="external_context",
+                    external_key=external_key,
+                    confidence="high",
+                    reason=(
+                        f"Stable dependency context already provides {external_key}, "
+                        f"which matches required request field {need.target}."
+                    ),
+                )
+            )
+
+    return decisions
+
+
+def build_static_test_data_binding_decisions(
+    graph: DataDependencyGraph,
+    dependency_resolutions: list[DependencyResolution],
+    existing_decisions: list[GenerationBindingDecision],
+    state: ProjectState,
+) -> list[GenerationBindingDecision]:
+    """Bind obvious request needs to tester-owned constants before asking the LLM."""
+
+    resolved = {(item.step_id, item.target) for item in dependency_resolutions if item.selected_candidate_id}
+    already_bound = {
+        (item.step_id, item.target)
+        for item in existing_decisions
+        if item.source not in {"missing", "unknown"}
+    }
+    decisions: list[GenerationBindingDecision] = []
+
+    for step in graph.steps:
+        for need in step.needs:
+            if (step.step_id, need.target) in resolved or (step.step_id, need.target) in already_bound:
+                continue
+            static_key = _static_key_for_need(need, state.static_test_data)
+            if not static_key:
+                continue
+            decisions.append(
+                GenerationBindingDecision(
+                    step_id=need.step_id,
+                    target=need.target,
+                    source="static",
+                    static_key=static_key,
+                    confidence="high",
+                    reason=(
+                        f"Tester-provided static data key {static_key} matches required "
+                        f"request field {need.target}."
+                    ),
+                )
+            )
+
+    return decisions
 
 
 def assemble_data_binding_plan(
@@ -324,6 +405,39 @@ def _types_compatible(need_type: str, producer_type: str) -> bool:
     return need_type == "number" and producer_type == "integer"
 
 
+def _candidate_semantically_plausible(need: DataNeed, producer: DataProducer) -> bool:
+    need_tokens = set(_name_tokens(need.target))
+    producer_tokens = set(_name_tokens(producer.field_name or producer.json_path))
+    if not need_tokens or not producer_tokens:
+        return True
+    meaningful_overlap = (need_tokens & producer_tokens) - {"percent", "percentage"}
+    if meaningful_overlap:
+        return True
+
+    operation_tokens = set(_name_tokens(producer.operation.path))
+    if "id" in need_tokens and producer_tokens == {"id"} and (need_tokens - {"id"}) & operation_tokens:
+        return True
+
+    return False
+
+
+def _name_tokens(value: str) -> list[str]:
+    expanded = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", value)
+    raw_tokens = re.findall(r"[A-Za-z0-9]+", expanded)
+    ignored = {"path", "body", "query", "header"}
+    tokens = []
+    for token in raw_tokens:
+        normalized = token.casefold()
+        if normalized in ignored or normalized.isdigit():
+            continue
+        if normalized.endswith("ies") and len(normalized) > 3:
+            normalized = normalized[:-3] + "y"
+        elif normalized.endswith("s") and len(normalized) > 1:
+            normalized = normalized[:-1]
+        tokens.append(normalized)
+    return tokens
+
+
 def _safe_id(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_")
     return cleaned or "value"
@@ -380,6 +494,88 @@ def _binding_from_generation_decision(
 def _target_variable_name(target: str) -> str:
     parts = [part for part in re.split(r"[^A-Za-z0-9]+", target) if part and part != "$"]
     return "_".join(parts) or "generated_value"
+
+
+def _external_context_key_for_need(need: DataNeed, external_context: dict[str, Any]) -> str | None:
+    if not external_context:
+        return None
+
+    need_tokens = _need_tokens(need.target)
+    if not need_tokens:
+        return None
+
+    normalized_need = "_".join(need_tokens)
+    normalized_keys = {
+        key: "_".join(_name_tokens(key))
+        for key in external_context
+    }
+
+    for key, normalized_key in normalized_keys.items():
+        if normalized_key == normalized_need:
+            return key
+
+    id_like = need_tokens[-1:] == ["id"]
+    if id_like:
+        resource_tokens = set(need_tokens[:-1])
+        matches = [
+            key
+            for key in external_context
+            if _external_id_key_matches(resource_tokens, _name_tokens(key))
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        preferred = [key for key in matches if normalized_keys[key] == normalized_need]
+        if len(preferred) == 1:
+            return preferred[0]
+
+    # Reuse dates and other exact business values only when all target tokens are present.
+    matches = [
+        key
+        for key in external_context
+        if set(need_tokens).issubset(set(_name_tokens(key)))
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _static_key_for_need(need: DataNeed, static_test_data: dict[str, Any]) -> str | None:
+    if not static_test_data:
+        return None
+
+    need_tokens = _need_tokens(need.target)
+    if not need_tokens:
+        return None
+
+    normalized_need = "_".join(need_tokens)
+    normalized_keys = {
+        key: "_".join(_name_tokens(key))
+        for key in static_test_data
+    }
+
+    for key, normalized_key in normalized_keys.items():
+        if normalized_key == normalized_need:
+            return key
+
+    matches = [
+        key
+        for key in static_test_data
+        if set(need_tokens).issubset(set(_name_tokens(key)))
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _need_tokens(target: str) -> list[str]:
+    if target.startswith("$.path."):
+        value = target.removeprefix("$.path.")
+    else:
+        value = target.removeprefix("$.")
+    return _name_tokens(value)
+
+
+def _external_id_key_matches(resource_tokens: set[str], key_tokens: list[str]) -> bool:
+    if not resource_tokens or "id" not in key_tokens:
+        return False
+    key_resource_tokens = set(key_tokens) - {"id"}
+    return bool(resource_tokens & key_resource_tokens)
 
 
 def _dedupe_extractions(items: list[ResponseExtraction]) -> list[ResponseExtraction]:

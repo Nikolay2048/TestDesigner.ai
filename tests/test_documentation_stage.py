@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from agents.dependency_resolver import DependencyResolverAgent
@@ -11,9 +12,14 @@ from data_dependencies import (
     assemble_data_binding_plan,
     build_dependency_graph,
     build_dependency_resolution_tasks,
+    build_external_context_binding_decisions,
+    build_generation_binding_tasks,
+    build_static_test_data_binding_decisions,
 )
+from dependency_context import apply_dependency_context_to_endpoint_mapping
 from domain import (
     AgentRun,
+    ApiOperation,
     BindingPatch,
     DataBindingPlan,
     DataDependencyGraph,
@@ -32,12 +38,14 @@ from domain import (
     ResponseExtraction,
     ScenarioInput,
     ScenarioDependency,
+    ScenarioRunOutput,
     ScenarioUnderstanding,
     StabilizationAttempt,
     StabilizationDiagnosis,
     StabilizationResult,
     StepDataBinding,
     StepOperationMapping,
+    ProvidedState,
 )
 from executor import FlowExecutor
 from generators import GeneratorRegistry
@@ -45,8 +53,14 @@ from io_utils import extract_raw_endpoint_mentions
 from openapi import load_openapi_operations
 from orchestrator import AgenticTestDesignOrchestrator
 from patches import apply_binding_patch
-from scenario_dependencies import ScenarioDependencyRunner
-from stable import publish_stable_package, stable_package_dir
+from scenario_dependencies import (
+    ScenarioDependencyRunner,
+    _context_from_setup,
+    _resolve_dependency_path,
+    _stable_setup_step_limit,
+)
+from stabilization_rules import patch_from_server_hint
+from stable import publish_stable_package, stable_package_dir, validate_stable_package
 from validators import validate_data_binding, validate_endpoint_mapping
 
 
@@ -292,6 +306,89 @@ def test_dependency_resolver_normalizes_path_param_target_from_task() -> None:
     resolution = state.dependency_resolutions.resolutions[0]
     assert resolution.target == "$.path.reservationId"
     assert resolution.selected_candidate_id == "c_s04_id"
+
+
+def test_dependency_candidates_filter_unrelated_same_type_fields() -> None:
+    graph = DataDependencyGraph(
+        steps=[
+            DataDependencyStep(
+                step_id="s03",
+                business_step="Apply loyalty",
+                operation=OperationRef(method="POST", path="/loyalty/validate"),
+                produces=[
+                    DataProducer(
+                        step_id="s03",
+                        json_path="$.discountPercent",
+                        type="integer",
+                        field_name="discountPercent",
+                        operation=OperationRef(method="POST", path="/loyalty/validate"),
+                    )
+                ],
+            ),
+            DataDependencyStep(
+                step_id="s04",
+                business_step="Pickup",
+                operation=OperationRef(method="POST", path="/rentals/{reservationId}/pickup"),
+                needs=[
+                    DataNeed(
+                        step_id="s04",
+                        target="$.odometer",
+                        location="body",
+                        type="integer",
+                    ),
+                    DataNeed(
+                        step_id="s04",
+                        target="$.fuelLevelPercent",
+                        location="body",
+                        type="integer",
+                    ),
+                ],
+            ),
+        ]
+    )
+
+    tasks = build_dependency_resolution_tasks(graph)
+
+    assert tasks == []
+
+
+def test_dependency_candidates_keep_resource_id_from_create_response() -> None:
+    graph = DataDependencyGraph(
+        steps=[
+            DataDependencyStep(
+                step_id="s01",
+                business_step="Create reservation",
+                operation=OperationRef(method="POST", path="/reservations"),
+                produces=[
+                    DataProducer(
+                        step_id="s01",
+                        json_path="$.id",
+                        type="string",
+                        field_name="id",
+                        operation=OperationRef(method="POST", path="/reservations"),
+                    )
+                ],
+            ),
+            DataDependencyStep(
+                step_id="s02",
+                business_step="Open reservation",
+                operation=OperationRef(method="GET", path="/reservations/{reservationId}"),
+                needs=[
+                    DataNeed(
+                        step_id="s02",
+                        target="$.path.reservationId",
+                        location="path",
+                        type="string",
+                    )
+                ],
+            ),
+        ]
+    )
+
+    tasks = build_dependency_resolution_tasks(graph)
+
+    assert len(tasks) == 1
+    assert tasks[0].candidates[0].candidate_id == "c_s01_id"
 
 
 def test_generation_binding_prompt_uses_unresolved_fields() -> None:
@@ -862,6 +959,66 @@ def test_executor_uses_external_context_variable(monkeypatch) -> None:
     assert calls[0][1] == "http://server/reservations/RSV-1/cancel"
 
 
+def test_executor_reuses_scenario_scoped_generated_variable(monkeypatch) -> None:
+    calls = []
+
+    def fake_request(method, url, params=None, headers=None, json=None, timeout=None):
+        calls.append(json)
+
+        class Response:
+            status_code = 200
+
+            def json(self):
+                return {"ok": True}
+
+        return Response()
+
+    monkeypatch.setattr("executor.httpx.request", fake_request)
+    plan = DataBindingPlan(
+        steps=[
+            StepDataBinding(
+                business_step="Pickup",
+                operation=OperationRef(method="POST", path="/pickup"),
+                request_bindings=[
+                    RequestValueBinding(
+                        target="$.odometer",
+                        location="body",
+                        source="generated",
+                        variable="odometer",
+                        generator="random_int",
+                        params={"min": 100, "max": 100},
+                        scope="scenario",
+                    )
+                ],
+            ),
+            StepDataBinding(
+                business_step="Return",
+                operation=OperationRef(method="POST", path="/return"),
+                request_bindings=[
+                    RequestValueBinding(
+                        target="$.odometer",
+                        location="body",
+                        source="generated",
+                        variable="odometer",
+                        generator="random_int",
+                        params={"min": 0, "max": 0},
+                        scope="scenario",
+                    )
+                ],
+            ),
+        ]
+    )
+
+    trace = FlowExecutor(
+        "http://server",
+        {},
+        generator_registry=GeneratorRegistry(),
+    ).execute(plan, attempt=1)
+
+    assert trace.status == "passed"
+    assert calls == [{"odometer": 100}, {"odometer": 100}]
+
+
 def test_publish_stable_package_writes_executable_artifacts(tmp_path) -> None:
     plan = DataBindingPlan(
         steps=[
@@ -919,6 +1076,35 @@ def test_publish_stable_package_writes_executable_artifacts(tmp_path) -> None:
     assert Path(package_dir, "metadata.json").exists()
 
 
+def test_stable_package_validation_allows_test_data_additions(tmp_path) -> None:
+    package_dir = tmp_path / "stable" / "scenario"
+    package_dir.mkdir(parents=True)
+    scenario_path = Path("data/carsharing/specs/01-basic-economy-rental.md")
+    openapi_path = Path("data/carsharing/openapi/openapi.yaml")
+    metadata = {
+        "status": "passed",
+        "scenario_hash": "will be set below",
+        "openapi_hash": "will be set below",
+        "test_data_hash": "old-hash",
+    }
+    from stable import file_sha256
+
+    metadata["scenario_hash"] = file_sha256(scenario_path)
+    metadata["openapi_hash"] = file_sha256(openapi_path)
+    Path(package_dir, "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    Path(package_dir, "stable_plan.json").write_text("{}", encoding="utf-8")
+    Path(package_dir, "provided_state.json").write_text("{}", encoding="utf-8")
+
+    issues = validate_stable_package(
+        package_dir,
+        scenario_path,
+        openapi_path,
+        "data/carsharing/test-data.yaml",
+    )
+
+    assert "test data file changed after stable package was published" not in issues
+
+
 def test_dependency_runner_blocks_when_dependency_is_not_stable(tmp_path, monkeypatch) -> None:
     def fake_run(self, state):
         state.understanding = ScenarioUnderstanding(
@@ -946,6 +1132,364 @@ def test_dependency_runner_blocks_when_dependency_is_not_stable(tmp_path, monkey
     assert state.agent_runs[-1].agent_name == "Scenario Dependency Runner"
     assert state.agent_runs[-1].status == "failed"
     assert "Cannot resolve dependency scenario" in state.agent_runs[-1].notes[0]
+
+
+def test_dependency_path_resolves_scenario_number_reference() -> None:
+    dependency = ScenarioDependency(
+        kind="requires_scenario",
+        reference="Scenario 1",
+        reason="Scenario 2 depends on base rental.",
+    )
+
+    resolved = _resolve_dependency_path(dependency, Path("data/carsharing/specs"))
+
+    assert resolved is not None
+    assert Path(resolved).name == "01-basic-economy-rental.md"
+
+
+def test_scenario_dependency_accepts_null_required_data() -> None:
+    dependency = ScenarioDependency.model_validate(
+        {
+            "kind": "requires_scenario",
+            "reference": "Scenario 1",
+            "required_data": None,
+        }
+    )
+
+    assert dependency.required_data == []
+
+
+def test_context_from_setup_infers_resource_alias_from_stable_plan(tmp_path) -> None:
+    package_dir = tmp_path / "stable" / "scenario"
+    package_dir.mkdir(parents=True)
+    output = ScenarioRunOutput(
+        scenario_path="scenario.md",
+        status="passed",
+        provided_state=[
+            ProvidedState(
+                name="id",
+                value="RSV-OLD",
+                semantic_type="id",
+                source_scenario="scenario.md",
+                source_step_id="s01",
+                json_path="$.id",
+            )
+        ],
+        stable_plan=DataBindingPlan(
+            steps=[
+                StepDataBinding(
+                    business_step="Create reservation",
+                    operation=OperationRef(method="POST", path="/reservations"),
+                    response_extractions=[ResponseExtraction(variable="id", json_path="$.id")],
+                )
+            ]
+        ),
+    )
+    Path(package_dir, "provided_state.json").write_text(output.model_dump_json(), encoding="utf-8")
+
+    context = _context_from_setup(package_dir, {"id": "RSV-NEW"})
+
+    assert context["id"] == "RSV-NEW"
+    assert context["reservation_id"] == "RSV-NEW"
+
+
+def test_stable_setup_step_limit_uses_required_data_checkpoint(tmp_path) -> None:
+    package_dir = tmp_path / "stable" / "scenario"
+    package_dir.mkdir(parents=True)
+    output = ScenarioRunOutput(
+        scenario_path="scenario.md",
+        status="passed",
+        provided_state=[
+            ProvidedState(
+                name="id",
+                value="RSV-1",
+                semantic_type="id",
+                source_scenario="scenario.md",
+                source_step_id="s04",
+                json_path="$.id",
+            ),
+            ProvidedState(
+                name="rentalId",
+                value="RNT-1",
+                semantic_type="rental_id",
+                source_scenario="scenario.md",
+                source_step_id="s06",
+                json_path="$.rentalId",
+            ),
+        ],
+        stable_plan=DataBindingPlan(
+            steps=[
+                StepDataBinding(business_step="Locations", operation=OperationRef(method="GET", path="/locations")),
+                StepDataBinding(business_step="Search", operation=OperationRef(method="POST", path="/vehicles/search")),
+                StepDataBinding(business_step="Vehicle", operation=OperationRef(method="GET", path="/vehicles/{vehicleId}")),
+                StepDataBinding(
+                    business_step="Create reservation",
+                    operation=OperationRef(method="POST", path="/reservations"),
+                    response_extractions=[ResponseExtraction(variable="id", json_path="$.id")],
+                ),
+                StepDataBinding(business_step="Pay", operation=OperationRef(method="POST", path="/payments/preauth")),
+                StepDataBinding(
+                    business_step="Pickup",
+                    operation=OperationRef(method="POST", path="/rentals/{reservationId}/pickup"),
+                    response_extractions=[ResponseExtraction(variable="rentalId", json_path="$.rentalId")],
+                ),
+            ]
+        ),
+    )
+    Path(package_dir, "provided_state.json").write_text(output.model_dump_json(), encoding="utf-8")
+    dependency = ScenarioDependency(
+        kind="requires_scenario",
+        reference="Scenario 1",
+        required_data=["reservation_id"],
+    )
+
+    step_limit = _stable_setup_step_limit(package_dir, dependency)
+
+    assert step_limit == 4
+
+
+def test_stable_setup_step_limit_defaults_to_first_create_id_checkpoint(tmp_path) -> None:
+    package_dir = tmp_path / "stable" / "scenario"
+    package_dir.mkdir(parents=True)
+    output = ScenarioRunOutput(
+        scenario_path="scenario.md",
+        status="passed",
+        provided_state=[],
+        stable_plan=DataBindingPlan(
+            steps=[
+                StepDataBinding(business_step="Locations", operation=OperationRef(method="GET", path="/locations")),
+                StepDataBinding(
+                    business_step="Create reservation",
+                    operation=OperationRef(method="POST", path="/reservations"),
+                    response_extractions=[ResponseExtraction(variable="id", json_path="$.id")],
+                ),
+                StepDataBinding(business_step="Pay", operation=OperationRef(method="POST", path="/payments/preauth")),
+            ]
+        ),
+    )
+    Path(package_dir, "provided_state.json").write_text(output.model_dump_json(), encoding="utf-8")
+    dependency = ScenarioDependency(kind="requires_scenario", reference="Scenario 1")
+
+    step_limit = _stable_setup_step_limit(package_dir, dependency)
+
+    assert step_limit == 2
+
+
+def test_dependency_context_prunes_create_when_resource_id_exists() -> None:
+    state = ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Scenario", text=""),
+        operations=[
+            ApiOperation(
+                method="POST",
+                path="/reservations",
+                operation_id="createReservation",
+                response_schemas={"201": {"type": "object", "properties": {"id": {"type": "string"}}}},
+            ),
+            ApiOperation(
+                method="GET",
+                path="/reservations/{reservationId}",
+                operation_id="getReservation",
+            ),
+        ],
+        external_context={"reservation_id": "RSV-1"},
+        endpoint_mapping=EndpointMappingResult(
+            mappings=[
+                StepOperationMapping(
+                    business_step="Retrieve existing reservation",
+                    operations=[
+                        OperationRef(method="POST", path="/reservations"),
+                        OperationRef(method="GET", path="/reservations/{reservationId}"),
+                    ],
+                )
+            ]
+        ),
+    )
+
+    notes = apply_dependency_context_to_endpoint_mapping(state)
+
+    assert notes
+    assert [item.path for item in state.endpoint_mapping.mappings[0].operations] == [
+        "/reservations/{reservationId}"
+    ]
+
+
+def test_dependency_context_replaces_single_create_with_retrieve_when_resource_id_exists() -> None:
+    state = ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Scenario", text=""),
+        operations=[
+            ApiOperation(
+                method="POST",
+                path="/reservations",
+                operation_id="createReservation",
+                response_schemas={"201": {"type": "object", "properties": {"id": {"type": "string"}}}},
+            ),
+            ApiOperation(
+                method="GET",
+                path="/reservations/{reservationId}",
+                operation_id="getReservation",
+            ),
+        ],
+        external_context={"reservation_id": "RSV-1"},
+        endpoint_mapping=EndpointMappingResult(
+            mappings=[
+                StepOperationMapping(
+                    business_step="Create or retrieve reservation",
+                    operations=[OperationRef(method="POST", path="/reservations")],
+                )
+            ]
+        ),
+    )
+
+    notes = apply_dependency_context_to_endpoint_mapping(state)
+
+    assert notes
+    assert [item.path for item in state.endpoint_mapping.mappings[0].operations] == [
+        "/reservations/{reservationId}"
+    ]
+
+
+def test_external_context_binding_decisions_prevent_generation_for_dependency_state() -> None:
+    graph = DataDependencyGraph(
+        steps=[
+            DataDependencyStep(
+                step_id="s01",
+                business_step="Retrieve existing reservation",
+                operation=OperationRef(method="GET", path="/reservations/{reservationId}"),
+                needs=[
+                    DataNeed(
+                        step_id="s01",
+                        target="$.path.reservationId",
+                        location="path",
+                        type="string",
+                    )
+                ],
+            ),
+        ]
+    )
+    state = ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Scenario", text=""),
+        external_context={"reservation_id": "RSV-1"},
+    )
+
+    decisions = build_external_context_binding_decisions(graph, [], state)
+    tasks = build_generation_binding_tasks(
+        graph,
+        [],
+        state,
+        GeneratorRegistry(),
+        existing_decisions=decisions,
+    )
+    plan = assemble_data_binding_plan(graph, [], [], decisions)
+
+    assert decisions[0].external_key == "reservation_id"
+    assert tasks == []
+    assert plan.steps[0].request_bindings[0].source == "external_context"
+    assert plan.steps[0].request_bindings[0].variable == "reservation_id"
+
+
+def test_static_test_data_binding_decisions_prevent_array_enum_scalar_generation() -> None:
+    graph = DataDependencyGraph(
+        steps=[
+            DataDependencyStep(
+                step_id="s01",
+                business_step="Add extras",
+                operation=OperationRef(method="POST", path="/reservations/{reservationId}/extras"),
+                needs=[
+                    DataNeed(
+                        step_id="s01",
+                        target="$.extras",
+                        location="body",
+                        type="array",
+                        field_schema={"type": "array", "items": {"type": "string"}},
+                    )
+                ],
+            ),
+        ]
+    )
+    state = ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Scenario", text=""),
+        static_test_data={"reservation_extras": ["CHILD_SEAT", "ADDITIONAL_DRIVER"]},
+    )
+
+    decisions = build_static_test_data_binding_decisions(graph, [], [], state)
+    tasks = build_generation_binding_tasks(
+        graph,
+        [],
+        state,
+        GeneratorRegistry(),
+        existing_decisions=decisions,
+    )
+    plan = assemble_data_binding_plan(graph, [], [], decisions)
+
+    assert decisions[0].static_key == "reservation_extras"
+    assert tasks == []
+    assert plan.steps[0].request_bindings[0].source == "static"
+    assert plan.steps[0].request_bindings[0].static_key == "reservation_extras"
+
+
+def test_server_hint_patch_replaces_generated_random_int_params() -> None:
+    plan = DataBindingPlan(
+        steps=[
+            StepDataBinding(
+                business_step="Pickup",
+                operation=OperationRef(method="POST", path="/rentals/{reservationId}/pickup"),
+                request_bindings=[
+                    RequestValueBinding(
+                        target="$.fuelLevelPercent",
+                        location="body",
+                        source="generated",
+                        variable="fuelLevelPercent",
+                        generator="random_int",
+                        params={"min": 0, "max": 100},
+                    )
+                ],
+            )
+        ]
+    )
+    trace = ExecutorTrace(
+        attempt=1,
+        base_url="http://server",
+        status="failed",
+        failed_step_id="s01",
+        failure="Expected 2xx, got 400",
+        steps=[
+            ExecutorStepTrace(
+                step_id="s01",
+                business_step="Pickup",
+                operation=OperationRef(method="POST", path="/rentals/{reservationId}/pickup"),
+                resolved_path="/rentals/RSV-1/pickup",
+                response_status=400,
+                response_body={"detail": {"hint": "Use fuelLevelPercent=100"}},
+                status="failed",
+            )
+        ],
+    )
+    state = ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Scenario", text=""),
+        data_binding=plan,
+        stabilization=StabilizationResult(
+            attempts=[StabilizationAttempt(attempt=1, trace=trace)]
+        ),
+    )
+    diagnosis = StabilizationDiagnosis(
+        attempt=1,
+        failed_step_id="s01",
+        failure_type="invalid_request_data",
+        summary="Fuel is not full",
+        suspected_bindings=[
+            {
+                "step_id": "s01",
+                "target": "$.fuelLevelPercent",
+                "problem": "Server requires 100",
+            }
+        ],
+    )
+
+    patch = patch_from_server_hint(state, diagnosis)
+
+    assert patch is not None
+    assert patch.patch_type == "replace_generated_params"
+    assert patch.params == {"min": 100, "max": 100}
 
 
 def test_date_generator_can_return_openapi_date_format() -> None:

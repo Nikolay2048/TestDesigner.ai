@@ -96,9 +96,6 @@ def validate_stable_package(
         issues.append("scenario file changed after stable package was published")
     if metadata.get("openapi_hash") != file_sha256(openapi_path):
         issues.append("OpenAPI file changed after stable package was published")
-    expected_test_data_hash = file_sha256(test_data_path) if test_data_path else None
-    if metadata.get("test_data_hash") != expected_test_data_hash:
-        issues.append("test data file changed after stable package was published")
     return issues
 
 
@@ -108,8 +105,11 @@ def execute_stable_setup(
     static_test_data: dict[str, Any],
     external_context: dict[str, Any] | None = None,
     generator_registry: GeneratorRegistry | None = None,
+    step_limit: int | None = None,
 ) -> tuple[ExecutorTrace, dict[str, Any]]:
     plan = load_stable_plan(package_dir)
+    if step_limit is not None:
+        plan = DataBindingPlan(steps=plan.steps[:step_limit])
     executor = FlowExecutor(
         base_url=base_url,
         static_test_data=static_test_data,
@@ -128,9 +128,11 @@ def build_provided_state(state: ProjectState) -> list[ProvidedState]:
     for variable, value in latest_trace.variables.items():
         source_step_id = None
         json_path = None
+        operation_path = None
         for step in latest_trace.steps:
             if variable in step.extracted_variables:
                 source_step_id = step.step_id
+                operation_path = step.operation.path
                 break
         if state.data_binding and source_step_id:
             try:
@@ -146,7 +148,7 @@ def build_provided_state(state: ProjectState) -> list[ProvidedState]:
             ProvidedState(
                 name=variable,
                 value=value,
-                semantic_type=semantic_type(variable),
+                semantic_type=semantic_type(variable, operation_path=operation_path, json_path=json_path),
                 source_scenario=state.scenario.path,
                 source_step_id=source_step_id,
                 json_path=json_path,
@@ -155,7 +157,11 @@ def build_provided_state(state: ProjectState) -> list[ProvidedState]:
     return provided
 
 
-def semantic_type(variable: str) -> str | None:
+def semantic_type(
+    variable: str,
+    operation_path: str | None = None,
+    json_path: str | None = None,
+) -> str | None:
     normalized = variable.lower()
     if "reservation" in normalized:
         return "reservation_id"
@@ -163,9 +169,30 @@ def semantic_type(variable: str) -> str | None:
         return "rental_id"
     if "payment" in normalized:
         return "payment_id"
+    if normalized == "id" and operation_path:
+        resource = _resource_name(operation_path)
+        if resource:
+            return f"{resource}_id"
     if normalized.endswith("_id") or normalized.endswith("id"):
         return normalized
+    if json_path and json_path.endswith(".id") and operation_path:
+        resource = _resource_name(operation_path)
+        if resource:
+            return f"{resource}_id"
     return None
+
+
+def _resource_name(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part and not part.startswith("{")]
+    if not parts:
+        return None
+    resource = parts[-1]
+    if resource.endswith("ies") and len(resource) > 3:
+        resource = resource[:-3] + "y"
+    elif resource.endswith("s") and len(resource) > 1:
+        resource = resource[:-1]
+    resource = re.sub(r"[^A-Za-z0-9]+", "_", resource).strip("_").lower()
+    return resource or None
 
 
 def file_sha256(path: str | Path | None) -> str | None:

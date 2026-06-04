@@ -52,6 +52,11 @@ class ScenarioDependency(BaseModel):
     required_data: list[str] = Field(default_factory=list)
     reason: str = ""
 
+    @field_validator("required_data", mode="before")
+    @classmethod
+    def empty_required_data_when_null(cls, value):
+        return [] if value is None else value
+
 
 class ScenarioUnderstanding(BaseModel):
     """Structured business understanding extracted from the scenario text."""
