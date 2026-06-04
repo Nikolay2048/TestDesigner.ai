@@ -10,7 +10,7 @@ The demo covers how an agent can analyze natural-language system specs, map step
 2. `specs/02-loyalty-discount.md` - book a consultation with a loyalty discount.
 3. `specs/03-reschedule-appointment.md` - reschedule an existing paid appointment.
 4. `specs/04-complete-visit.md` - complete a visit and issue a medical record.
-5. `specs/05-invalid-booking-rules.md` - exercise business-rule failures for negative test design.
+5. `specs/05-cancel-appointment.md` - cancel an existing paid appointment before the visit.
 
 ## Scenario independence and dependencies
 
@@ -22,7 +22,7 @@ The demo covers how an agent can analyze natural-language system specs, map step
 
 `04-complete-visit` requires a paid or rescheduled appointment created by scenario 1 or 3.
 
-`05-invalid-booking-rules` is intentionally independent and can run after `POST /mock/reset`; it uses seeded services and doctors.
+`05-cancel-appointment` requires a paid active appointment created by scenario 1.
 
 ## Demonstrated system capabilities
 
@@ -34,7 +34,7 @@ Scenario 3 demonstrates dependency on stabilized state, appointment mutation, sl
 
 Scenario 4 demonstrates state-dependent workflow completion and downstream artifact creation.
 
-Scenario 5 demonstrates negative test design from business rules: incompatible doctor/service pairs, age restrictions, expired slots, repeated confirmation, and invalid transitions.
+Scenario 5 demonstrates dependency on an existing paid appointment, cancellation workflow, slot release, and state verification after cancellation.
 
 ## Run the mock server
 
@@ -53,8 +53,7 @@ Useful helper endpoints:
 ## Intentional discrepancies for diagnosis and stabilization
 
 1. `specs/02-loyalty-discount.md` mentions the old loyalty code `CLINIC-OLD-10`; the mock server rejects it and returns a hint with the valid value `CLINIC-TEST-15`.
-2. OpenAPI allows patient age `>= 18`, while the mock server requires `>= 21` for the MRI diagnostics service.
-3. Some specs say "pay the appointment amount", while the server requires the `paymentRequired` value and `paymentToken` returned by reservation confirmation.
-4. `specs/03-reschedule-appointment.md` intentionally omits that the appointment must already be paid; the server returns a stabilization hint if the appointment is not in `PAID` or `RESCHEDULED` status.
-5. `specs/04-complete-visit.md` describes issuing a record after the visit, while the server requires a prior explicit completion call before the record is available.
-
+2. Some specs say "pay the appointment amount", while the server requires the `paymentRequired` value and `paymentToken` returned by reservation confirmation.
+3. `specs/03-reschedule-appointment.md` keeps the paid-state dependency in natural language; the server returns a stabilization hint if the appointment is not in `PAID` or `RESCHEDULED` status.
+4. `specs/04-complete-visit.md` describes issuing a record after the visit, while the server requires a prior explicit completion call before the record is available.
+5. `specs/05-cancel-appointment.md` checks that cancellation releases the appointment slot for future booking.
