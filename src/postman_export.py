@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 import uuid
@@ -51,10 +51,7 @@ class PostmanExporter:
         )
         test_case_items = []
         if state.test_design:
-            test_case_items = [
-                self._test_case_folder(stable_plan, case)
-                for case in state.test_design.test_cases
-            ]
+            test_case_items = self._grouped_test_case_items(stable_plan, state.test_design.test_cases)
         test_cases_collection = self._collection(
             name=f"{state.scenario.title} - Test Cases",
             items=test_case_items,
@@ -63,7 +60,7 @@ class PostmanExporter:
         summary = {
             "happy_path_requests": len(stable_plan.steps),
             "test_cases": len(state.test_design.test_cases) if state.test_design else 0,
-            "test_case_requests": sum(len(item.get("item", [])) for item in test_case_items),
+            "test_case_requests": _count_requests(test_case_items),
             "environment_values": len(environment["values"]),
             "unsupported_features": self.unsupported_features,
             "requires_human_review": self.requires_human_review,
@@ -124,10 +121,40 @@ class PostmanExporter:
         if case.requires_human_review:
             self.requires_human_review.append(f"{case.case_id}: {case.title}")
         return {
-            "name": f"{case.case_id} {case.title}",
+            "name": f"{case.case_id} {case.title} ({case.technique})",
             "description": self._case_description(case),
             "item": items,
         }
+
+    def _grouped_test_case_items(
+        self,
+        stable_plan: DataBindingPlan,
+        cases: list[DesignedTestCase],
+    ) -> list[dict[str, Any]]:
+        deterministic_cases = [case for case in cases if case.technique != "business_rule_violation"]
+        business_cases = [case for case in cases if case.technique == "business_rule_violation"]
+        groups = []
+        if deterministic_cases:
+            groups.append(
+                {
+                    "name": "Deterministic checks",
+                    "description": (
+                        "Checks built from OpenAPI/schema and universal test-design techniques."
+                    ),
+                    "item": [self._test_case_folder(stable_plan, case) for case in deterministic_cases],
+                }
+            )
+        if business_cases:
+            groups.append(
+                {
+                    "name": "LLM business checks",
+                    "description": (
+                        "Checks proposed by the LLM from business rules and validated by deterministic code."
+                    ),
+                    "item": [self._test_case_folder(stable_plan, case) for case in business_cases],
+                }
+            )
+        return groups
 
     def _request_item(
         self,
@@ -321,6 +348,17 @@ def _scenario_generated_bindings(plan: DataBindingPlan) -> dict[str, RequestValu
     return bindings
 
 
+def _count_requests(items: list[dict[str, Any]]) -> int:
+    count = 0
+    for item in items:
+        children = item.get("item")
+        if children:
+            count += _count_requests(children)
+        elif "request" in item:
+            count += 1
+    return count
+
+
 def _accepted_statuses_for_case(
     case: DesignedTestCase,
     step_id: str,
@@ -468,3 +506,4 @@ def _json_path_parts(path: str) -> list[str | int]:
         elif raw:
             parts.append(raw)
     return parts
+

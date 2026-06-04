@@ -34,14 +34,14 @@ class TestDesignerAgent:
             )
 
         state.test_design = build_test_design(state)
-        business_prompt = _build_business_attack_prompt(state)
-        business_notes = _add_business_attacks_with_llm(state, self.llm, business_prompt)
+        business_prompts = _build_business_attack_prompts(state)
+        business_notes = _add_business_attacks_with_llm(state, self.llm, business_prompts)
         prompt = _build_refinement_prompt(state)
         notes = _refine_with_llm(state.test_design, self.llm, prompt)
         return state, AgentRun(
             agent_name=self.name,
             status="completed",
-            prompt=[*business_prompt, *prompt],
+            prompt=[message for business_prompt in business_prompts for message in business_prompt] + prompt,
             output=state.test_design.model_dump(mode="json"),
             notes=[
                 f"Fields analyzed: {len(state.test_design.basis.fields)}.",
@@ -53,11 +53,11 @@ class TestDesignerAgent:
         )
 
 
-def _build_business_attack_prompt(state: ProjectState) -> list[AgentMessage]:
+def _build_business_attack_prompts(state: ProjectState) -> list[list[AgentMessage]]:
     if not state.test_design:
         return []
     rules = [
-        rule.model_dump(mode="json")
+        rule
         for rule in state.test_design.basis.rules
         if rule.text
     ][:8]
@@ -72,6 +72,8 @@ def _build_business_attack_prompt(state: ProjectState) -> list[AgentMessage]:
                     "target": binding.target,
                     "location": binding.location,
                     "source": binding.source,
+                    "type": _field_type(state, f"s{index:02d}", binding.target),
+                    "happy_value": _field_happy_value(state, f"s{index:02d}", binding.target),
                 }
                 for binding in step.request_bindings
             ]
@@ -84,23 +86,30 @@ def _build_business_attack_prompt(state: ProjectState) -> list[AgentMessage]:
                 }
             )
 
-    return [
-        AgentMessage(
-            role="system",
-            content=(
-                "You propose business-rule test attacks for a stable REST happy path. "
-                "Be creative about business intent, but return only attacks that can be mapped to the allowed mutation types. "
-                "Return strict JSON only."
-            ),
-        ),
-        AgentMessage(
-            role="user",
-            content=f"""
-Business rules:
-{json.dumps(rules, ensure_ascii=False, indent=2)}
+    prompts = []
+    for rule in rules:
+        related_fields = _related_or_all_fields(state, rule.rule_id)
+        prompts.append(
+            [
+                AgentMessage(
+                    role="system",
+                    content=(
+                        "You propose business-rule test attacks for a stable REST happy path. "
+                        "Be creative about business intent, but return only attacks that can be mapped to the allowed mutation types. "
+                        "Return strict JSON only."
+                    ),
+                ),
+                AgentMessage(
+                    role="user",
+                    content=f"""
+Business rule:
+{json.dumps(rule.model_dump(mode="json"), ensure_ascii=False, indent=2)}
 
 Stable REST steps:
 {json.dumps(steps, ensure_ascii=False, indent=2)}
+
+Candidate fields with happy values:
+{json.dumps(related_fields, ensure_ascii=False, indent=2)}
 
 Allowed mutation_type values:
 - set_field_value: change an existing request field value.
@@ -138,42 +147,119 @@ Return JSON with this shape:
 Rules:
 - Use only step_id and target values present in Stable REST steps.
 - Use JSON values with the correct type: numbers as numbers, booleans as booleans, not strings.
+- Generate 2-4 distinct attacks for this one business rule when possible.
 - For replace_binding_value use generator="uuid" unless another listed generator is clearly better.
 - For repeat_step use repeat_count >= 2.
 - Use skip_setup_step only for skipping state-changing setup operations such as create/confirm/start/pay.
 - Do not use skip_setup_step to skip lookup/search/list operations; use set_field_value or replace_binding_value instead.
 - If the rule is about two existing values being different, mutate one of those request fields directly.
-- Prefer 1-3 high-value business attacks total.
+- Prefer business-value and business-state attacks over schema-only checks.
 - Do not create schema-validation duplicates when a business-state attack is possible.
 """.strip(),
-        ),
-    ]
+                ),
+            ]
+        )
+    return prompts
 
 
 def _add_business_attacks_with_llm(
     state: ProjectState,
     llm: LLM,
-    prompt: list[AgentMessage],
+    prompts: list[list[AgentMessage]],
 ) -> list[str]:
-    if not prompt or not state.test_design:
+    if not prompts or not state.test_design:
         return ["Business-rule attack generation skipped: no business rules found."]
-    try:
-        raw = llm.complete(prompt)
-    except RuntimeError as exc:
-        return [f"Business-rule attack generation skipped: {exc}"]
 
-    try:
-        parsed = extract_json(raw)
-        result = BusinessRuleAttackResult.model_validate(parsed)
-    except (ValueError, ValidationError) as exc:
-        state.test_design.risks.append(f"LLM business-rule attacks ignored: {exc}")
-        return ["Business-rule attack generation ignored because output did not match schema."]
+    total_proposed = 0
+    total_added = 0
+    notes = []
+    for index, prompt in enumerate(prompts, start=1):
+        try:
+            raw = llm.complete(prompt)
+        except RuntimeError as exc:
+            if index == 1:
+                return [f"Business-rule attack generation skipped: {exc}"]
+            notes.append(f"Business-rule attack batch {index} skipped: {exc}")
+            continue
 
-    state.test_design.risks.extend(result.risks)
-    notes = append_business_rule_attack_ideas(state.test_design, result.ideas, state)
+        try:
+            parsed = extract_json(raw)
+            result = BusinessRuleAttackResult.model_validate(parsed)
+        except (ValueError, ValidationError) as exc:
+            state.test_design.risks.append(f"LLM business-rule attack batch {index} ignored: {exc}")
+            notes.append(f"Business-rule attack batch {index} ignored because output did not match schema.")
+            continue
+
+        total_proposed += len(result.ideas)
+        state.test_design.risks.extend(result.risks)
+        before = len(state.test_design.ideas)
+        batch_notes = append_business_rule_attack_ideas(state.test_design, result.ideas, state)
+        after = len(state.test_design.ideas)
+        total_added += max(0, after - before)
+        notes.extend(note for note in batch_notes if not note.startswith("Business-rule executable attacks accepted:"))
     return [
-        f"LLM business-rule attacks proposed: {len(result.ideas)}.",
+        f"LLM business-rule attack batches: {len(prompts)}.",
+        f"LLM business-rule attacks proposed: {total_proposed}.",
+        f"Business-rule executable attacks added after deduplication: {total_added}.",
         *notes,
+    ]
+
+
+def _field_type(state: ProjectState, step_id: str, target: str) -> str:
+    if not state.test_design:
+        return "unknown"
+    field = next(
+        (
+            item
+            for item in state.test_design.basis.fields
+            if item.step_id == step_id and item.target == target
+        ),
+        None,
+    )
+    return field.type if field else "unknown"
+
+
+def _field_happy_value(state: ProjectState, step_id: str, target: str):
+    if not state.test_design:
+        return None
+    field = next(
+        (
+            item
+            for item in state.test_design.basis.fields
+            if item.step_id == step_id and item.target == target
+        ),
+        None,
+    )
+    return field.happy_value if field else None
+
+
+def _related_or_all_fields(state: ProjectState, rule_id: str) -> list[dict]:
+    if not state.test_design:
+        return []
+    rule = next((item for item in state.test_design.basis.rules if item.rule_id == rule_id), None)
+    related_keys = {
+        (step_id, target)
+        for step_id in (rule.related_step_ids if rule else [])
+        for target in (rule.related_targets if rule else [])
+    }
+    fields = [
+        field
+        for field in state.test_design.basis.fields
+        if not related_keys or (field.step_id, field.target) in related_keys
+    ]
+    return [
+        {
+            "step_id": field.step_id,
+            "business_step": field.business_step,
+            "operation": field.operation.model_dump(mode="json"),
+            "target": field.target,
+            "location": field.location,
+            "type": field.type,
+            "required": field.required,
+            "happy_value": field.happy_value,
+            "binding_source": field.binding_source,
+        }
+        for field in fields[:30]
     ]
 
 

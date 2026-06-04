@@ -394,6 +394,7 @@ def _rules_from_understanding(state: ProjectState, fields: list[TestDesignField]
     if not state.understanding:
         return []
     texts = [
+        *state.understanding.preconditions,
         *state.understanding.business_rules,
         *state.understanding.success_criteria,
         *state.understanding.negative_conditions,
@@ -563,6 +564,8 @@ def _business_attack_to_idea(
         if not replacement:
             return None
     elif action == "replace_static_data":
+        if not attack.static_key or attack.static_key not in state.static_test_data:
+            return None
         replacement = _replacement_binding_for_attack(attack, target, default_source="static")
         if not replacement:
             return None
@@ -628,17 +631,6 @@ def _replacement_binding_for_attack(
             requires_human_review=True,
             reason=attack.rationale,
         )
-    if attack.static_key:
-        return RequestValueBinding(
-            target=target,
-            location="body",
-            source="static",
-            static_key=attack.static_key,
-            scope="step",
-            policy="business_rule_attack_static_replacement",
-            requires_human_review=True,
-            reason=attack.rationale,
-        )
     generator = attack.generator or "uuid"
     return RequestValueBinding(
         target=target,
@@ -655,7 +647,7 @@ def _replacement_binding_for_attack(
 
 
 def _execution_record_from_trace(case: DesignedTestCase, trace: ExecutorTrace) -> TestCaseExecutionRecord:
-    mutated_trace = _trace_step(trace, case.mutated_step_id)
+    mutated_trace = _mutated_trace_step(case, trace)
     actual_status = mutated_trace.response_status if mutated_trace else None
     status = _case_execution_status(case, trace, actual_status)
     notes = []
@@ -707,6 +699,15 @@ def _case_execution_status(case: DesignedTestCase, trace: ExecutorTrace, actual_
     if trace.status == "passed":
         return "passed"
     return "failed"
+
+
+def _mutated_trace_step(case: DesignedTestCase, trace: ExecutorTrace):
+    expected_steps = _expected_failure_step_ids(case)
+    for step_id in expected_steps:
+        step = _trace_step(trace, step_id)
+        if step:
+            return step
+    return _trace_step(trace, case.mutated_step_id)
 
 
 def _set_literal_binding(binding: RequestValueBinding, value: Any) -> None:

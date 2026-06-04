@@ -1956,13 +1956,51 @@ def test_postman_exporter_builds_test_case_mutation_collection() -> None:
     state.test_design.test_cases = [case]
 
     artifacts = PostmanExporter().export(state, base_url="http://server")
-    folder = artifacts["test_cases_collection"]["item"][0]
+    group = artifacts["test_cases_collection"]["item"][0]
+    folder = group["item"][0]
     raw_body = folder["item"][-1]["request"]["body"]["raw"]
     tests = "\n".join(folder["item"][-1]["event"][1]["script"]["exec"])
 
+    assert group["name"] == "Deterministic checks"
     assert folder["name"].startswith(case.case_id)
+    assert case.technique in folder["name"]
+    assert "Technique:" in folder["description"]
+    assert "Mutation:" in folder["description"]
     assert str(case.mutation.value) in raw_body
     assert "Status matches expected response" in tests
+
+
+def test_postman_exporter_groups_llm_business_checks() -> None:
+    state = _stable_generic_completion_state()
+    state.test_design = build_test_design(state)
+    append_business_rule_attack_ideas(
+        state.test_design,
+        [
+            BusinessRuleAttackIdea(
+                rule_id="BR-001",
+                title="Business condition rejected without oracle",
+                intent="Attack a business condition.",
+                mutation_type="set_field_value",
+                target_step_id="s01",
+                target="$.approved",
+                value=False,
+                expected_behavior="Request should be rejected or require review.",
+                rationale="4xx is useful, but exact business oracle is not formalized.",
+                confidence="medium",
+            )
+        ],
+        state,
+    )
+
+    artifacts = PostmanExporter().export(state, base_url="http://server")
+    groups = artifacts["test_cases_collection"]["item"]
+    business_group = next(item for item in groups if item["name"] == "LLM business checks")
+    business_folder = business_group["item"][0]
+    tests = "\n".join(business_folder["item"][-1]["event"][1]["script"]["exec"])
+
+    assert "business_rule_violation" in business_folder["name"]
+    assert "REVIEW:" in tests
+    assert "Original:" not in tests
 
 
 def test_export_postman_artifacts_writes_files(tmp_path) -> None:
