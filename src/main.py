@@ -25,6 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--llm", choices=["none", "ollama"], default="ollama")
     parser.add_argument("--model", default="qwen3:14b", help="Ollama model name")
     parser.add_argument("--ollama-url", default="http://localhost:11434")
+    parser.add_argument(
+        "--run-test-cases",
+        action="store_true",
+        help="Execute generated test cases after happy-path stabilization and save their traces",
+    )
     return parser
 
 
@@ -42,6 +47,7 @@ def main() -> None:
             base_url=args.base_url,
             max_attempts=args.max_attempts,
             stable_dir=args.stable_dir,
+            run_test_cases=args.run_test_cases,
         )
     else:
         orchestrator = AgenticTestDesignOrchestrator(llm=llm)
@@ -54,6 +60,7 @@ def main() -> None:
             max_attempts=args.max_attempts,
             stable_dir=args.stable_dir,
             publish_stable=True,
+            run_test_cases=args.run_test_cases,
         )
 
     last_run = state.agent_runs[-1] if state.agent_runs else None
@@ -75,6 +82,10 @@ def main() -> None:
     if state.stabilization:
         print(f"Happy path: {state.stabilization.status}")
         print(f"Attempts:   {len(state.stabilization.attempts)}")
+    if state.test_design:
+        print(f"Test cases: {len(state.test_design.test_cases)}")
+        if state.test_design.executions:
+            print(f"TC runs:    {len(state.test_design.executions)}")
     if last_run:
         print(f"Last agent: {last_run.agent_name} -> {last_run.status}")
         if last_run.status == "needs_llm":

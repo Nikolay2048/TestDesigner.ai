@@ -10,6 +10,7 @@ from agents import (
     GenerationBindingAgent,
     StabilizationDiagnosticianAgent,
     StabilizationFixerAgent,
+    TestDesignerAgent,
 )
 from data_dependencies import (
     assemble_data_binding_plan,
@@ -38,6 +39,7 @@ from openapi import load_openapi_operations
 from patches import apply_binding_patch
 from stable import build_provided_state, publish_stable_package
 from stabilization_rules import patch_from_server_hint
+from test_design import execute_test_cases
 from validators import validate_data_binding, validate_endpoint_mapping
 
 
@@ -48,6 +50,7 @@ class AgenticTestDesignOrchestrator:
         self.generator_registry = GeneratorRegistry()
         self.documentation_analyst = DocumentationAnalystAgent(llm)
         self.endpoint_mapper = EndpointMapperAgent(llm)
+        self.test_designer = TestDesignerAgent(llm)
         self.llm = llm
 
     def run(
@@ -63,6 +66,7 @@ class AgenticTestDesignOrchestrator:
         stable_dir: str | Path | None = None,
         publish_stable: bool = True,
         reset_log: bool = True,
+        run_test_cases: bool = False,
     ) -> ProjectState:
         state = ProjectState(
             scenario=load_scenario(scenario_path),
@@ -220,6 +224,37 @@ class AgenticTestDesignOrchestrator:
             max_attempts,
             external_context_factory=external_context_factory,
         )
+        if state.stabilization and state.stabilization.status == "passed":
+            store.log_event("Stage started", stage="test_designer")
+            state, run = self.test_designer.run(state)
+            state.agent_runs.append(run)
+            store.save_agent_run(run, "test_design/test_designer")
+            if state.test_design:
+                if run_test_cases and state.stabilization and state.stabilization.stable_plan:
+                    store.log_event(
+                        "Test case execution started",
+                        cases=len(state.test_design.test_cases),
+                    )
+                    state.test_design.executions = execute_test_cases(
+                        state.test_design,
+                        state.stabilization.stable_plan,
+                        base_url=base_url,
+                        static_test_data=state.static_test_data,
+                        external_context=state.external_context,
+                        external_context_factory=external_context_factory,
+                        generator_registry=self.generator_registry,
+                    )
+                    store.log_event(
+                        "Test case execution finished",
+                        passed=sum(1 for item in state.test_design.executions if item.status == "passed"),
+                        failed=sum(1 for item in state.test_design.executions if item.status == "failed"),
+                        review=sum(1 for item in state.test_design.executions if item.status == "review_required"),
+                    )
+                store.save_json("test_design/test_basis.json", state.test_design.basis.model_dump(mode="json"))
+                store.save_json("test_design/test_ideas.json", [item.model_dump(mode="json") for item in state.test_design.ideas])
+                store.save_json("test_design/test_cases.json", [item.model_dump(mode="json") for item in state.test_design.test_cases])
+                store.save_json("test_design/test_case_executions.json", [item.model_dump(mode="json") for item in state.test_design.executions])
+            store.log_event("Stage finished", stage="test_designer", status=run.status)
         self._save_scenario_output(state, store)
         if publish_stable and stable_dir:
             package_dir = publish_stable_package(

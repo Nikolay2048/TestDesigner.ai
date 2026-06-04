@@ -8,6 +8,7 @@ from agents.documentation_analyst import DocumentationAnalystAgent
 from agents.endpoint_mapper import EndpointMapperAgent
 from agents.generation_binding import GenerationBindingAgent
 from agents.stabilization_fixer import StabilizationFixerAgent
+from agents.test_designer import TestDesignerAgent
 from data_dependencies import (
     assemble_data_binding_plan,
     build_dependency_graph,
@@ -60,6 +61,7 @@ from scenario_dependencies import (
     _stable_setup_step_limit,
 )
 from stabilization_rules import patch_from_server_hint
+from test_design import build_case_execution_plan, build_test_basis, build_test_design, execute_test_cases
 from stable import publish_stable_package, stable_package_dir, validate_stable_package
 from validators import validate_data_binding, validate_endpoint_mapping
 
@@ -1490,6 +1492,229 @@ def test_server_hint_patch_replaces_generated_random_int_params() -> None:
     assert patch is not None
     assert patch.patch_type == "replace_generated_params"
     assert patch.params == {"min": 100, "max": 100}
+
+
+def test_test_basis_uses_stable_happy_path_and_openapi_schema() -> None:
+    state = _stable_generic_completion_state()
+
+    basis = build_test_basis(state)
+
+    percent_field = next(item for item in basis.fields if item.target == "$.progressPercent")
+    approval_field = next(item for item in basis.fields if item.target == "$.approved")
+    assert percent_field.happy_value == 100
+    assert "boundary_value_analysis" in percent_field.techniques
+    assert approval_field.happy_value is True
+    assert "decision_table" in approval_field.techniques
+
+
+def test_test_designer_generates_reviewable_cases_from_stable_path() -> None:
+    state = _stable_generic_completion_state()
+
+    state, run = TestDesignerAgent().run(state)
+
+    assert run.status == "completed"
+    assert state.test_design is not None
+    assert state.test_design.test_cases
+    assert any(case.technique == "boundary_value_analysis" for case in state.test_design.test_cases)
+    assert any(case.mutation.action == "omit_field" for case in state.test_design.test_cases)
+    first_case = state.test_design.test_cases[0]
+    assert first_case.preconditions
+    assert first_case.steps
+    assert first_case.expected_result
+    assert first_case.tags
+    assert state.test_design.executions[0].status == "not_run"
+    assert state.test_design.executions[0].mode == "planned"
+
+
+def test_test_designer_llm_refines_wording_without_changing_mutation() -> None:
+    class FakeLLM:
+        def complete(self, messages):
+            return json.dumps(
+                {
+                    "refinements": [
+                        {
+                            "idea_id": "TI-001",
+                            "title": "TMS refined title",
+                            "reason": "Refined rationale",
+                            "expected_description": "Refined expected result",
+                            "requires_human_review": True,
+                        }
+                    ],
+                    "risks": [],
+                }
+            )
+
+    state = _stable_generic_completion_state()
+    state, run = TestDesignerAgent(FakeLLM()).run(state)
+
+    assert run.status == "completed"
+    assert state.test_design.ideas[0].title == "TMS refined title"
+    assert state.test_design.test_cases[0].title == "TMS refined title"
+    assert state.test_design.test_cases[0].mutation.target == "$.attemptCount"
+    assert state.test_design.test_cases[0].expected.description == "Refined expected result"
+
+
+def test_test_designer_does_not_use_conflict_status_for_validation_case() -> None:
+    state = _stable_generic_completion_state()
+    state.operations[0].response_statuses = ["200", "409"]
+
+    result = build_test_design(state)
+
+    omitted = next(case for case in result.test_cases if case.mutation.action == "omit_field")
+    assert omitted.expected.status is None
+    assert omitted.expected.source == "human_review"
+
+
+def test_case_execution_plan_applies_literal_mutation() -> None:
+    state = _stable_generic_completion_state()
+    result = build_test_design(state)
+    case = next(item for item in result.test_cases if item.mutation.action == "set_value")
+
+    plan = build_case_execution_plan(state.stabilization.stable_plan, case)
+    mutated_step = plan.steps[int(case.mutated_step_id.removeprefix("s")) - 1]
+    binding = next(item for item in mutated_step.request_bindings if item.target == case.mutation.target)
+
+    assert binding.source == "literal"
+    assert binding.literal == case.mutation.value
+
+
+def test_case_execution_plan_omits_binding() -> None:
+    state = _stable_generic_completion_state()
+    result = build_test_design(state)
+    case = next(item for item in result.test_cases if item.mutation.action == "omit_field")
+
+    plan = build_case_execution_plan(state.stabilization.stable_plan, case)
+    mutated_step = plan.steps[int(case.mutated_step_id.removeprefix("s")) - 1]
+
+    assert all(item.target != case.mutation.target for item in mutated_step.request_bindings)
+
+
+def test_execute_test_cases_marks_expected_negative_status_as_passed(monkeypatch) -> None:
+    state = _stable_generic_completion_state()
+    result = build_test_design(state)
+    case = next(
+        item
+        for item in result.test_cases
+        if item.expected.status == 400 and not item.mutation.target.startswith("$.path.")
+    )
+    result.test_cases = [case]
+
+    class Response:
+        status_code = 400
+
+        def json(self):
+            return {"code": "VALIDATION_ERROR"}
+
+    monkeypatch.setattr("executor.httpx.request", lambda *args, **kwargs: Response())
+
+    records = execute_test_cases(
+        result,
+        state.stabilization.stable_plan,
+        base_url="http://server",
+        static_test_data={},
+        external_context={"task_id": "TASK-1"},
+    )
+
+    assert records[0].status == "passed"
+    assert records[0].actual_status == 400
+    assert records[0].trace is not None
+
+
+def _stable_generic_completion_state() -> ProjectState:
+    operation = ApiOperation(
+        method="POST",
+        path="/tasks/{taskId}/complete",
+        operation_id="completeTask",
+        request_schema={
+            "type": "object",
+            "required": ["attemptCount", "progressPercent", "approved"],
+            "properties": {
+                "attemptCount": {"type": "integer", "minimum": 0},
+                "progressPercent": {"type": "integer", "minimum": 0, "maximum": 100},
+                "approved": {"type": "boolean"},
+            },
+        },
+        response_statuses=["200", "400"],
+    )
+    plan = DataBindingPlan(
+        steps=[
+            StepDataBinding(
+                business_step="Complete task",
+                operation=OperationRef(method="POST", path="/tasks/{taskId}/complete"),
+                request_bindings=[
+                    RequestValueBinding(
+                        target="$.path.taskId",
+                        location="path",
+                        source="external_context",
+                        variable="task_id",
+                    ),
+                    RequestValueBinding(
+                        target="$.attemptCount",
+                        location="body",
+                        source="generated",
+                        variable="attempt_count",
+                        generator="random_int",
+                        params={"min": 1, "max": 1},
+                    ),
+                    RequestValueBinding(
+                        target="$.progressPercent",
+                        location="body",
+                        source="generated",
+                        variable="progress_percent",
+                        generator="random_int",
+                        params={"min": 100, "max": 100},
+                    ),
+                    RequestValueBinding(
+                        target="$.approved",
+                        location="body",
+                        source="generated",
+                        variable="approved",
+                        generator="enum_value",
+                        params={"values": [True]},
+                    ),
+                ],
+            )
+        ]
+    )
+    trace = ExecutorTrace(
+        attempt=1,
+        base_url="http://server",
+        status="passed",
+        steps=[
+            ExecutorStepTrace(
+                step_id="s01",
+                business_step="Complete task",
+                operation=OperationRef(method="POST", path="/tasks/{taskId}/complete"),
+                resolved_path="/tasks/TASK-1/complete",
+                request={
+                    "method": "POST",
+                    "path": "/tasks/TASK-1/complete",
+                    "body": {
+                        "attemptCount": 1,
+                        "progressPercent": 100,
+                        "approved": True,
+                    },
+                },
+                response_status=200,
+                response_body={"resultId": "RESULT-1"},
+                status="passed",
+            )
+        ],
+    )
+    return ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Scenario", text=""),
+        operations=[operation],
+        data_binding=plan,
+        understanding=ScenarioUnderstanding(
+            title="Scenario",
+            business_rules=["Completion requires full progress and explicit approval."],
+        ),
+        stabilization=StabilizationResult(
+            status="passed",
+            attempts=[StabilizationAttempt(attempt=1, trace=trace)],
+            stable_plan=plan,
+        ),
+    )
 
 
 def test_date_generator_can_return_openapi_date_format() -> None:

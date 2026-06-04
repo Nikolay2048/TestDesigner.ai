@@ -308,6 +308,115 @@ class ScenarioRunOutput(BaseModel):
     stable_plan: DataBindingPlan | None = None
 
 
+class TestDesignField(BaseModel):
+    step_id: str
+    business_step: str
+    operation: OperationRef
+    target: str
+    location: Literal["path", "query", "header", "body"]
+    type: str = "unknown"
+    required: bool = True
+    field_schema: dict[str, Any] = Field(default_factory=dict)
+    happy_value: Any = None
+    binding_source: str = ""
+    techniques: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+
+
+class TestDesignRule(BaseModel):
+    rule_id: str
+    text: str
+    related_step_ids: list[str] = Field(default_factory=list)
+    related_targets: list[str] = Field(default_factory=list)
+    techniques: list[str] = Field(default_factory=list)
+    requires_human_review: bool = False
+
+
+class TestBasis(BaseModel):
+    fields: list[TestDesignField] = Field(default_factory=list)
+    rules: list[TestDesignRule] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+
+
+class TestMutation(BaseModel):
+    step_id: str
+    target: str
+    action: Literal["set_value", "omit_field"]
+    value: Any = None
+
+
+class TestExpectation(BaseModel):
+    status: int | None = None
+    accepted_statuses: list[int] = Field(default_factory=list)
+    error_code: str | None = None
+    description: str = ""
+    source: Literal["openapi", "trace", "inferred", "human_review"] = "inferred"
+
+
+class TestIdea(BaseModel):
+    idea_id: str
+    title: str
+    type: Literal["positive", "negative"] = "negative"
+    technique: str
+    source: str
+    mutation: TestMutation
+    expected: TestExpectation
+    requires_human_review: bool = True
+    reason: str = ""
+
+
+class TestIdeaRefinement(BaseModel):
+    idea_id: str
+    title: str | None = None
+    reason: str | None = None
+    expected_description: str | None = None
+    requires_human_review: bool | None = None
+
+
+class TestIdeaRefinementResult(BaseModel):
+    refinements: list[TestIdeaRefinement] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+
+
+class DesignedTestCase(BaseModel):
+    case_id: str
+    title: str
+    type: Literal["positive", "negative"] = "negative"
+    technique: str
+    priority: Literal["high", "medium", "low"] = "medium"
+    preconditions: list[str] = Field(default_factory=list)
+    steps: list[str] = Field(default_factory=list)
+    expected_result: list[str] = Field(default_factory=list)
+    setup_until_step: str | None = None
+    mutated_step_id: str
+    mutation: TestMutation
+    expected: TestExpectation
+    traceability: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    requires_human_review: bool = True
+
+
+class TestCaseExecutionRecord(BaseModel):
+    case_id: str
+    status: Literal["not_run", "passed", "failed", "review_required", "blocked", "contract_mismatch"] = "not_run"
+    mode: Literal["planned", "http"] = "planned"
+    setup_until_step: str | None = None
+    mutated_step_id: str
+    expected_status: int | None = None
+    accepted_statuses: list[int] = Field(default_factory=list)
+    actual_status: int | None = None
+    trace: ExecutorTrace | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class TestDesignResult(BaseModel):
+    basis: TestBasis
+    ideas: list[TestIdea] = Field(default_factory=list)
+    test_cases: list[DesignedTestCase] = Field(default_factory=list)
+    executions: list[TestCaseExecutionRecord] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+
+
 class DataNeed(BaseModel):
     step_id: str
     target: str
@@ -429,5 +538,6 @@ class ProjectState(BaseModel):
     generation_bindings: GenerationBindingResult | None = None
     data_binding: DataBindingPlan | None = None
     stabilization: StabilizationResult | None = None
+    test_design: TestDesignResult | None = None
     flow: FlowDraft | None = None
     agent_runs: list[AgentRun] = Field(default_factory=list)

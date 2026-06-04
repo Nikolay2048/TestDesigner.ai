@@ -37,6 +37,7 @@ class ScenarioDependencyRunner:
         base_url: str = "http://localhost:8000",
         max_attempts: int = 7,
         stable_dir: str | Path = "runs/stable",
+        run_test_cases: bool = False,
     ) -> ProjectState:
         store = ArtifactStore(out_dir)
         store.reset_log()
@@ -75,6 +76,7 @@ class ScenarioDependencyRunner:
                 stable_dir=stable_dir,
                 publish_stable=True,
                 reset_log=False,
+                run_test_cases=run_test_cases,
             )
 
         dependency_specs = []
@@ -158,6 +160,7 @@ class ScenarioDependencyRunner:
             stable_dir=stable_dir,
             publish_stable=True,
             reset_log=False,
+            run_test_cases=run_test_cases,
         )
 
 
