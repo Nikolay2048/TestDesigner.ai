@@ -1,0 +1,628 @@
+openapi: 3.0.3
+info:
+  title: Clinic Booking Mock API
+  version: 1.0.0
+  description: REST API for online clinic appointment booking demo.
+servers:
+  - url: http://localhost:8080
+paths:
+  /auth/login:
+    post:
+      summary: Authenticate tester account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+  /branches:
+    get:
+      summary: List clinic branches
+      parameters:
+        - name: city
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Branches
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Branch'
+  /services:
+    get:
+      summary: List services
+      parameters:
+        - name: branchId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Services
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Service'
+        '404':
+          $ref: '#/components/responses/Error'
+  /doctors:
+    get:
+      summary: List doctors
+      parameters:
+        - name: serviceId
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: branchId
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Doctors
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Doctor'
+  /slots:
+    get:
+      summary: Search available appointment slots
+      parameters:
+        - name: branchId
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: serviceId
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: date
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Slots
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Slot'
+        '404':
+          $ref: '#/components/responses/Error'
+  /reservations:
+    post:
+      summary: Create temporary slot reservation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateReservationRequest'
+      responses:
+        '201':
+          description: Reservation created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reservation'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+  /reservations/{reservationId}:
+    get:
+      summary: Get reservation
+      parameters:
+        - $ref: '#/components/parameters/ReservationId'
+      responses:
+        '200':
+          description: Reservation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reservation'
+        '404':
+          $ref: '#/components/responses/Error'
+  /reservations/{reservationId}/confirm:
+    post:
+      summary: Confirm reservation before payment
+      parameters:
+        - $ref: '#/components/parameters/ReservationId'
+      responses:
+        '200':
+          description: Confirmed reservation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reservation'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+  /payments:
+    post:
+      summary: Pay confirmed reservation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePaymentRequest'
+      responses:
+        '201':
+          description: Payment accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+  /appointments:
+    post:
+      summary: Create final appointment from paid reservation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAppointmentRequest'
+      responses:
+        '201':
+          description: Appointment created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Appointment'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+  /appointments/{appointmentId}:
+    get:
+      summary: Get appointment
+      parameters:
+        - $ref: '#/components/parameters/AppointmentId'
+      responses:
+        '200':
+          description: Appointment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Appointment'
+        '404':
+          $ref: '#/components/responses/Error'
+  /appointments/{appointmentId}/reschedule:
+    patch:
+      summary: Move appointment to another slot
+      parameters:
+        - $ref: '#/components/parameters/AppointmentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RescheduleAppointmentRequest'
+      responses:
+        '200':
+          description: Rescheduled appointment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Appointment'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+  /appointments/{appointmentId}/cancel:
+    post:
+      summary: Cancel appointment
+      parameters:
+        - $ref: '#/components/parameters/AppointmentId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelAppointmentRequest'
+      responses:
+        '200':
+          description: Cancelled appointment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Appointment'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+  /appointments/{appointmentId}/complete:
+    post:
+      summary: Complete appointment and issue medical record
+      parameters:
+        - $ref: '#/components/parameters/AppointmentId'
+      responses:
+        '200':
+          description: Completed appointment with record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompletionResponse'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+  /appointments/{appointmentId}/record:
+    get:
+      summary: Get medical record for appointment
+      parameters:
+        - $ref: '#/components/parameters/AppointmentId'
+      responses:
+        '200':
+          description: Medical record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MedicalRecord'
+        '404':
+          $ref: '#/components/responses/Error'
+  /mock/reset:
+    post:
+      summary: Reset mock state
+      responses:
+        '200':
+          description: Reset result
+  /mock/state:
+    get:
+      summary: Inspect mock state
+      responses:
+        '200':
+          description: Current state
+  /mock/seed-ids:
+    get:
+      summary: Inspect seed identifiers
+      responses:
+        '200':
+          description: Seed ids
+components:
+  parameters:
+    ReservationId:
+      name: reservationId
+      in: path
+      required: true
+      schema:
+        type: string
+    AppointmentId:
+      name: appointmentId
+      in: path
+      required: true
+      schema:
+        type: string
+  responses:
+    Error:
+      description: Structured business error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+  schemas:
+    LoginRequest:
+      type: object
+      required: [login, password]
+      properties:
+        login:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+    LoginResponse:
+      type: object
+      required: [accessToken, tokenType, expiresIn]
+      properties:
+        accessToken:
+          type: string
+        tokenType:
+          type: string
+          enum: [Bearer]
+        expiresIn:
+          type: integer
+          minimum: 1
+    Branch:
+      type: object
+      required: [branchId, code, city, name]
+      properties:
+        branchId:
+          type: string
+        code:
+          type: string
+        city:
+          type: string
+        name:
+          type: string
+    Service:
+      type: object
+      required: [serviceId, name, category, basePrice, minAge]
+      properties:
+        serviceId:
+          type: string
+        name:
+          type: string
+        category:
+          type: string
+          enum: [consultation, diagnostics]
+        basePrice:
+          type: integer
+          minimum: 500
+          maximum: 50000
+        minAge:
+          type: integer
+          minimum: 18
+    Doctor:
+      type: object
+      required: [doctorId, fullName, branchId, serviceIds]
+      properties:
+        doctorId:
+          type: string
+        fullName:
+          type: string
+        branchId:
+          type: string
+        serviceIds:
+          type: array
+          items:
+            type: string
+    Slot:
+      type: object
+      required: [slotId, branchId, doctorId, serviceId, startsAt, available]
+      properties:
+        slotId:
+          type: string
+        branchId:
+          type: string
+        doctorId:
+          type: string
+        serviceId:
+          type: string
+        startsAt:
+          type: string
+          format: date-time
+        available:
+          type: boolean
+    Patient:
+      type: object
+      required: [firstName, lastName, birthDate, email, phone]
+      properties:
+        firstName:
+          type: string
+          minLength: 1
+        lastName:
+          type: string
+          minLength: 1
+        birthDate:
+          type: string
+          format: date
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+          pattern: '^\\+7\\d{10}$'
+    CreateReservationRequest:
+      type: object
+      required: [branchId, serviceId, slotId, patient]
+      properties:
+        branchId:
+          type: string
+        serviceId:
+          type: string
+        slotId:
+          type: string
+        patient:
+          $ref: '#/components/schemas/Patient'
+        loyaltyProgramNumber:
+          type: string
+        promoCode:
+          type: string
+    Reservation:
+      type: object
+      required: [reservationId, branchId, serviceId, slotId, doctorId, patientId, status, amount, discountAmount, paymentRequired]
+      properties:
+        reservationId:
+          type: string
+        branchId:
+          type: string
+        serviceId:
+          type: string
+        slotId:
+          type: string
+        doctorId:
+          type: string
+        patientId:
+          type: string
+        status:
+          type: string
+          enum: [HELD, CONFIRMED, PAID, CANCELLED]
+        amount:
+          type: integer
+        discountAmount:
+          type: integer
+        paymentRequired:
+          type: integer
+        paymentToken:
+          type: string
+          nullable: true
+    CreatePaymentRequest:
+      type: object
+      required: [reservationId, amount, paymentToken, provider]
+      properties:
+        reservationId:
+          type: string
+        amount:
+          type: integer
+          minimum: 1
+        paymentToken:
+          type: string
+        provider:
+          type: string
+        cardToken:
+          type: string
+    Payment:
+      type: object
+      required: [paymentId, reservationId, amount, status, provider]
+      properties:
+        paymentId:
+          type: string
+        reservationId:
+          type: string
+        amount:
+          type: integer
+        status:
+          type: string
+          enum: [CAPTURED, DECLINED]
+        provider:
+          type: string
+    CreateAppointmentRequest:
+      type: object
+      required: [reservationId, paymentId]
+      properties:
+        reservationId:
+          type: string
+        paymentId:
+          type: string
+    Appointment:
+      type: object
+      required: [appointmentId, reservationId, paymentId, branchId, serviceId, slotId, doctorId, patientId, amount, status]
+      properties:
+        appointmentId:
+          type: string
+        reservationId:
+          type: string
+        paymentId:
+          type: string
+        branchId:
+          type: string
+        serviceId:
+          type: string
+        slotId:
+          type: string
+        doctorId:
+          type: string
+        patientId:
+          type: string
+        amount:
+          type: integer
+        discountAmount:
+          type: integer
+        startsAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [PAID, RESCHEDULED, CANCELLED, COMPLETED]
+    RescheduleAppointmentRequest:
+      type: object
+      required: [slotId]
+      properties:
+        slotId:
+          type: string
+    CancelAppointmentRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          maxLength: 200
+    CompletionResponse:
+      type: object
+      required: [appointment, record]
+      properties:
+        appointment:
+          $ref: '#/components/schemas/Appointment'
+        record:
+          $ref: '#/components/schemas/MedicalRecord'
+    MedicalRecord:
+      type: object
+      required: [recordId, appointmentId, doctorId, patientId, diagnosis, issuedAt]
+      properties:
+        recordId:
+          type: string
+        appointmentId:
+          type: string
+        doctorId:
+          type: string
+        patientId:
+          type: string
+        diagnosis:
+          type: string
+        issuedAt:
+          type: string
+          format: date-time
+    ErrorEnvelope:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          $ref: '#/components/schemas/ErrorDetail'
+    ErrorDetail:
+      type: object
+      required: [code, message, hint]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        hint:
+          type: string
+

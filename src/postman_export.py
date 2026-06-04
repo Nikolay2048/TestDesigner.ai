@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from domain import DataBindingPlan, DesignedTestCase, ProjectState, RequestValueBinding, ResponseExtraction
+from domain import DataBindingPlan, DesignedTestCase, ProjectState, RequestValueBinding, ResponseExtraction, TestAssertion
 from generators import GeneratorRegistry
 from io_utils import write_json
 from test_design import build_case_execution_plan
@@ -102,17 +102,17 @@ class PostmanExporter:
     def _test_case_folder(self, stable_plan: DataBindingPlan, case: DesignedTestCase) -> dict[str, Any]:
         try:
             case_plan = build_case_execution_plan(stable_plan, case)
-            expected_failure_steps = _expected_failure_step_ids(case)
             items = []
             for step_id, step in _iter_steps(case_plan):
-                expected_statuses = _accepted_statuses_for_case(case, step_id, expected_failure_steps)
+                assertions = [assertion for assertion in case.assertions if assertion.step_id == step_id]
                 items.append(
                     self._request_item(
                         name=f"{step_id} {step.business_step}",
                         step=step,
-                        expected_statuses=expected_statuses,
-                        review_note=_review_note(case) if expected_statuses else None,
-                        include_extractions=expected_statuses is None,
+                        expected_statuses=None,
+                        review_note=None,
+                        include_extractions=False,
+                        assertions=assertions,
                     )
                 )
         except Exception as exc:
@@ -163,11 +163,16 @@ class PostmanExporter:
         expected_statuses: list[int] | None,
         review_note: str | None,
         include_extractions: bool = True,
+        assertions: list[TestAssertion] | None = None,
     ) -> dict[str, Any]:
         body, query, headers, path = self._request_parts(step)
         pre_request = self._pre_request_script(step.request_bindings)
         extractions = step.response_extractions if include_extractions else []
-        tests = self._test_script(extractions, expected_statuses, review_note)
+        tests = (
+            self._test_script_from_assertions(assertions)
+            if assertions is not None
+            else self._test_script(extractions, expected_statuses, review_note)
+        )
         item = {
             "name": name,
             "request": {
@@ -289,6 +294,47 @@ class PostmanExporter:
                         f"pm.collectionVariables.set('{extraction.variable}', {accessor});",
                     ]
                 )
+        return lines
+
+    def _test_script_from_assertions(self, assertions: list[TestAssertion]) -> list[str]:
+        if not assertions:
+            return ["// No assertions generated for this request."]
+        lines: list[str] = []
+        needs_json = any(assertion.kind.startswith("json_path_") for assertion in assertions)
+        if needs_json:
+            lines.append("const json = pm.response.json();")
+        for assertion in assertions:
+            if assertion.kind == "status_2xx":
+                lines.extend(
+                    [
+                        "pm.test('Status is 2xx', function () {",
+                        "  pm.expect(pm.response.code).to.be.within(200, 299);",
+                        "});",
+                    ]
+                )
+            elif assertion.kind == "status_in":
+                expected = assertion.expected if isinstance(assertion.expected, list) else []
+                lines.extend(
+                    [
+                        "pm.test('Status matches expected response', function () {",
+                        f"  pm.expect({expected}).to.include(pm.response.code);",
+                        "});",
+                    ]
+                )
+            elif assertion.kind == "json_path_exists" and assertion.json_path:
+                accessor = _json_path_accessor("json", assertion.json_path)
+                lines.extend(
+                    [
+                        f"pm.test('{assertion.json_path} exists', function () {{",
+                        f"  pm.expect({accessor}).to.not.equal(undefined);",
+                        "});",
+                    ]
+                )
+            elif assertion.kind == "json_path_type" and assertion.json_path:
+                accessor = _json_path_accessor("json", assertion.json_path)
+                lines.extend(_json_type_assertion_lines(accessor, assertion.expected, assertion.json_path))
+            elif assertion.kind == "manual_review":
+                lines.append(f"// REVIEW: {assertion.description}")
         return lines
 
     def _url(self, path: str, query: dict[str, str]) -> dict[str, Any]:
@@ -492,6 +538,28 @@ def _json_path_accessor(root: str, path: str) -> str:
     return current
 
 
+def _json_type_assertion_lines(accessor: str, expected_type: Any, label: str) -> list[str]:
+    if expected_type == "array":
+        condition = f"Array.isArray({accessor})"
+    elif expected_type == "integer":
+        condition = f"Number.isInteger({accessor})"
+    elif expected_type == "number":
+        condition = f"typeof {accessor} === 'number'"
+    elif expected_type == "boolean":
+        condition = f"typeof {accessor} === 'boolean'"
+    elif expected_type == "object":
+        condition = f"typeof {accessor} === 'object' && !Array.isArray({accessor}) && {accessor} !== null"
+    elif expected_type == "string":
+        condition = f"typeof {accessor} === 'string'"
+    else:
+        return [f"// REVIEW: unsupported OpenAPI type assertion for {label}: {expected_type}"]
+    return [
+        f"pm.test('{label} has type {expected_type}', function () {{",
+        f"  pm.expect({condition}).to.eql(true);",
+        "});",
+    ]
+
+
 def _json_path_parts(path: str) -> list[str | int]:
     parts: list[str | int] = []
     for raw in path.removeprefix("$.").split("."):
@@ -506,4 +574,3 @@ def _json_path_parts(path: str) -> list[str | int]:
         elif raw:
             parts.append(raw)
     return parts
-

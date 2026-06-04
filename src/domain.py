@@ -42,6 +42,31 @@ class EndpointMention(BaseModel):
     related_step: str | None = None
     note: str = ""
 
+    @field_validator("location", mode="before")
+    @classmethod
+    def normalize_location(cls, value):
+        if value is None:
+            return "unknown"
+        normalized = str(value).strip().casefold().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "headers": "header",
+            "top": "header",
+            "intro": "header",
+            "steps": "step",
+            "scenario_step": "step",
+            "business_step": "step",
+            "business_rule": "rule",
+            "rules": "rule",
+            "negative_condition": "rule",
+            "precondition": "unknown",
+            "preconditions": "unknown",
+            "setup": "unknown",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized in {"header", "step", "rule", "unknown"}:
+            return normalized
+        return "unknown"
+
 
 class ScenarioDependency(BaseModel):
     """Precondition that may require another scenario, state, or data setup."""
@@ -420,6 +445,30 @@ class BusinessRuleAttackResult(BaseModel):
     risks: list[str] = Field(default_factory=list)
 
 
+class TestAssertion(BaseModel):
+    assertion_id: str
+    step_id: str
+    source: Literal[
+        "expected_status",
+        "response_extraction",
+        "openapi_response_schema",
+        "negative_mutation",
+        "human_review",
+    ]
+    kind: Literal[
+        "status_2xx",
+        "status_in",
+        "json_path_exists",
+        "json_path_type",
+        "manual_review",
+    ]
+    json_path: str | None = None
+    expected: Any = None
+    description: str = ""
+    confidence: Literal["high", "medium", "low", "none"] = "high"
+    requires_human_review: bool = False
+
+
 class DesignedTestCase(BaseModel):
     case_id: str
     title: str
@@ -433,6 +482,7 @@ class DesignedTestCase(BaseModel):
     mutated_step_id: str
     mutation: TestMutation
     expected: TestExpectation
+    assertions: list[TestAssertion] = Field(default_factory=list)
     traceability: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     requires_human_review: bool = True

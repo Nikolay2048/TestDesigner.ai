@@ -13,6 +13,7 @@ from domain import (
     RequestValueBinding,
     TestBasis,
     TestCaseExecutionRecord,
+    TestAssertion,
     TestDesignField,
     TestDesignResult,
     TestDesignRule,
@@ -29,7 +30,7 @@ def build_test_design(state: ProjectState) -> TestDesignResult:
 
     basis = build_test_basis(state)
     ideas = build_test_ideas(basis, state)
-    cases = assemble_test_cases(ideas)
+    cases = assemble_test_cases(ideas, state)
     executions = plan_test_case_executions(cases)
     risks = list(basis.risks)
     if not ideas:
@@ -56,7 +57,7 @@ def append_business_rule_attack_ideas(
         accepted += 1
 
     test_design.ideas = _dedupe_ideas(test_design.ideas)
-    test_design.test_cases = assemble_test_cases(test_design.ideas)
+    test_design.test_cases = assemble_test_cases(test_design.ideas, state)
     test_design.executions = plan_test_case_executions(test_design.test_cases)
     notes.append(f"Business-rule executable attacks accepted: {accepted}.")
     return notes
@@ -125,29 +126,29 @@ def build_test_ideas(basis: TestBasis, state: ProjectState) -> list[TestIdea]:
     return _dedupe_ideas(ideas)
 
 
-def assemble_test_cases(ideas: list[TestIdea]) -> list[DesignedTestCase]:
+def assemble_test_cases(ideas: list[TestIdea], state: ProjectState | None = None) -> list[DesignedTestCase]:
     cases = []
     for index, idea in enumerate(ideas, start=1):
         setup_until_step = _previous_step_id(idea.mutation.step_id)
-        cases.append(
-            DesignedTestCase(
-                case_id=f"TC-{index:03d}",
-                title=idea.title,
-                type=idea.type,
-                technique=idea.technique,
-                priority=_priority_for_idea(idea),
-                preconditions=_preconditions_for_case(setup_until_step),
-                steps=_steps_for_case(idea, setup_until_step),
-                expected_result=_expected_result_lines(idea.expected),
-                setup_until_step=setup_until_step,
-                mutated_step_id=idea.mutation.step_id,
-                mutation=idea.mutation,
-                expected=idea.expected,
-                traceability=[idea.idea_id, idea.source, idea.mutation.step_id, idea.mutation.target],
-                tags=[idea.technique, idea.type],
-                requires_human_review=idea.requires_human_review,
-            )
+        case = DesignedTestCase(
+            case_id=f"TC-{index:03d}",
+            title=idea.title,
+            type=idea.type,
+            technique=idea.technique,
+            priority=_priority_for_idea(idea),
+            preconditions=_preconditions_for_case(setup_until_step),
+            steps=_steps_for_case(idea, setup_until_step),
+            expected_result=_expected_result_lines(idea.expected),
+            setup_until_step=setup_until_step,
+            mutated_step_id=idea.mutation.step_id,
+            mutation=idea.mutation,
+            expected=idea.expected,
+            traceability=[idea.idea_id, idea.source, idea.mutation.step_id, idea.mutation.target],
+            tags=[idea.technique, idea.type],
+            requires_human_review=idea.requires_human_review,
         )
+        case.assertions = build_test_case_assertions(case, state)
+        cases.append(case)
     return cases
 
 
@@ -165,6 +166,48 @@ def plan_test_case_executions(cases: list[DesignedTestCase]) -> list[TestCaseExe
         )
         for case in cases
     ]
+
+
+def build_test_case_assertions(case: DesignedTestCase, state: ProjectState | None) -> list[TestAssertion]:
+    if not state or not state.stabilization or not state.stabilization.stable_plan:
+        return _mutated_step_assertions(case)
+
+    try:
+        case_plan = build_case_execution_plan(state.stabilization.stable_plan, case)
+    except Exception:
+        return _mutated_step_assertions(case)
+
+    operation_by_key = {(item.method.upper(), item.path): item for item in state.operations}
+    expected_failure_steps = _expected_failure_step_ids(case)
+    assertions: list[TestAssertion] = []
+    for step_id, step in _iter_plan_steps(case_plan):
+        if step_id in expected_failure_steps:
+            assertions.extend(_mutated_step_assertions(case, step_id=step_id))
+            continue
+        assertions.append(
+            TestAssertion(
+                assertion_id=_assertion_id(len(assertions) + 1),
+                step_id=step_id,
+                source="expected_status",
+                kind="status_2xx",
+                description="Setup step must complete successfully.",
+            )
+        )
+        for extraction in step.response_extractions:
+            assertions.append(
+                TestAssertion(
+                    assertion_id=_assertion_id(len(assertions) + 1),
+                    step_id=step_id,
+                    source="response_extraction",
+                    kind="json_path_exists",
+                    json_path=extraction.json_path,
+                    description=f"Response value for variable {extraction.variable} must exist.",
+                )
+            )
+        operation = operation_by_key.get((step.operation.method.upper(), step.operation.path))
+        if operation:
+            assertions.extend(_openapi_response_assertions(operation, step_id, len(assertions) + 1))
+    return _dedupe_assertions(assertions)
 
 
 def execute_test_cases(
@@ -536,6 +579,100 @@ def _negative_expectation(
         description="Expected negative result requires review; no matching validation status is documented.",
         source="human_review",
     )
+
+
+def _mutated_step_assertions(case: DesignedTestCase, step_id: str | None = None) -> list[TestAssertion]:
+    target_step_id = step_id or case.mutated_step_id
+    assertions = []
+    statuses = _accepted_statuses(case.expected)
+    if statuses:
+        assertions.append(
+            TestAssertion(
+                assertion_id="A-001",
+                step_id=target_step_id,
+                source="expected_status",
+                kind="status_in",
+                expected=statuses,
+                description="Mutated step must return an expected negative HTTP status.",
+            )
+        )
+    elif case.type == "negative":
+        assertions.append(
+            TestAssertion(
+                assertion_id="A-001",
+                step_id=target_step_id,
+                source="negative_mutation",
+                kind="status_in",
+                expected=[400, 404, 409, 422],
+                description="Mutated negative step should be rejected or require explicit review.",
+                confidence="medium",
+                requires_human_review=True,
+            )
+        )
+    if case.requires_human_review:
+        assertions.append(
+            TestAssertion(
+                assertion_id=f"A-{len(assertions) + 1:03d}",
+                step_id=target_step_id,
+                source="human_review",
+                kind="manual_review",
+                description=case.expected.description or "Expected result requires human review.",
+                confidence="none",
+                requires_human_review=True,
+            )
+        )
+    return assertions
+
+
+def _openapi_response_assertions(
+    operation: ApiOperation,
+    step_id: str,
+    start_index: int,
+) -> list[TestAssertion]:
+    schema = _success_response_schema(operation)
+    if not schema:
+        return []
+    assertions: list[TestAssertion] = []
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    for name in schema.get("required") or []:
+        if name not in properties:
+            continue
+        json_path = f"$.{name}"
+        assertions.append(
+            TestAssertion(
+                assertion_id=_assertion_id(start_index + len(assertions)),
+                step_id=step_id,
+                source="openapi_response_schema",
+                kind="json_path_exists",
+                json_path=json_path,
+                description=f"OpenAPI success response requires {json_path}.",
+            )
+        )
+        schema_type = properties[name].get("type") if isinstance(properties[name], dict) else None
+        if schema_type:
+            assertions.append(
+                TestAssertion(
+                    assertion_id=_assertion_id(start_index + len(assertions)),
+                    step_id=step_id,
+                    source="openapi_response_schema",
+                    kind="json_path_type",
+                    json_path=json_path,
+                    expected=schema_type,
+                    description=f"OpenAPI success response defines {json_path} as {schema_type}.",
+                )
+            )
+    return assertions
+
+
+def _success_response_schema(operation: ApiOperation) -> dict[str, Any]:
+    for status in ["200", "201", "202", "204"]:
+        schema = operation.response_schemas.get(status)
+        if schema:
+            return schema
+    for status, schema in operation.response_schemas.items():
+        if status.startswith("2"):
+            return schema
+    return {}
 
 
 def _business_attack_to_idea(
@@ -934,6 +1071,29 @@ def _text_mentions_operation(text: str, path: str) -> bool:
 
 def _tokens(value: str) -> list[str]:
     return [part.casefold() for part in value.replace("{", "/").replace("}", "/").replace(".", "/").split("/") if part]
+
+
+def _dedupe_assertions(assertions: list[TestAssertion]) -> list[TestAssertion]:
+    seen = set()
+    deduped = []
+    for assertion in assertions:
+        key = (assertion.step_id, assertion.kind, assertion.json_path, repr(assertion.expected))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(assertion)
+    for index, assertion in enumerate(deduped, start=1):
+        assertion.assertion_id = _assertion_id(index)
+    return deduped
+
+
+def _assertion_id(index: int) -> str:
+    return f"A-{index:03d}"
+
+
+def _iter_plan_steps(plan: DataBindingPlan):
+    for index, step in enumerate(plan.steps, start=1):
+        yield f"s{index:02d}", step
 
 
 def _dedupe_ideas(ideas: list[TestIdea]) -> list[TestIdea]:

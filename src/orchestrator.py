@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 import re
 
@@ -246,16 +247,20 @@ class AgenticTestDesignOrchestrator:
                         external_context_factory=external_context_factory,
                         generator_registry=self.generator_registry,
                     )
+                    execution_summary = _test_case_execution_summary(state.test_design.executions)
                     store.log_event(
                         "Test case execution finished",
-                        passed=sum(1 for item in state.test_design.executions if item.status == "passed"),
-                        failed=sum(1 for item in state.test_design.executions if item.status == "failed"),
-                        review=sum(1 for item in state.test_design.executions if item.status == "review_required"),
+                        total=execution_summary["total"],
+                        **execution_summary["statuses"],
                     )
                 store.save_json("test_design/test_basis.json", state.test_design.basis.model_dump(mode="json"))
                 store.save_json("test_design/test_ideas.json", [item.model_dump(mode="json") for item in state.test_design.ideas])
                 store.save_json("test_design/test_cases.json", [item.model_dump(mode="json") for item in state.test_design.test_cases])
                 store.save_json("test_design/test_case_executions.json", [item.model_dump(mode="json") for item in state.test_design.executions])
+                store.save_json(
+                    "test_design/test_case_execution_summary.json",
+                    _test_case_execution_summary(state.test_design.executions),
+                )
             store.log_event("Stage finished", stage="test_designer", status=run.status)
             if export_postman:
                 store.log_event("Stage started", stage="postman_export")
@@ -613,3 +618,25 @@ class AgenticTestDesignOrchestrator:
 def _task_artifact_name(step_id: str, target: str) -> str:
     safe_target = re.sub(r"[^A-Za-z0-9]+", "_", target).strip("_") or "value"
     return f"{step_id}_{safe_target}"
+
+
+def _test_case_execution_summary(executions) -> dict:
+    statuses = Counter(item.status for item in executions)
+    ordered_statuses = {
+        status: statuses[status]
+        for status in [
+            "passed",
+            "failed",
+            "review_required",
+            "blocked",
+            "contract_mismatch",
+            "oracle_incomplete",
+            "weak_attack",
+            "not_run",
+        ]
+        if statuses[status]
+    }
+    return {
+        "total": len(executions),
+        "statuses": ordered_statuses,
+    }

@@ -30,6 +30,7 @@ from domain import (
     DataProducer,
     DependencyResolverResult,
     DependencyResolution,
+    EndpointMention,
     EndpointMappingResult,
     GenerationBindingDecision,
     OperationRef,
@@ -109,6 +110,17 @@ def test_documentation_analyst_prompt_mentions_endpoint_capture() -> None:
     assert "requires_scenario|requires_state|requires_data" in prompt[1].content
     assert "preserve the main action of each step" in prompt[1].content
     assert "vehicle pickup/start rental" in prompt[1].content
+
+
+def test_endpoint_mention_normalizes_unknown_llm_location() -> None:
+    mention = EndpointMention(
+        method="POST",
+        path="/mock/reset",
+        location="precondition",
+        note="Reset mock state.",
+    )
+
+    assert mention.location == "unknown"
 
 
 def test_orchestrator_without_llm_saves_documentation_prompt() -> None:
@@ -1530,8 +1542,33 @@ def test_test_designer_generates_reviewable_cases_from_stable_path() -> None:
     assert first_case.steps
     assert first_case.expected_result
     assert first_case.tags
+    assert first_case.assertions
+    assert any(assertion.kind == "status_in" for assertion in first_case.assertions)
     assert state.test_design.executions[0].status == "not_run"
     assert state.test_design.executions[0].mode == "planned"
+
+
+def test_test_designer_adds_setup_assertions_from_extractions_and_openapi_response() -> None:
+    state = _stable_two_step_state()
+
+    result = build_test_design(state)
+    case = next(item for item in result.test_cases if item.mutated_step_id == "s02")
+
+    setup_assertions = [item for item in case.assertions if item.step_id == "s01"]
+    assert any(item.kind == "status_2xx" for item in setup_assertions)
+    assert any(
+        item.source == "response_extraction"
+        and item.kind == "json_path_exists"
+        and item.json_path == "$.id"
+        for item in setup_assertions
+    )
+    assert any(
+        item.source == "openapi_response_schema"
+        and item.kind == "json_path_type"
+        and item.json_path == "$.id"
+        and item.expected == "string"
+        for item in setup_assertions
+    )
 
 
 def test_test_designer_llm_refines_wording_without_changing_mutation() -> None:
@@ -1970,6 +2007,23 @@ def test_postman_exporter_builds_test_case_mutation_collection() -> None:
     assert "Status matches expected response" in tests
 
 
+def test_postman_exporter_renders_test_case_assertions() -> None:
+    state = _stable_two_step_state()
+    state.test_design = build_test_design(state)
+    case = next(item for item in state.test_design.test_cases if item.mutated_step_id == "s02")
+    state.test_design.test_cases = [case]
+
+    artifacts = PostmanExporter().export(state, base_url="http://server")
+    folder = artifacts["test_cases_collection"]["item"][0]["item"][0]
+    setup_tests = "\n".join(folder["item"][0]["event"][1]["script"]["exec"])
+    mutated_tests = "\n".join(folder["item"][-1]["event"][1]["script"]["exec"])
+
+    assert "Status is 2xx" in setup_tests
+    assert "$.id exists" in setup_tests
+    assert "$.id has type string" in setup_tests
+    assert "Status matches expected response" in mutated_tests
+
+
 def test_postman_exporter_groups_llm_business_checks() -> None:
     state = _stable_generic_completion_state()
     state.test_design = build_test_design(state)
@@ -2123,6 +2177,13 @@ def _stable_two_step_state() -> ProjectState:
             "type": "object",
             "required": ["name"],
             "properties": {"name": {"type": "string"}},
+        },
+        response_schemas={
+            "201": {
+                "type": "object",
+                "required": ["id"],
+                "properties": {"id": {"type": "string"}},
+            }
         },
         response_statuses=["201", "400"],
     )

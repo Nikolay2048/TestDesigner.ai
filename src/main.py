@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from pathlib import Path
 
 from llm import NoLLM, OllamaLLM
@@ -93,12 +94,32 @@ def main() -> None:
         print(f"Test cases: {len(state.test_design.test_cases)}")
         if state.test_design.executions:
             print(f"TC runs:    {len(state.test_design.executions)}")
+            print(f"TC statuses:{_format_execution_statuses(state.test_design.executions)}")
         if args.export_postman:
             print(f"Postman:    {Path(args.out).resolve() / 'postman'}")
     if last_run:
         print(f"Last agent: {last_run.agent_name} -> {last_run.status}")
         if last_run.status == "needs_llm":
             print("Next step: inspect the generated prompt, then run with --llm ollama or improve the agent contract.")
+
+
+def _format_execution_statuses(executions) -> str:
+    counts = Counter(item.status for item in executions)
+    parts = [
+        f"{status}={counts[status]}"
+        for status in [
+            "passed",
+            "failed",
+            "review_required",
+            "blocked",
+            "contract_mismatch",
+            "oracle_incomplete",
+            "weak_attack",
+            "not_run",
+        ]
+        if counts[status]
+    ]
+    return " " + ", ".join(parts) if parts else " none"
 
 
 if __name__ == "__main__":

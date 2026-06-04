@@ -1,0 +1,18 @@
+clinic:
+  countryCode: "RU"
+  city: "Moscow"
+  branchCode: "MSK-CENTRAL"
+
+testerAccount:
+  login: "qa.patient@example.test"
+  password: "TestPassword123!"
+  phoneFormat: "+7XXXXXXXXXX"
+
+loyalty:
+  programNumber: "LP-0004242"
+  fixedPromoCode: "CLINIC-TEST-15"
+
+payment:
+  mockProvider: "mock-acquiring"
+  cardToken: "tok_test_visa_4242"
+
