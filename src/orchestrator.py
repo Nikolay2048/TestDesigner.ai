@@ -37,6 +37,7 @@ from io_utils import ArtifactStore, load_scenario, load_test_data
 from llm import LLM
 from openapi import load_openapi_operations
 from patches import apply_binding_patch
+from postman_export import export_postman_artifacts
 from stable import build_provided_state, publish_stable_package
 from stabilization_rules import patch_from_server_hint
 from test_design import execute_test_cases
@@ -67,6 +68,7 @@ class AgenticTestDesignOrchestrator:
         publish_stable: bool = True,
         reset_log: bool = True,
         run_test_cases: bool = False,
+        export_postman: bool = False,
     ) -> ProjectState:
         state = ProjectState(
             scenario=load_scenario(scenario_path),
@@ -255,6 +257,23 @@ class AgenticTestDesignOrchestrator:
                 store.save_json("test_design/test_cases.json", [item.model_dump(mode="json") for item in state.test_design.test_cases])
                 store.save_json("test_design/test_case_executions.json", [item.model_dump(mode="json") for item in state.test_design.executions])
             store.log_event("Stage finished", stage="test_designer", status=run.status)
+            if export_postman:
+                store.log_event("Stage started", stage="postman_export")
+                summary = export_postman_artifacts(
+                    state,
+                    out_dir=store.root,
+                    base_url=base_url,
+                    generator_registry=self.generator_registry,
+                )
+                store.log_event(
+                    "Stage finished",
+                    stage="postman_export",
+                    happy_path_requests=summary["happy_path_requests"],
+                    test_cases=summary["test_cases"],
+                    test_case_requests=summary["test_case_requests"],
+                    unsupported=len(summary["unsupported_features"]),
+                    review=len(summary["requires_human_review"]),
+                )
         self._save_scenario_output(state, store)
         if publish_stable and stable_dir:
             package_dir = publish_stable_package(

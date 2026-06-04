@@ -55,6 +55,7 @@ from io_utils import extract_raw_endpoint_mentions
 from openapi import load_openapi_operations
 from orchestrator import AgenticTestDesignOrchestrator
 from patches import apply_binding_patch
+from postman_export import PostmanExporter, export_postman_artifacts
 from scenario_dependencies import (
     ScenarioDependencyRunner,
     _context_from_setup,
@@ -1857,6 +1858,125 @@ def test_execute_business_case_marks_4xx_without_oracle_as_oracle_incomplete(mon
     )
 
     assert records[0].status == "oracle_incomplete"
+
+
+def test_postman_exporter_builds_happy_path_collection() -> None:
+    state = _stable_two_step_state()
+    state.test_design = build_test_design(state)
+
+    artifacts = PostmanExporter().export(state, base_url="http://server")
+    collection = artifacts["happy_path_collection"]
+    environment = artifacts["environment"]
+
+    assert collection["info"]["schema"].endswith("collection/v2.1.0/collection.json")
+    assert len(collection["item"]) == 2
+    assert collection["item"][0]["request"]["url"]["raw"] == "{{baseUrl}}/tasks"
+    second_tests = "\n".join(collection["item"][0]["event"][1]["script"]["exec"])
+    assert "pm.collectionVariables.set('task_id'" in second_tests
+    assert environment["values"][0]["key"] == "baseUrl"
+    assert environment["values"][0]["value"] == "http://server"
+
+
+def test_postman_exporter_preserves_generator_argument_order() -> None:
+    state = _stable_generic_completion_state()
+    state.data_binding.steps[0].request_bindings[1].generator = "date_after_now"
+    state.data_binding.steps[0].request_bindings[1].params = {"format": "date", "days": 1}
+    state.stabilization.stable_plan = state.data_binding
+
+    artifacts = PostmanExporter().export(state, base_url="http://server")
+    script = "\n".join(artifacts["happy_path_collection"]["item"][0]["event"][0]["script"]["exec"])
+
+    assert "dateAfterNow(1, \"date\")" in script
+
+
+def test_postman_exporter_fills_generator_defaults_before_later_args() -> None:
+    state = _stable_generic_completion_state()
+    state.data_binding.steps[0].request_bindings[1].generator = "date_after_now"
+    state.data_binding.steps[0].request_bindings[1].params = {"format": "date"}
+    state.stabilization.stable_plan = state.data_binding
+
+    artifacts = PostmanExporter().export(state, base_url="http://server")
+    script = "\n".join(artifacts["happy_path_collection"]["item"][0]["event"][0]["script"]["exec"])
+
+    assert "dateAfterNow(1, \"date\")" in script
+
+
+def test_postman_exporter_does_not_regenerate_scenario_generated_values() -> None:
+    state = _stable_generic_completion_state()
+    binding = state.data_binding.steps[0].request_bindings[1]
+    binding.generator = "date_after_now"
+    binding.params = {"format": "date", "days": 1}
+    binding.scope = "scenario"
+    state.stabilization.stable_plan = state.data_binding
+
+    artifacts = PostmanExporter().export(state, base_url="http://server")
+    script = "\n".join(artifacts["happy_path_collection"]["item"][0]["event"][0]["script"]["exec"])
+
+    assert "if (pm.collectionVariables.get('attempt_count') === undefined)" in script
+    assert "pm.collectionVariables.set('attempt_count', dateAfterNow(1, \"date\"));" in script
+
+
+def test_postman_exporter_uses_first_scenario_generator_policy_for_same_variable() -> None:
+    state = _stable_two_step_state()
+    state.data_binding.steps[0].request_bindings.append(
+        RequestValueBinding(
+            target="$.returnDate",
+            location="body",
+            source="generated",
+            variable="returnDate",
+            generator="date_after_now",
+            params={"days": 2, "format": "date"},
+            scope="scenario",
+        )
+    )
+    state.data_binding.steps[1].request_bindings.append(
+        RequestValueBinding(
+            target="$.returnDate",
+            location="body",
+            source="generated",
+            variable="returnDate",
+            generator="date_after_now",
+            params={"days": 1, "format": "date"},
+            scope="scenario",
+        )
+    )
+    state.stabilization.stable_plan = state.data_binding
+
+    artifacts = PostmanExporter().export(state, base_url="http://server")
+    second_script = "\n".join(artifacts["happy_path_collection"]["item"][1]["event"][0]["script"]["exec"])
+
+    assert "pm.collectionVariables.set('returnDate', dateAfterNow(2, \"date\"));" in second_script
+    assert "pm.collectionVariables.set('returnDate', dateAfterNow(1, \"date\"));" not in second_script
+
+
+def test_postman_exporter_builds_test_case_mutation_collection() -> None:
+    state = _stable_generic_completion_state()
+    state.test_design = build_test_design(state)
+    case = next(item for item in state.test_design.test_cases if item.mutation.action == "set_value")
+    state.test_design.test_cases = [case]
+
+    artifacts = PostmanExporter().export(state, base_url="http://server")
+    folder = artifacts["test_cases_collection"]["item"][0]
+    raw_body = folder["item"][-1]["request"]["body"]["raw"]
+    tests = "\n".join(folder["item"][-1]["event"][1]["script"]["exec"])
+
+    assert folder["name"].startswith(case.case_id)
+    assert str(case.mutation.value) in raw_body
+    assert "Status matches expected response" in tests
+
+
+def test_export_postman_artifacts_writes_files(tmp_path) -> None:
+    state = _stable_generic_completion_state()
+    state.static_test_data = {"country_code": "RU"}
+    state.test_design = build_test_design(state)
+
+    summary = export_postman_artifacts(state, tmp_path, base_url="http://server")
+
+    assert (tmp_path / "postman" / "happy_path.postman_collection.json").exists()
+    assert (tmp_path / "postman" / "test_cases.postman_collection.json").exists()
+    assert (tmp_path / "postman" / "environment.postman_environment.json").exists()
+    assert summary["happy_path_requests"] == 1
+    assert summary["environment_values"] == 2
 
 
 def _stable_generic_completion_state() -> ProjectState:

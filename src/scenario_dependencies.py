@@ -38,6 +38,7 @@ class ScenarioDependencyRunner:
         max_attempts: int = 7,
         stable_dir: str | Path = "runs/stable",
         run_test_cases: bool = False,
+        export_postman: bool = False,
     ) -> ProjectState:
         store = ArtifactStore(out_dir)
         store.reset_log()
@@ -77,6 +78,7 @@ class ScenarioDependencyRunner:
                 publish_stable=True,
                 reset_log=False,
                 run_test_cases=run_test_cases,
+                export_postman=export_postman,
             )
 
         dependency_specs = []
@@ -161,6 +163,7 @@ class ScenarioDependencyRunner:
             publish_stable=True,
             reset_log=False,
             run_test_cases=run_test_cases,
+            export_postman=export_postman,
         )
 
 

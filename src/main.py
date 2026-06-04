@@ -30,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Execute generated test cases after happy-path stabilization and save their traces",
     )
+    parser.add_argument(
+        "--export-postman",
+        action="store_true",
+        help="Export Postman collections and environment after successful test design",
+    )
     return parser
 
 
@@ -48,6 +53,7 @@ def main() -> None:
             max_attempts=args.max_attempts,
             stable_dir=args.stable_dir,
             run_test_cases=args.run_test_cases,
+            export_postman=args.export_postman,
         )
     else:
         orchestrator = AgenticTestDesignOrchestrator(llm=llm)
@@ -61,6 +67,7 @@ def main() -> None:
             stable_dir=args.stable_dir,
             publish_stable=True,
             run_test_cases=args.run_test_cases,
+            export_postman=args.export_postman,
         )
 
     last_run = state.agent_runs[-1] if state.agent_runs else None
@@ -86,6 +93,8 @@ def main() -> None:
         print(f"Test cases: {len(state.test_design.test_cases)}")
         if state.test_design.executions:
             print(f"TC runs:    {len(state.test_design.executions)}")
+        if args.export_postman:
+            print(f"Postman:    {Path(args.out).resolve() / 'postman'}")
     if last_run:
         print(f"Last agent: {last_run.agent_name} -> {last_run.status}")
         if last_run.status == "needs_llm":
