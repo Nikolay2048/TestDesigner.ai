@@ -2,36 +2,27 @@
 
 ## Goal
 
-Mark a paid appointment as completed and create a short medical record for the patient.
+Finish a paid clinic visit and make the medical record available in the appointment history.
 
 ## Preconditions
 
-- Requires a paid or rescheduled appointment from scenario 1 or 3.
-- Required state: appointment status is `PAID` or `RESCHEDULED`.
-- The doctor assigned to the appointment exists in the mock seed data.
+- Requires a paid or rescheduled appointment from an earlier booking scenario.
+- The appointment has an assigned doctor.
+- The patient visit has not been cancelled.
 
 ## Scenario steps
 
-1. Read appointment details and save `appointmentId`, `doctorId`, `patientId`, and `status`.
-2. Complete the visit with `POST /appointments/{appointmentId}/complete`.
-3. Save `recordId` returned by completion.
-4. Read the medical record for the appointment.
-5. Verify that the record contains diagnosis text, doctor identifier, and appointment identifier.
+1. The tester opens the appointment with `GET /appointments/{appointmentId}`.
+   The appointment card contains patient, doctor, service, slot, payment, and current visit status.
 
-## Business rules
+2. The clinic employee completes the visit with `POST /appointments/{appointmentId}/complete`.
+   Completion is performed for the appointment that the patient actually attended.
 
-- Only paid or rescheduled appointments can be completed.
-- Completion is idempotent only when the same appointment was already completed and record exists.
-- Cancelled appointments cannot be completed.
-- Medical record is available only after explicit completion.
+3. The clinic system creates a medical record for the completed visit.
+   The record is connected to the appointment, patient, and doctor.
 
-## Expected result
+4. The tester opens the medical record for the appointment.
+   The record contains a short diagnosis, doctor identifier, patient identifier, appointment identifier, and issue timestamp.
 
-Appointment status becomes `COMPLETED`; a medical record is returned with `recordId`, `appointmentId`, `doctorId`, `patientId`, `diagnosis`, and `issuedAt`.
-
-## Negative conditions
-
-- Reading a record before completion returns `404`.
-- Completing a cancelled appointment returns `409`.
-- Unknown appointment returns `404`.
-
+5. The tester returns to the appointment card.
+   The appointment is shown as completed and remains linked to the created medical record.

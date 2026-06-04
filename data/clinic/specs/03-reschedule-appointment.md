@@ -2,38 +2,27 @@
 
 ## Goal
 
-Move a paid appointment to another available slot for the same service.
+Move an already paid appointment to another suitable time while keeping the original appointment and payment relationship.
 
 ## Preconditions
 
 - Requires an appointment created by scenario 1.
-- Required state: appointment status is `PAID` or `RESCHEDULED`.
-- The replacement slot belongs to the same branch and supports the same service.
+- The appointment is still active for patient service.
+- The same branch has another suitable slot for the appointment service.
 
 ## Scenario steps
 
-1. Read the existing appointment using `GET /appointments/{appointmentId}`.
-2. Search for another available slot with the same `serviceId` and `branchId`.
-3. Reschedule with `PATCH /appointments/{appointmentId}/reschedule`, passing the new `slotId`.
-4. Save the new `slotId`, `doctorId`, `startsAt`, and `status`.
-5. Read the appointment again and verify status `RESCHEDULED`.
+1. The tester opens the existing appointment with `GET /appointments/{appointmentId}`.
+   The appointment card contains the current service, branch, doctor, slot, payment, and appointment status.
 
-## Business rules
+2. The tester searches for another slot for the same service and branch.
+   The replacement slot is different from the current slot and can be used for the same type of consultation.
 
-- Appointment can be rescheduled only from `PAID` or `RESCHEDULED`.
-- New slot must not be the same as the current slot.
-- New slot must be available and compatible with the appointment service.
-- Rescheduling is not allowed after appointment completion or cancellation.
-- The payment remains attached to the appointment.
+3. The tester changes the appointment time with `PATCH /appointments/{appointmentId}/reschedule`.
+   The request contains the replacement slot selected in the previous step.
 
-## Expected result
+4. The clinic system updates the appointment schedule.
+   The appointment keeps its original appointment identifier and payment link, while the visit time and doctor assignment may change according to the selected slot.
 
-The appointment keeps the same `appointmentId` and `paymentId`, receives the new `slotId`, and has status `RESCHEDULED`.
-
-## Negative conditions
-
-- Unpaid appointment returns `409 APPOINTMENT_NOT_PAID`.
-- Occupied slot returns `409 SLOT_NOT_AVAILABLE`.
-- Slot for another service returns `422 SLOT_SERVICE_MISMATCH`.
-- Completed appointment returns `409 INVALID_APPOINTMENT_STATUS`.
-
+5. The tester opens the appointment again.
+   The appointment card shows the new slot information and remains available for later visit completion.

@@ -1449,6 +1449,97 @@ def test_static_test_data_binding_decisions_prevent_array_enum_scalar_generation
     assert plan.steps[0].request_bindings[0].static_key == "reservation_extras"
 
 
+def test_static_test_data_binding_supports_nested_keys() -> None:
+    graph = DataDependencyGraph(
+        steps=[
+            DataDependencyStep(
+                step_id="s01",
+                business_step="Authenticate",
+                operation=OperationRef(method="POST", path="/auth/login"),
+                needs=[
+                    DataNeed(
+                        step_id="s01",
+                        target="$.password",
+                        location="body",
+                        type="string",
+                        field_schema={"type": "string"},
+                    )
+                ],
+            ),
+        ]
+    )
+    state = ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Scenario", text=""),
+        static_test_data={"testerAccount": {"password": "TestPassword123!"}},
+    )
+
+    decisions = build_static_test_data_binding_decisions(graph, [], [], state)
+    tasks = build_generation_binding_tasks(
+        graph,
+        [],
+        state,
+        GeneratorRegistry(),
+        existing_decisions=decisions,
+    )
+    plan = assemble_data_binding_plan(graph, [], [], decisions)
+
+    assert decisions[0].static_key == "testerAccount.password"
+    assert tasks == []
+    assert plan.steps[0].request_bindings[0].source == "static"
+    assert plan.steps[0].request_bindings[0].static_key == "testerAccount.password"
+
+
+def test_executor_resolves_nested_static_key(monkeypatch) -> None:
+    plan = DataBindingPlan(
+        steps=[
+            StepDataBinding(
+                business_step="Authenticate",
+                operation=OperationRef(method="POST", path="/auth/login"),
+                request_bindings=[
+                    RequestValueBinding(
+                        target="$.password",
+                        location="body",
+                        source="static",
+                        static_key="testerAccount.password",
+                    )
+                ],
+            )
+        ]
+    )
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {"ok": True}
+
+    captured = {}
+
+    def fake_request(*args, **kwargs):
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr("executor.httpx.request", fake_request)
+
+    trace = FlowExecutor(
+        base_url="http://server",
+        static_test_data={"testerAccount": {"password": "TestPassword123!"}},
+    ).execute(plan, attempt=1)
+
+    assert trace.status == "passed"
+    assert captured["json"] == {"password": "TestPassword123!"}
+
+
+def test_postman_environment_exports_nested_static_keys() -> None:
+    state = _stable_generic_completion_state()
+    state.static_test_data = {"testerAccount": {"password": "TestPassword123!"}}
+
+    artifacts = PostmanExporter().export(state, base_url="http://server")
+    values = {item["key"]: item["value"] for item in artifacts["environment"]["values"]}
+
+    assert values["testerAccount_password"] == "TestPassword123!"
+
+
 def test_server_hint_patch_replaces_generated_random_int_params() -> None:
     plan = DataBindingPlan(
         steps=[

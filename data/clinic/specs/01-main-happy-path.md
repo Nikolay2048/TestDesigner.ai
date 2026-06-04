@@ -2,46 +2,39 @@
 
 ## Goal
 
-Create a real appointment for a patient in the central Moscow clinic branch, confirm the reservation, pay it, and receive a stable appointment identifier.
+Register a patient for a general practitioner consultation in the central Moscow branch and complete the booking with payment.
 
 ## Preconditions
 
-- Mock server state is reset with `POST /mock/reset`.
-- Tester credentials are available in `test-data.yaml`.
-- The patient is at least 21 years old.
-- The selected service has an available slot.
+- A tester account is available.
+- The central Moscow branch accepts outpatient appointments.
+- The patient is an adult and has contact details for notifications.
 
 ## Scenario steps
 
-1. Authenticate the tester with `POST /auth/login` and save `accessToken`.
-2. Load branches with `GET /branches?city=Moscow` and save `branchId` for branch code `MSK-CENTRAL`.
-3. Load available services for the branch and choose a general practitioner consultation.
-4. Search available slots for the selected `serviceId`, `branchId`, and preferred date.
-5. Create a temporary reservation using the selected `slotId`, patient profile, and contact data.
-6. Confirm the reservation with `POST /reservations/{reservationId}/confirm`; save `paymentRequired`, `paymentToken`, `amount`, and `status`.
-7. Pay the appointment amount with `POST /payments`.
-8. Create the final appointment with `POST /appointments` using the paid `paymentId` and confirmed `reservationId`.
-9. Read the appointment with `GET /appointments/{appointmentId}` and verify status `PAID`.
+1. The tester signs in to the clinic portal with `POST /auth/login`.
+   The session received after sign-in is used while working with branches, reservations, payments, and appointments.
 
-## Business rules
+2. The tester opens the list of clinic branches for Moscow with `GET /branches?city=Moscow`.
+   The central branch is selected by its branch code `MSK-CENTRAL`.
 
-- Required patient fields: `firstName`, `lastName`, `birthDate`, `email`, `phone`.
-- `birthDate` must be a valid date and must represent an age of at least 18 according to OpenAPI.
-- Server requires age at least 21 for diagnostics services.
-- Reservation status transitions: `HELD -> CONFIRMED -> PAID`.
-- A slot can be reserved only once while the reservation is active.
-- Confirmation is not allowed for expired or already confirmed reservations.
-- Payment must use `paymentRequired` and `paymentToken` returned by confirmation.
+3. The tester reviews services available in the selected branch.
+   A general practitioner consultation is chosen because it is suitable for a regular adult patient visit.
 
-## Expected result
+4. The tester searches for appointment slots for the selected branch and service.
+   The chosen slot belongs to the same branch and service, has a doctor assigned, and is available for booking.
 
-An appointment is created with status `PAID`; response includes `appointmentId`, `reservationId`, `paymentId`, `doctorId`, `slotId`, `amount`, and `status`.
+5. The tester creates a reservation for the selected slot.
+   The reservation contains patient name, birth date, email, phone, selected branch, service, and slot information.
 
-## Negative conditions
+6. The tester confirms the reservation with `POST /reservations/{reservationId}/confirm`.
+   After confirmation, the reservation contains payment details for the selected service and slot.
 
-- Missing `accessToken` returns `401`.
-- Unknown `slotId` returns `404`.
-- Already reserved slot returns `409`.
-- Invalid email or birth date returns `422`.
-- Payment with a wrong amount or token returns `409`.
+7. The tester pays for the confirmed reservation with `POST /payments`.
+   Payment is made using the payment data returned during reservation confirmation.
 
+8. The tester creates the appointment with `POST /appointments`.
+   The created appointment connects the reservation, payment, patient, doctor, service, and slot.
+
+9. The tester opens the created appointment with `GET /appointments/{appointmentId}`.
+   The appointment card shows the paid booking and the identifiers needed by later appointment scenarios.

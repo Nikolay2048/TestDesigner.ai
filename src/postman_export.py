@@ -350,7 +350,7 @@ class PostmanExporter:
 
     def _environment(self, scenario_title: str, base_url: str, static_test_data: dict[str, Any]) -> dict[str, Any]:
         values = [{"key": "baseUrl", "value": base_url, "type": "default", "enabled": True}]
-        for key, value in sorted(static_test_data.items()):
+        for key, value in sorted(_flatten_static_values(static_test_data).items()):
             values.append(
                 {
                     "key": _variable_name(key),
@@ -403,6 +403,17 @@ def _count_requests(items: list[dict[str, Any]]) -> int:
         elif "request" in item:
             count += 1
     return count
+
+
+def _flatten_static_values(value: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    flattened: dict[str, Any] = {}
+    for key, item in value.items():
+        full_key = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(item, dict):
+            flattened.update(_flatten_static_values(item, full_key))
+        else:
+            flattened[full_key] = item
+    return flattened
 
 
 def _accepted_statuses_for_case(

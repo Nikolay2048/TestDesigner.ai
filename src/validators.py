@@ -53,7 +53,7 @@ def validate_data_binding(
     """Record invalid data references without hiding the model output."""
 
     allowed_operations = {(operation.method, operation.path) for operation in operations}
-    static_keys = set(static_test_data)
+    static_keys = set(_flatten_static_keys(static_test_data))
     external_keys = set(external_context or {})
     global_risks = list(data_binding.risks)
 
@@ -113,3 +113,14 @@ def validate_data_binding(
 
     data_binding.risks = global_risks
     return data_binding
+
+
+def _flatten_static_keys(value: dict, prefix: str = "") -> list[str]:
+    keys: list[str] = []
+    for key, item in value.items():
+        full_key = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(item, dict):
+            keys.extend(_flatten_static_keys(item, full_key))
+        else:
+            keys.append(full_key)
+    return keys

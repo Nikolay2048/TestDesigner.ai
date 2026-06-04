@@ -137,9 +137,9 @@ class FlowExecutor:
 
         try:
             if binding.source == "static":
-                if not binding.static_key or binding.static_key not in self.static_test_data:
+                if not binding.static_key:
                     raise KeyError(f"Unknown static key: {binding.static_key}")
-                value = self.static_test_data[binding.static_key]
+                value = _get_static_value(self.static_test_data, binding.static_key)
             elif binding.source == "generated":
                 if binding.scope == "scenario" and binding.variable in variables:
                     value = variables[binding.variable]
@@ -182,6 +182,15 @@ def _response_body(response: httpx.Response) -> Any:
         return response.json()
     except ValueError:
         return response.text
+
+
+def _get_static_value(static_test_data: dict[str, Any], key: str) -> Any:
+    current: Any = static_test_data
+    for part in key.split("."):
+        if not isinstance(current, dict) or part not in current:
+            raise KeyError(f"Unknown static key: {key}")
+        current = current[part]
+    return current
 
 
 def _path_param_name(target: str) -> str:

@@ -123,7 +123,7 @@ def build_generation_binding_tasks(
                     business_step=step.business_step,
                     operation=step.operation,
                     need=need,
-                    static_keys=sorted(state.static_test_data.keys()),
+                    static_keys=sorted(_flatten_static_keys(state.static_test_data)),
                     external_context_keys=sorted(state.external_context.keys()),
                     available_generators=generator_registry.specs(),
                     business_context=business_context,
@@ -541,6 +541,7 @@ def _static_key_for_need(need: DataNeed, static_test_data: dict[str, Any]) -> st
     if not static_test_data:
         return None
 
+    static_keys = _flatten_static_keys(static_test_data)
     need_tokens = _need_tokens(need.target)
     if not need_tokens:
         return None
@@ -548,7 +549,7 @@ def _static_key_for_need(need: DataNeed, static_test_data: dict[str, Any]) -> st
     normalized_need = "_".join(need_tokens)
     normalized_keys = {
         key: "_".join(_name_tokens(key))
-        for key in static_test_data
+        for key in static_keys
     }
 
     for key, normalized_key in normalized_keys.items():
@@ -557,10 +558,21 @@ def _static_key_for_need(need: DataNeed, static_test_data: dict[str, Any]) -> st
 
     matches = [
         key
-        for key in static_test_data
+        for key in static_keys
         if set(need_tokens).issubset(set(_name_tokens(key)))
     ]
     return matches[0] if len(matches) == 1 else None
+
+
+def _flatten_static_keys(value: dict[str, Any], prefix: str = "") -> list[str]:
+    keys: list[str] = []
+    for key, item in value.items():
+        full_key = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(item, dict):
+            keys.extend(_flatten_static_keys(item, full_key))
+        else:
+            keys.append(full_key)
+    return keys
 
 
 def _need_tokens(target: str) -> list[str]:

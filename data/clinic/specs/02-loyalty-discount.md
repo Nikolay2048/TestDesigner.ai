@@ -2,40 +2,36 @@
 
 ## Goal
 
-Book a consultation with a loyalty program number and a fixed promo code so the final amount is discounted.
+Book a family doctor consultation for a loyalty program patient and apply the clinic promotional discount during payment.
 
 ## Preconditions
 
-- Mock server state is reset or no active reservation uses the selected slot.
-- Tester is authenticated.
-- Loyalty program number is stable: `LP-0004242`.
-- The business spec still mentions old promo code `CLINIC-OLD-10`, but the active test value is returned by the server hint if validation fails.
+- A tester account is available.
+- The patient has a loyalty program number.
+- The central branch has family doctor appointments.
 
 ## Scenario steps
 
-1. Authenticate and save `accessToken`.
-2. Find a family doctor consultation slot in the central branch.
-3. Create a reservation with `loyaltyProgramNumber` and promo code `CLINIC-OLD-10`.
-4. If the server rejects the promo code, stabilize the data using the hint and retry with the valid promo code.
-5. Confirm the reservation and save `paymentRequired` and `paymentToken`.
-6. Pay the discounted amount through the mock payment provider.
-7. Create the appointment and verify the `discountAmount` is greater than zero.
+1. The tester signs in to the clinic portal.
+   The session is used for the booking flow.
 
-## Business rules
+2. The tester selects the central Moscow branch and reviews services available there.
+   A family doctor consultation is selected for the loyalty patient.
 
-- Promo code can be applied only once per reservation.
-- Valid promo code gives a 15 percent discount.
-- `loyaltyProgramNumber` must start with `LP-`.
-- Discount cannot reduce the payable amount below 500.
-- Reservation cannot be confirmed before a valid service, doctor, and slot are selected.
+3. The tester searches for a free slot for the family doctor consultation.
+   The selected slot belongs to the central branch and has a doctor assigned.
 
-## Expected result
+4. The tester creates a reservation and adds the patient's loyalty program number.
+   The booking form also contains the promo code currently written in the analyst materials: `CLINIC-OLD-10`.
 
-Appointment is created with status `PAID`; amount is lower than the base service price and response includes `discountAmount`.
+5. If the clinic service asks for a current promo value, the reservation data is corrected and submitted again.
+   The loyalty number remains the same, and the promo discount is associated with this reservation.
 
-## Negative conditions
+6. The tester confirms the reservation.
+   The confirmed reservation shows the amount to pay after the loyalty and promo adjustments.
 
-- Old promo code returns `422 PROMO_CODE_EXPIRED` with a hint containing `CLINIC-TEST-15`.
-- Reapplying the same promo code returns `409`.
-- Loyalty number with an invalid format returns `422`.
+7. The tester pays the adjusted amount through the configured payment provider.
+   The payment is linked to the confirmed reservation.
 
+8. The tester creates and opens the appointment.
+   The appointment card shows a paid booking for the loyalty patient and displays the applied discount together with the final amount.
