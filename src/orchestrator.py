@@ -42,7 +42,11 @@ from postman_export import export_postman_artifacts
 from stable import build_provided_state, publish_stable_package
 from stabilization_rules import patch_from_server_hint
 from test_design import execute_test_cases
-from validators import validate_data_binding, validate_endpoint_mapping
+from validators import (
+    order_endpoint_mapping_by_business_steps,
+    validate_data_binding,
+    validate_endpoint_mapping,
+)
 
 
 class AgenticTestDesignOrchestrator:
@@ -110,6 +114,11 @@ class AgenticTestDesignOrchestrator:
         state, run = self.endpoint_mapper.run(state)
         if state.endpoint_mapping:
             state.endpoint_mapping = validate_endpoint_mapping(state.endpoint_mapping, state.operations)
+            if state.understanding:
+                state.endpoint_mapping = order_endpoint_mapping_by_business_steps(
+                    state.endpoint_mapping,
+                    state.understanding.business_steps,
+                )
             dependency_notes = apply_dependency_context_to_endpoint_mapping(state)
             if run.output is not None:
                 run.output = state.endpoint_mapping.model_dump(mode="json")

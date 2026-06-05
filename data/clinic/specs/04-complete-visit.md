@@ -6,7 +6,7 @@ Finish a paid clinic visit and make the medical record available in the appointm
 
 ## Preconditions
 
-- Requires a paid or rescheduled appointment from an earlier booking scenario.
+- Requires a paid or rescheduled appointment from an earlier booking scenario; the appointment identifier is used to open and complete the same visit.
 - The appointment has an assigned doctor.
 - The patient visit has not been cancelled.
 

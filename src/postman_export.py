@@ -514,7 +514,7 @@ def _js_generator_name(name: str) -> str:
 
 def _generator_arg_values(name: str, params: dict[str, Any]) -> list[Any]:
     defaults = {
-        "email": {"domain": "example.test"},
+        "email": {"domain": "test.com"},
         "phone_number": {"country": "RU", "format": "e164"},
         "driver_license_number": {"country": "RU"},
         "payment_card_token": {"provider": "mock"},

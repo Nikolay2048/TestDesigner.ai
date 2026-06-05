@@ -22,16 +22,14 @@ Book a family doctor consultation for a loyalty program patient and apply the cl
    The selected slot belongs to the central branch and has a doctor assigned.
 
 4. The tester creates a reservation and adds the patient's loyalty program number.
-   The booking form also contains the promo code currently written in the analyst materials: `CLINIC-OLD-10`.
+   The booking form also contains the clinic promotional code prepared for the current campaign.
+   The loyalty discount and promotional adjustment are associated with the same reservation.
 
-5. If the clinic service asks for a current promo value, the reservation data is corrected and submitted again.
-   The loyalty number remains the same, and the promo discount is associated with this reservation.
-
-6. The tester confirms the reservation.
+5. The tester confirms the reservation.
    The confirmed reservation shows the amount to pay after the loyalty and promo adjustments.
 
-7. The tester pays the adjusted amount through the configured payment provider.
+6. The tester pays the adjusted amount through the configured payment provider.
    The payment is linked to the confirmed reservation.
 
-8. The tester creates and opens the appointment.
+7. The tester creates and opens the appointment.
    The appointment card shows a paid booking for the loyalty patient and displays the applied discount together with the final amount.

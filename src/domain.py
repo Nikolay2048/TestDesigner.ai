@@ -13,6 +13,7 @@ class ApiOperation(BaseModel):
     operation_id: str
     summary: str = ""
     request_schema: dict | None = None
+    request_parameters: list[dict[str, Any]] = Field(default_factory=list)
     response_schemas: dict[str, dict] = Field(default_factory=dict)
     response_statuses: list[str] = Field(default_factory=list)
 

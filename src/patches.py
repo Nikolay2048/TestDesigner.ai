@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from domain import BindingPatch, DataBindingPlan
+from domain import BindingPatch, DataBindingPlan, ResponseExtraction
 from generators import GeneratorRegistry
 
 
@@ -51,6 +51,8 @@ def apply_binding_patch(
         _validate_binding(patch.new_binding, static_test_data, generator_registry)
         for index, binding in enumerate(step.request_bindings):
             if binding.target == patch.target:
+                if patch.new_binding.source == "response":
+                    _ensure_response_extraction(plan, patch.step_id, patch.new_binding)
                 step.request_bindings[index] = patch.new_binding
                 return patch
         return None
@@ -106,6 +108,28 @@ def _find_step(plan: DataBindingPlan, step_id: str):
     if 0 <= index < len(plan.steps):
         return plan.steps[index]
     return None
+
+
+def _ensure_response_extraction(plan: DataBindingPlan, consumer_step_id: str, binding) -> None:
+    if not binding.variable or not binding.source_step_id or not binding.json_path:
+        return
+    source_step = _find_step(plan, binding.source_step_id)
+    if source_step is None:
+        return
+    for extraction in source_step.response_extractions:
+        if extraction.variable == binding.variable and extraction.json_path == binding.json_path:
+            return
+    source_step.response_extractions.append(
+        ResponseExtraction(
+            variable=binding.variable,
+            json_path=binding.json_path,
+            scope="scenario",
+            source_step_id=binding.source_step_id,
+            policy="stabilization_required_by_replaced_binding",
+            required=True,
+            reason=f"Required for {consumer_step_id} {binding.target}.",
+        )
+    )
 
 
 def _is_allowed_patch_target(patch: BindingPatch, allowed_bindings: list[dict]) -> bool:

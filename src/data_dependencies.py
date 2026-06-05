@@ -50,6 +50,7 @@ def build_dependency_graph(state: ProjectState) -> DataDependencyGraph:
                     operation=operation_key,
                     needs=[
                         *_path_needs(step_id, operation.path),
+                        *_parameter_needs(step_id, operation.request_parameters),
                         *_schema_needs(step_id, operation.request_schema),
                     ],
                     produces=_schema_producers(step_id, operation_key, operation.response_schemas),
@@ -315,6 +316,31 @@ def _path_needs(step_id: str, path: str) -> list[DataNeed]:
         )
         for match in PATH_PARAM_PATTERN.finditer(path)
     ]
+
+
+def _parameter_needs(step_id: str, parameters: list[dict[str, Any]]) -> list[DataNeed]:
+    needs: list[DataNeed] = []
+    for parameter in parameters:
+        if not parameter.get("required"):
+            continue
+        location = parameter.get("in")
+        if location not in {"query", "header"}:
+            continue
+        name = parameter.get("name")
+        if not name:
+            continue
+        schema = parameter.get("schema") if isinstance(parameter.get("schema"), dict) else {}
+        needs.append(
+            DataNeed(
+                step_id=step_id,
+                target=f"$.{location}.{name}",
+                location=location,
+                type=schema.get("type", "unknown"),
+                required=True,
+                field_schema=schema,
+            )
+        )
+    return needs
 
 
 def _schema_needs(step_id: str, schema: dict[str, Any] | None, prefix: str = "$") -> list[DataNeed]:

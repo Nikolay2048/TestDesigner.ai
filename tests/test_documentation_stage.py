@@ -34,6 +34,7 @@ from domain import (
     EndpointMappingResult,
     GenerationBindingDecision,
     OperationRef,
+    RawEndpointMention,
     ProjectState,
     RequestValueBinding,
     ExecutorStepTrace,
@@ -59,6 +60,7 @@ from patches import apply_binding_patch
 from postman_export import PostmanExporter, export_postman_artifacts
 from scenario_dependencies import (
     ScenarioDependencyRunner,
+    _add_path_placeholders_to_dependencies,
     _context_from_setup,
     _resolve_dependency_path,
     _stable_setup_step_limit,
@@ -72,7 +74,11 @@ from test_design import (
     execute_test_cases,
 )
 from stable import publish_stable_package, stable_package_dir, validate_stable_package
-from validators import validate_data_binding, validate_endpoint_mapping
+from validators import (
+    order_endpoint_mapping_by_business_steps,
+    validate_data_binding,
+    validate_endpoint_mapping,
+)
 
 
 def test_raw_endpoint_mentions_are_extracted_deterministically() -> None:
@@ -109,7 +115,7 @@ def test_documentation_analyst_prompt_mentions_endpoint_capture() -> None:
     assert "scenario_dependencies" in prompt[1].content
     assert "requires_scenario|requires_state|requires_data" in prompt[1].content
     assert "preserve the main action of each step" in prompt[1].content
-    assert "vehicle pickup/start rental" in prompt[1].content
+    assert "activate/start an object" in prompt[1].content
 
 
 def test_endpoint_mention_normalizes_unknown_llm_location() -> None:
@@ -159,7 +165,7 @@ def test_endpoint_mapper_prompt_uses_compact_operations() -> None:
     assert "Do not invent endpoints" in prompt[1].content
     assert "Do not put a step into unmapped_steps just because matching is hard" in prompt[1].content
     assert "Preserve lifecycle API steps that create IDs needed later" in prompt[1].content
-    assert "vehicle pickup/start rental" in prompt[1].content
+    assert "start/activate" in prompt[1].content
     assert "request_schema" not in prompt[1].content
 
 
@@ -205,6 +211,32 @@ def test_endpoint_mapping_accepts_none_confidence_for_unmapped_steps() -> None:
     assert validated.unmapped_steps[0].business_step == "System closes rental"
 
 
+def test_endpoint_mapping_is_reordered_to_documented_business_step_order() -> None:
+    mapping = EndpointMappingResult(
+        mappings=[
+            StepOperationMapping(
+                business_step="Pay reservation",
+                operations=[OperationRef(method="POST", path="/payments")],
+            ),
+            StepOperationMapping(
+                business_step="Create reservation",
+                operations=[OperationRef(method="POST", path="/reservations")],
+            ),
+        ]
+    )
+
+    ordered = order_endpoint_mapping_by_business_steps(
+        mapping,
+        ["Create reservation", "Pay reservation"],
+    )
+
+    assert [item.business_step for item in ordered.mappings] == [
+        "Create reservation",
+        "Pay reservation",
+    ]
+    assert "reordered" in ordered.risks[0]
+
+
 def test_data_dependency_graph_extracts_needs_and_producers() -> None:
     state = ProjectState(
         scenario=ScenarioInput(path="scenario.md", title="Demo", text="Demo"),
@@ -248,6 +280,40 @@ def test_data_dependency_graph_uses_path_namespace_for_path_params() -> None:
 
     assert graph.steps[0].needs[0].target == "$.path.vehicleId"
     assert graph.steps[0].needs[0].location == "path"
+
+
+def test_data_dependency_graph_extracts_required_query_parameters() -> None:
+    state = ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Demo", text="Demo"),
+        operations=[
+            ApiOperation(
+                method="GET",
+                path="/services",
+                operation_id="listServices",
+                request_parameters=[
+                    {
+                        "name": "branchId",
+                        "in": "query",
+                        "required": True,
+                        "schema": {"type": "string"},
+                    }
+                ],
+            )
+        ],
+        endpoint_mapping=EndpointMappingResult(
+            mappings=[
+                StepOperationMapping(
+                    business_step="List services",
+                    operations=[OperationRef(method="GET", path="/services")],
+                )
+            ]
+        ),
+    )
+
+    graph = build_dependency_graph(state)
+
+    assert graph.steps[0].needs[0].target == "$.query.branchId"
+    assert graph.steps[0].needs[0].location == "query"
 
 
 def test_dependency_resolver_prompt_uses_candidate_tasks() -> None:
@@ -1156,6 +1222,37 @@ def test_dependency_runner_blocks_when_dependency_is_not_stable(tmp_path, monkey
     assert "Cannot resolve dependency scenario" in state.agent_runs[-1].notes[0]
 
 
+def test_dependency_runner_treats_required_data_state_as_setup_dependency(tmp_path, monkeypatch) -> None:
+    def fake_run(self, state):
+        state.understanding = ScenarioUnderstanding(
+            title="Complete appointment",
+            scenario_dependencies=[
+                ScenarioDependency(
+                    kind="requires_state",
+                    reference=None,
+                    required_state="paid appointment exists",
+                    required_data=["appointmentId"],
+                    reason="Completion needs an existing appointment id.",
+                )
+            ],
+        )
+        return state, AgentRun(agent_name="Documentation Analyst", status="completed")
+
+    monkeypatch.setattr("scenario_dependencies.DocumentationAnalystAgent.run", fake_run)
+
+    state = ScenarioDependencyRunner().run(
+        scenario_path="data/clinic/specs/04-complete-visit.md",
+        openapi_path="data/clinic/openapi/openapi.yaml",
+        out_dir=tmp_path / "run",
+        stable_dir=tmp_path / "stable",
+        base_url="http://server",
+    )
+
+    assert state.agent_runs[-1].agent_name == "Scenario Dependency Runner"
+    assert state.agent_runs[-1].status == "failed"
+    assert "Cannot resolve dependency scenario" in state.agent_runs[-1].notes[0]
+
+
 def test_dependency_path_resolves_scenario_number_reference() -> None:
     dependency = ScenarioDependency(
         kind="requires_scenario",
@@ -1169,6 +1266,73 @@ def test_dependency_path_resolves_scenario_number_reference() -> None:
     assert Path(resolved).name == "01-basic-economy-rental.md"
 
 
+def test_dependency_path_resolves_generic_reference_from_required_data(tmp_path) -> None:
+    package_dir = tmp_path / "stable" / "01-main-happy-path"
+    package_dir.mkdir(parents=True)
+    output = ScenarioRunOutput(
+        scenario_path="data/clinic/specs/01-main-happy-path.md",
+        status="passed",
+        provided_state=[
+            ProvidedState(
+                name="appointmentId",
+                value="apt-1",
+                semantic_type="appointment_id",
+                source_scenario="data/clinic/specs/01-main-happy-path.md",
+                source_step_id="s08",
+                json_path="$.appointmentId",
+            )
+        ],
+    )
+    Path(package_dir, "provided_state.json").write_text(output.model_dump_json(), encoding="utf-8")
+    dependency = ScenarioDependency(
+        kind="requires_scenario",
+        reference="earlier booking scenario",
+        required_data=["appointmentId"],
+        reason="Requires a paid appointment from an earlier booking scenario.",
+    )
+
+    resolved = _resolve_dependency_path(
+        dependency,
+        Path("data/clinic/specs"),
+        tmp_path / "stable",
+    )
+
+    assert resolved == "data/clinic/specs/01-main-happy-path.md"
+
+
+def test_dependency_path_does_not_guess_generic_reference_without_required_data(tmp_path) -> None:
+    package_dir = tmp_path / "stable" / "01-main-happy-path"
+    package_dir.mkdir(parents=True)
+    output = ScenarioRunOutput(
+        scenario_path="data/clinic/specs/01-main-happy-path.md",
+        status="passed",
+        provided_state=[
+            ProvidedState(
+                name="appointmentId",
+                value="apt-1",
+                semantic_type="appointment_id",
+                source_scenario="data/clinic/specs/01-main-happy-path.md",
+                source_step_id="s08",
+                json_path="$.appointmentId",
+            )
+        ],
+    )
+    Path(package_dir, "provided_state.json").write_text(output.model_dump_json(), encoding="utf-8")
+    dependency = ScenarioDependency(
+        kind="requires_scenario",
+        reference="earlier booking scenario",
+        reason="Requires a paid appointment from an earlier booking scenario.",
+    )
+
+    resolved = _resolve_dependency_path(
+        dependency,
+        Path("data/clinic/specs"),
+        tmp_path / "stable",
+    )
+
+    assert resolved is None
+
+
 def test_scenario_dependency_accepts_null_required_data() -> None:
     dependency = ScenarioDependency.model_validate(
         {
@@ -1179,6 +1343,71 @@ def test_scenario_dependency_accepts_null_required_data() -> None:
     )
 
     assert dependency.required_data == []
+
+
+def test_dependency_required_data_is_augmented_from_path_placeholders() -> None:
+    state = ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Scenario", text=""),
+        understanding=ScenarioUnderstanding(
+            title="Extend rental",
+            endpoint_mentions=[
+                EndpointMention(
+                    method="GET",
+                    path="/rentals/{rentalId}",
+                    location="step",
+                )
+            ],
+            scenario_dependencies=[
+                ScenarioDependency(
+                    kind="requires_state",
+                    required_state="active rental exists",
+                    required_data=["reservation_id"],
+                )
+            ],
+        ),
+    )
+
+    added = _add_path_placeholders_to_dependencies(state)
+
+    assert added == ["rentalId"]
+    assert state.understanding.scenario_dependencies[0].required_data == [
+        "reservation_id",
+        "rentalId",
+    ]
+
+
+def test_dependency_required_data_uses_raw_endpoint_mentions_when_model_omits_them() -> None:
+    state = ProjectState(
+        scenario=ScenarioInput(
+            path="scenario.md",
+            title="Scenario",
+            text="",
+            raw_endpoint_mentions=[
+                RawEndpointMention(
+                    method="GET",
+                    path="/rentals/{rentalId}",
+                    raw_text="GET /rentals/{rentalId}",
+                    line_number=1,
+                )
+            ],
+        ),
+        understanding=ScenarioUnderstanding(
+            title="Extend rental",
+            endpoint_mentions=[],
+            scenario_dependencies=[
+                ScenarioDependency(
+                    kind="requires_scenario",
+                    reference="Scenario 1",
+                    required_data=[],
+                )
+            ],
+        ),
+    )
+
+    added = _add_path_placeholders_to_dependencies(state)
+
+    assert added == ["rentalId"]
+    assert state.understanding.scenario_dependencies[0].required_data == ["rentalId"]
 
 
 def test_context_from_setup_infers_resource_alias_from_stable_plan(tmp_path) -> None:
@@ -1572,7 +1801,7 @@ def test_server_hint_patch_replaces_generated_random_int_params() -> None:
                 operation=OperationRef(method="POST", path="/rentals/{reservationId}/pickup"),
                 resolved_path="/rentals/RSV-1/pickup",
                 response_status=400,
-                response_body={"detail": {"hint": "Use fuelLevelPercent=100"}},
+                response_body={"detail": {"hint": "Use fuelLevelPercent=100."}},
                 status="failed",
             )
         ],
@@ -1603,6 +1832,182 @@ def test_server_hint_patch_replaces_generated_random_int_params() -> None:
     assert patch is not None
     assert patch.patch_type == "replace_generated_params"
     assert patch.params == {"min": 100, "max": 100}
+
+
+def test_server_hint_patch_replaces_binding_with_literal_value() -> None:
+    plan = DataBindingPlan(
+        steps=[
+            StepDataBinding(
+                business_step="Extend rental",
+                operation=OperationRef(method="POST", path="/rentals/{rentalId}/extend"),
+                request_bindings=[
+                    RequestValueBinding(
+                        target="$.newReturnDate",
+                        location="body",
+                        source="response",
+                        variable="returnDate",
+                    )
+                ],
+            )
+        ]
+    )
+    trace = ExecutorTrace(
+        attempt=1,
+        base_url="http://server",
+        status="failed",
+        failed_step_id="s01",
+        failure="Expected 2xx, got 409",
+        steps=[
+            ExecutorStepTrace(
+                step_id="s01",
+                business_step="Extend rental",
+                operation=OperationRef(method="POST", path="/rentals/{rentalId}/extend"),
+                resolved_path="/rentals/RNT-1/extend",
+                request={
+                    "method": "POST",
+                    "path": "/rentals/RNT-1/extend",
+                    "query": {},
+                    "headers": {},
+                    "body": {"newReturnDate": "2026-06-07"},
+                },
+                response_status=409,
+                response_body={"detail": {"hint": "Use newReturnDate=2026-06-08."}},
+                status="failed",
+            )
+        ],
+    )
+    state = ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Scenario", text=""),
+        data_binding=plan,
+        stabilization=StabilizationResult(
+            attempts=[StabilizationAttempt(attempt=1, trace=trace)]
+        ),
+    )
+    diagnosis = StabilizationDiagnosis(
+        attempt=1,
+        failed_step_id="s01",
+        failure_type="http_error",
+        summary="Date is not after current return date",
+        suspected_bindings=[
+            {"step_id": "s01", "target": "$.newReturnDate", "problem": "same date"}
+        ],
+    )
+
+    patch = patch_from_server_hint(state, diagnosis)
+
+    assert patch is not None
+    assert patch.patch_type == "replace_request_binding"
+    assert patch.new_binding.source == "literal"
+    assert patch.new_binding.literal == "2026-06-08"
+
+
+def test_server_hint_patch_uses_alternate_value_from_previous_response() -> None:
+    plan = DataBindingPlan(
+        steps=[
+            StepDataBinding(
+                business_step="Open appointment",
+                operation=OperationRef(method="GET", path="/appointments/{appointmentId}"),
+                response_extractions=[
+                    ResponseExtraction(variable="slotId", json_path="$.slotId")
+                ],
+            ),
+            StepDataBinding(
+                business_step="Search slots",
+                operation=OperationRef(method="GET", path="/slots"),
+            ),
+            StepDataBinding(
+                business_step="Reschedule",
+                operation=OperationRef(method="PATCH", path="/appointments/{appointmentId}/reschedule"),
+                request_bindings=[
+                    RequestValueBinding(
+                        target="$.slotId",
+                        location="body",
+                        source="response",
+                        variable="slotId",
+                    )
+                ],
+            ),
+        ]
+    )
+    trace = ExecutorTrace(
+        attempt=1,
+        base_url="http://server",
+        status="failed",
+        failed_step_id="s03",
+        failure="Expected 2xx, got 409",
+        steps=[
+            ExecutorStepTrace(
+                step_id="s01",
+                business_step="Open appointment",
+                operation=OperationRef(method="GET", path="/appointments/{appointmentId}"),
+                resolved_path="/appointments/apt-1",
+                response_status=200,
+                response_body={"slotId": "slot-old"},
+                request={"method": "GET", "path": "/appointments/apt-1", "query": {}, "headers": {}, "body": {}},
+                status="passed",
+            ),
+            ExecutorStepTrace(
+                step_id="s02",
+                business_step="Search slots",
+                operation=OperationRef(method="GET", path="/slots"),
+                resolved_path="/slots",
+                response_status=200,
+                response_body={"items": [{"slotId": "slot-new"}]},
+                request={"method": "GET", "path": "/slots", "query": {}, "headers": {}, "body": {}},
+                status="passed",
+            ),
+            ExecutorStepTrace(
+                step_id="s03",
+                business_step="Reschedule",
+                operation=OperationRef(method="PATCH", path="/appointments/{appointmentId}/reschedule"),
+                resolved_path="/appointments/apt-1/reschedule",
+                response_status=409,
+                response_body={
+                    "detail": {
+                        "message": "New slot must differ from current slot.",
+                        "hint": "Choose another slotId from GET /slots.",
+                    }
+                },
+                request={
+                    "method": "PATCH",
+                    "path": "/appointments/apt-1/reschedule",
+                    "query": {},
+                    "headers": {},
+                    "body": {"slotId": "slot-old"},
+                },
+                status="failed",
+            ),
+        ],
+    )
+    state = ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Scenario", text=""),
+        data_binding=plan,
+        stabilization=StabilizationResult(
+            attempts=[StabilizationAttempt(attempt=1, trace=trace)]
+        ),
+    )
+    diagnosis = StabilizationDiagnosis(
+        attempt=1,
+        failed_step_id="s03",
+        failure_type="invalid_request_data",
+        summary="Same slot selected",
+        suspected_bindings=[
+            {
+                "step_id": "s03",
+                "target": "$.slotId",
+                "problem": "bound to original appointment slotId",
+            }
+        ],
+    )
+
+    patch = patch_from_server_hint(state, diagnosis)
+
+    assert patch is not None
+    assert patch.patch_type == "replace_request_binding"
+    assert patch.new_binding.source == "response"
+    assert patch.new_binding.variable == "slotId"
+    assert patch.new_binding.source_step_id == "s02"
+    assert patch.new_binding.json_path == "$.items[].slotId"
 
 
 def test_test_basis_uses_stable_happy_path_and_openapi_schema() -> None:
@@ -2380,6 +2785,20 @@ def test_date_generator_can_return_openapi_date_format() -> None:
 
     assert len(value) == 10
     assert value.count("-") == 2
+
+
+def test_generator_registry_uses_valid_default_email_domain() -> None:
+    value = GeneratorRegistry().generate("email")
+
+    assert value.endswith("@test.com")
+
+
+def test_generator_registry_generates_ru_e164_phone_with_ten_digits_after_country_code() -> None:
+    value = GeneratorRegistry().generate("phone_number", {"country": "RU", "format": "e164"})
+
+    assert value.startswith("+7")
+    assert len(value) == 12
+    assert value[2:].isdigit()
 
 
 def test_generator_registry_exposes_openai_tool_schema() -> None:

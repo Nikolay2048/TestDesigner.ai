@@ -4,7 +4,7 @@ clinic:
   branchCode: "MSK-CENTRAL"
 
 testerAccount:
-  login: "qa.patient@example.test"
+  login: "qa.patient@test.com"
   password: "TestPassword123!"
   phoneFormat: "+7XXXXXXXXXX"
 
@@ -15,4 +15,3 @@ loyalty:
 payment:
   mockProvider: "mock-acquiring"
   cardToken: "tok_test_visa_4242"
-

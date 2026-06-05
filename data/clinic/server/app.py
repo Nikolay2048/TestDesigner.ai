@@ -8,7 +8,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 app = FastAPI(title="Clinic Booking Mock API", version="1.0.0")
 
-VALID_LOGIN = "qa.patient@example.test"
+VALID_LOGIN = "qa.patient@test.com"
 VALID_PASSWORD = "TestPassword123!"
 VALID_PROMO_CODE = "CLINIC-TEST-15"
 OLD_PROMO_CODE = "CLINIC-OLD-10"
@@ -33,6 +33,7 @@ DOCTORS = [
 SEED_SLOTS = [
     {"slotId": "slot-gp-001", "branchId": "br-msk-central", "doctorId": "doc-petrova", "serviceId": "svc-gp", "startsAt": "2026-06-15T09:00:00Z", "available": True},
     {"slotId": "slot-gp-002", "branchId": "br-msk-central", "doctorId": "doc-petrova", "serviceId": "svc-gp", "startsAt": "2026-06-15T11:00:00Z", "available": True},
+    {"slotId": "slot-gp-003", "branchId": "br-msk-central", "doctorId": "doc-petrova", "serviceId": "svc-gp", "startsAt": "2026-06-15T13:00:00Z", "available": True},
     {"slotId": "slot-family-001", "branchId": "br-msk-central", "doctorId": "doc-petrova", "serviceId": "svc-family", "startsAt": "2026-06-16T10:00:00Z", "available": True},
     {"slotId": "slot-mri-001", "branchId": "br-msk-central", "doctorId": "doc-ivanov", "serviceId": "svc-mri", "startsAt": "2026-06-17T12:00:00Z", "available": True},
 ]
@@ -139,7 +140,7 @@ def make_payment_token(reservation_id: str) -> str:
 @app.post("/auth/login")
 def login(payload: LoginRequest) -> dict[str, Any]:
     if payload.login != VALID_LOGIN or payload.password != VALID_PASSWORD:
-        raise business_error(400, "INVALID_CREDENTIALS", "Login or password is invalid.", "Use qa.patient@example.test and TestPassword123! from test-data.yaml.")
+        raise business_error(400, "INVALID_CREDENTIALS", "Login or password is invalid.", "Use qa.patient@test.com and TestPassword123! from test-data.yaml.")
     return {"accessToken": "token-qa-patient", "tokenType": "Bearer", "expiresIn": 3600}
 
 
@@ -391,4 +392,3 @@ def mock_seed_ids() -> dict[str, Any]:
         "validPromoCode": VALID_PROMO_CODE,
         "oldPromoCode": OLD_PROMO_CODE,
     }
-

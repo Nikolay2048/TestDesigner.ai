@@ -18,7 +18,7 @@ def uuid_generator() -> str:
     """Return a random UUID string."""
 
 
-def email(domain: str = "example.test") -> str:
+def email(domain: str = "test.com") -> str:
     """Return a unique test email address for the provided domain."""
 
 
@@ -86,7 +86,7 @@ class GeneratorRegistry:
             "email": GeneratorSpec(
                 name="email",
                 description="Unique test email.",
-                parameters={"domain": "Email domain, default example.test."},
+                parameters={"domain": "Email domain, default test.com."},
             ),
             "phone_number": GeneratorSpec(
                 name="phone_number",
@@ -133,13 +133,13 @@ class GeneratorRegistry:
                 "const v = c === 'x' ? r : (r & 0x3 | 0x8); return v.toString(16); }); }"
             ),
             "email": (
-                "function email(domain = 'example.test') { "
+                "function email(domain = 'test.com') { "
                 "return `test_${Date.now()}_${Math.floor(Math.random() * 100000)}@${domain}`; }"
             ),
             "phone_number": (
                 "function phoneNumber(country = 'RU', format = 'e164') { "
                 "const tail = String(Math.floor(1000000000 + Math.random() * 9000000000)); "
-                "if (country === 'RU' && format === 'e164') return '+7' + tail.slice(1); "
+                "if (country === 'RU' && format === 'e164') return '+7' + tail; "
                 "return tail; }"
             ),
             "full_name": (
@@ -221,14 +221,14 @@ class GeneratorRegistry:
         return str(uuid.uuid4())
 
     @staticmethod
-    def _email(domain: str = "example.test") -> str:
+    def _email(domain: str = "test.com") -> str:
         return f"test_{uuid.uuid4().hex[:12]}@{domain}"
 
     @staticmethod
     def _phone_number(country: str = "RU", format: str = "e164") -> str:
         tail = str(random.randint(1000000000, 9999999999))
         if country.upper() == "RU" and format == "e164":
-            return "+7" + tail[1:]
+            return "+7" + tail
         return tail
 
     @staticmethod

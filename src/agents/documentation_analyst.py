@@ -59,7 +59,7 @@ Return JSON with this shape:
       "kind": "requires_scenario|requires_state|requires_data",
       "reference": "UC name/id or scenario name if written, otherwise null",
       "required_state": "state that must already exist, otherwise null",
-      "required_data": ["reservation_id", "user_id"],
+      "required_data": ["object_id", "user_id"],
       "reason": "why current scenario needs this dependency"
     }}
   ],
@@ -74,14 +74,20 @@ Endpoint rules:
 
 Business step rules:
 - Keep the original scenario order and preserve the main action of each step.
-- Do not summarize away lifecycle actions such as create reservation, authorize payment, pick up/start rental, return/close rental, cancel, extend, add extras, validate loyalty, or register incident.
-- If a step says an employee hands over/issues a vehicle and records odometer, fuel, or damage, keep the meaning as vehicle pickup/start rental, not only as a manual record/check.
+- Do not summarize away lifecycle actions such as create an object, authorize a required external action,
+  activate/start an object, complete/close an object, cancel, extend, add related data, validate an identifier,
+  or register an event.
+- If a step says an employee/operator confirms operational facts before an object becomes active,
+  preserve the activation/start meaning, not only the manual record/check.
 - Business steps may be translated to English, but the operational meaning must stay intact.
 
 Dependency examples:
-- "To cancel a booking, an active booking must already exist" -> requires_state.
-- "Run after UC-001 Create reservation" -> requires_scenario.
-- "Requires existing reservationId" -> requires_data.
+- "To cancel an object, an active object must already exist" -> requires_state.
+- "Run after UC-001 Create object" -> requires_scenario.
+- "Requires existing objectId" -> requires_data.
+- For requires_scenario, fill required_data with concrete data names needed from that scenario.
+- If the scenario uses path placeholders like {{objectId}}, {{sessionId}}, or {{orderId}},
+  include those names in required_data for the dependency that provides the existing object.
 """.strip(),
             ),
         ]

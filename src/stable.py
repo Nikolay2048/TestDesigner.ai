@@ -162,13 +162,7 @@ def semantic_type(
     operation_path: str | None = None,
     json_path: str | None = None,
 ) -> str | None:
-    normalized = variable.lower()
-    if "reservation" in normalized:
-        return "reservation_id"
-    if "rental" in normalized:
-        return "rental_id"
-    if "payment" in normalized:
-        return "payment_id"
+    normalized = _identifier_name(variable)
     if normalized == "id" and operation_path:
         resource = _resource_name(operation_path)
         if resource:
@@ -180,6 +174,14 @@ def semantic_type(
         if resource:
             return f"{resource}_id"
     return None
+
+
+def _identifier_name(value: str) -> str:
+    """Normalize common API identifier spellings without domain-specific aliases."""
+
+    snake = re.sub(r"(?<!^)(?=[A-Z])", "_", value).replace("-", "_").replace(".", "_")
+    snake = re.sub(r"[^A-Za-z0-9_]+", "_", snake).strip("_").lower()
+    return re.sub(r"_+", "_", snake)
 
 
 def _resource_name(path: str) -> str | None:

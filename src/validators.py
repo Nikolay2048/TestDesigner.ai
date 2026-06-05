@@ -43,6 +43,31 @@ def validate_endpoint_mapping(
     return mapping
 
 
+def order_endpoint_mapping_by_business_steps(
+    mapping: EndpointMappingResult,
+    business_steps: list[str],
+) -> EndpointMappingResult:
+    """Keep endpoint mappings in the scenario order extracted by Documentation Analyst."""
+
+    if not business_steps:
+        return mapping
+
+    order = {_normalize_step_text(step): index for index, step in enumerate(business_steps)}
+    original_indexes = {id(item): index for index, item in enumerate(mapping.mappings)}
+
+    def sort_key(item):
+        step_order = order.get(_normalize_step_text(item.business_step))
+        if step_order is None:
+            return (len(order), original_indexes[id(item)])
+        return (step_order, original_indexes[id(item)])
+
+    reordered = sorted(mapping.mappings, key=sort_key)
+    if reordered != mapping.mappings:
+        mapping.risks.append("Endpoint mappings were reordered to match documented business step order.")
+        mapping.mappings = reordered
+    return mapping
+
+
 def validate_data_binding(
     data_binding: DataBindingPlan,
     operations: list[ApiOperation],
@@ -124,3 +149,7 @@ def _flatten_static_keys(value: dict, prefix: str = "") -> list[str]:
         else:
             keys.append(full_key)
     return keys
+
+
+def _normalize_step_text(value: str) -> str:
+    return " ".join(value.lower().split())

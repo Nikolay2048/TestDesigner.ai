@@ -6,7 +6,7 @@ Cancel a paid clinic appointment when the patient changes plans before the visit
 
 ## Preconditions
 
-- Requires an appointment created by scenario 1.
+- Requires an appointment created by scenario 1; the appointment identifier is used throughout cancellation.
 - The appointment is still active for patient service.
 - The patient can receive cancellation notifications through the saved contact details.
 

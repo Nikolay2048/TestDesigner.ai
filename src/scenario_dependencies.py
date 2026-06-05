@@ -59,11 +59,17 @@ class ScenarioDependencyRunner:
             store.save_state(state)
             store.log_event("Dependency-aware run stopped", reason="dependency_preflight_failed")
             return state
+        added_required_data = _add_path_placeholders_to_dependencies(state)
+        if added_required_data:
+            store.log_event(
+                "Dependency required_data augmented",
+                values=",".join(added_required_data),
+            )
 
         dependencies = [
             item
             for item in (state.understanding.scenario_dependencies if state.understanding else [])
-            if item.kind == "requires_scenario"
+            if item.kind == "requires_scenario" or item.required_data
         ]
         store.log_event("Scenario dependencies discovered", count=len(dependencies))
         if not dependencies:
@@ -83,7 +89,11 @@ class ScenarioDependencyRunner:
 
         dependency_specs = []
         for dependency in dependencies:
-            dependency_path = _resolve_dependency_path(dependency, Path(scenario_path).parent)
+            dependency_path = _resolve_dependency_path(
+                dependency,
+                Path(scenario_path).parent,
+                Path(stable_dir),
+            )
             if not dependency_path:
                 _block(state, store, f"Cannot resolve dependency scenario: {dependency.reference}")
                 return state
@@ -167,9 +177,13 @@ class ScenarioDependencyRunner:
         )
 
 
-def _resolve_dependency_path(dependency: ScenarioDependency, scenario_dir: Path) -> str | None:
+def _resolve_dependency_path(
+    dependency: ScenarioDependency,
+    scenario_dir: Path,
+    stable_dir: Path | None = None,
+) -> str | None:
     if not dependency.reference:
-        return None
+        return _resolve_dependency_from_stable_packages(dependency, stable_dir)
     reference = Path(dependency.reference)
     reference_text = dependency.reference.strip()
     candidates = []
@@ -184,7 +198,70 @@ def _resolve_dependency_path(dependency: ScenarioDependency, scenario_dir: Path)
     for candidate in candidates:
         if candidate.exists() and candidate.is_file():
             return str(candidate)
-    return None
+    return _resolve_dependency_from_stable_packages(dependency, stable_dir)
+
+
+def _resolve_dependency_from_stable_packages(
+    dependency: ScenarioDependency,
+    stable_dir: Path | None,
+) -> str | None:
+    if not stable_dir or not stable_dir.exists():
+        return None
+
+    desired_keys = _dependency_desired_keys(dependency)
+    scored: list[tuple[int, str]] = []
+    for package_dir in stable_dir.iterdir():
+        if not package_dir.is_dir():
+            continue
+        try:
+            scenario_output = load_scenario_output(package_dir)
+        except Exception:
+            continue
+        provided_keys: set[str] = set()
+        for item in scenario_output.provided_state:
+            semantic = item.semantic_type
+            if semantic in {None, "id"}:
+                semantic = _infer_semantic_type_from_stable_plan(scenario_output, item.name)
+            provided_keys.update(_normalize_context_key(alias) for alias in _provided_state_aliases(item.name, semantic))
+        score = len(desired_keys & provided_keys)
+        if score > 0 and scenario_output.scenario_path:
+            scored.append((score, scenario_output.scenario_path))
+
+    if not scored:
+        return None
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1]
+
+
+def _dependency_desired_keys(dependency: ScenarioDependency) -> set[str]:
+    return {_normalize_context_key(item) for item in dependency.required_data}
+
+
+def _add_path_placeholders_to_dependencies(state: ProjectState) -> list[str]:
+    if not state.understanding:
+        return []
+    placeholders = sorted(
+        {
+            match.group(1)
+            for mention in [*state.scenario.raw_endpoint_mentions, *state.understanding.endpoint_mentions]
+            for match in re.finditer(r"\{([A-Za-z0-9_]+)\}", mention.path)
+            if match.group(1)
+        }
+    )
+    if not placeholders:
+        return []
+
+    added: list[str] = []
+    for dependency in state.understanding.scenario_dependencies:
+        if dependency.kind not in {"requires_scenario", "requires_state"}:
+            continue
+        existing = {_normalize_context_key(item) for item in dependency.required_data}
+        for placeholder in placeholders:
+            if _normalize_context_key(placeholder) not in existing:
+                dependency.required_data.append(placeholder)
+                existing.add(_normalize_context_key(placeholder))
+                added.append(placeholder)
+    return added
 
 
 def _dependency_reference_matches_file(reference: str, item: Path) -> bool:

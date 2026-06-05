@@ -55,7 +55,7 @@ Return JSON with this shape:
   "suspected_bindings": [
     {{
       "step_id": "s04",
-      "target": "$.customer.driverLicenseNo",
+      "target": "$.payload.requiredField",
       "problem": "source is unknown"
     }}
   ],

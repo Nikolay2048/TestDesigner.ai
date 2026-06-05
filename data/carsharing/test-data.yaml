@@ -7,3 +7,6 @@ loyalty_number: LOYAL-GOLD-777
 reservation_extras:
   - CHILD_SEAT
   - ADDITIONAL_DRIVER
+incident:
+  type: SCRATCH
+  description: Scratch on rear bumper

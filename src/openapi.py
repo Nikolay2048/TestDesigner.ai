@@ -28,6 +28,7 @@ def load_openapi_operations(path: str) -> list[ApiOperation]:
                     operation_id=operation.get("operationId") or _operation_id(method, api_path),
                     summary=operation.get("summary", ""),
                     request_schema=_request_schema(operation),
+                    request_parameters=_request_parameters(operation),
                     response_schemas=_response_schemas(operation),
                     response_statuses=list((operation.get("responses") or {}).keys()),
                 )
@@ -68,6 +69,27 @@ def _request_schema(operation: dict[str, Any]) -> dict[str, Any] | None:
     json_content = content.get("application/json") or {}
     schema = json_content.get("schema")
     return schema if isinstance(schema, dict) else None
+
+
+def _request_parameters(operation: dict[str, Any]) -> list[dict[str, Any]]:
+    parameters = []
+    for parameter in operation.get("parameters") or []:
+        if not isinstance(parameter, dict):
+            continue
+        name = parameter.get("name")
+        location = parameter.get("in")
+        if not name or location not in {"query", "header", "path"}:
+            continue
+        schema = parameter.get("schema") if isinstance(parameter.get("schema"), dict) else {}
+        parameters.append(
+            {
+                "name": name,
+                "in": location,
+                "required": bool(parameter.get("required")),
+                "schema": schema,
+            }
+        )
+    return parameters
 
 
 def _response_schemas(operation: dict[str, Any]) -> dict[str, dict[str, Any]]:

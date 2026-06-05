@@ -51,7 +51,7 @@ Return JSON with this shape:
   "resolutions": [
     {{
       "step_id": "s05",
-      "target": "$.path.reservationId",
+      "target": "$.path.objectId",
       "selected_candidate_id": "c_s04_id",
       "confidence": "high|medium|low|none",
       "reason": "why this response field is the best source, or why no candidate fits"
