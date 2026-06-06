@@ -1,0 +1,70 @@
+{
+  "business_flow": [
+    {
+      "step": 1,
+      "name": "Получить список доступных автомобилей",
+      "method": "GET",
+      "path": "/v1/vehicles/available",
+      "depends_on": [],
+      "extract_variables": []
+    },
+    {
+      "step": 2,
+      "name": "Создать бронирование",
+      "method": "POST",
+      "path": "/v1/bookings",
+      "depends_on": [1],
+      "extract_variables": [
+        {
+          "name": "bookingId",
+          "json_path": "$.id",
+          "usage": "Используется для получения бронирования и оплаты"
+        }
+      ]
+    },
+    {
+      "step": 3,
+      "name": "Получить созданное бронирование",
+      "method": "GET",
+      "path": "/v1/bookings/{bookingId}",
+      "depends_on": [2],
+      "extract_variables": []
+    },
+    {
+      "step": 4,
+      "name": "Оплатить бронирование",
+      "method": "POST",
+      "path": "/v1/bookings/{bookingId}/payments",
+      "depends_on": [3],
+      "extract_variables": []
+    }
+  ],
+  "context_variables": [
+    {
+      "name": "bookingId",
+      "source_step": 2,
+      "json_path": "$.id",
+      "usage": "Идентификатор бронирования для последующих операций"
+    }
+  ],
+  "positive_checks": [
+    "GET /v1/vehicles/available возвращает статус 200 и список автомобилей",
+    "POST /v1/bookings с корректными данными возвращает статус 201 и bookingId",
+    "GET /v1/bookings/{bookingId} возвращает статус 200 и данные бронирования",
+    "POST /v1/bookings/{bookingId}/payments с корректными amount и paymentMethod возвращает статус 200"
+  ],
+  "negative_checks": [
+    "POST /v1/bookings с vehicleId, не из списка доступных, возвращает статус 400",
+    "POST /v1/bookings с endDate <= startDate возвращает статус 400",
+    "GET /v1/bookings/{bookingId} с несуществующим bookingId возвращает статус 404",
+    "POST /v1/bookings/{bookingId}/payments с уже оплаченным bookingId возвращает статус 400",
+    "POST /v1/bookings/{bookingId}/payments с paymentMethod, отличным от CARD/SBP, возвращает статус 400"
+  ],
+  "risks_and_questions": [
+    "Не указано, как определять доступность автомобиля в ответе /v1/vehicles/available",
+    "Неясно, как обновляется статус автомобиля после бронирования (должен ли он исчезать из списка доступных?)",
+    "Отсутствует информация о структуре ответа при оплате, что затрудняет проверку успешности оплаты",
+    "Не проверяется, что endDate не выходит за пределы доступного времени аренды (например, максимальный срок)",
+    "Не указаны требования к формату дат (например, ISO 8601)"
+  ]
+}

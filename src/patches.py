@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from domain import BindingPatch, DataBindingPlan, ResponseExtraction
+from data_dependencies import _parameter_needs, _path_needs, _schema_needs
+from domain import ApiOperation, BindingPatch, DataBindingPlan, ResponseExtraction
 from generators import GeneratorRegistry
 
 
@@ -10,6 +11,7 @@ def apply_binding_patch(
     static_test_data: dict,
     generator_registry: GeneratorRegistry,
     allowed_bindings: list[dict] | None = None,
+    allowed_operations: list[ApiOperation] | None = None,
 ) -> BindingPatch | None:
     """Validate and apply one stabilization patch. Returns applied patch or None."""
 
@@ -17,6 +19,14 @@ def apply_binding_patch(
         return None
     if not patch.step_id:
         return None
+    if patch.patch_type == "insert_operation":
+        return _insert_operation(
+            plan,
+            patch,
+            static_test_data,
+            generator_registry,
+            allowed_operations or [],
+        )
     if allowed_bindings is not None and not _is_allowed_patch_target(patch, allowed_bindings):
         return None
 
@@ -100,6 +110,104 @@ def apply_binding_patch(
     return None
 
 
+def _insert_operation(
+    plan: DataBindingPlan,
+    patch: BindingPatch,
+    static_test_data: dict,
+    generator_registry: GeneratorRegistry,
+    allowed_operations: list[ApiOperation],
+) -> BindingPatch | None:
+    if not patch.new_step or not patch.step_id:
+        return None
+    try:
+        insertion_index = int(_normalize_step_id(patch.step_id).removeprefix("s")) - 1
+    except ValueError:
+        return None
+    if not 0 <= insertion_index < len(plan.steps):
+        return None
+
+    operation_key = (
+        patch.new_step.operation.method.upper(),
+        patch.new_step.operation.path,
+    )
+    operation = next(
+        (
+            item
+            for item in allowed_operations
+            if (item.method.upper(), item.path) == operation_key
+        ),
+        None,
+    )
+    if operation is None:
+        raise ValueError("insert_operation must use an exact operation from OpenAPI")
+    if any(
+        (step.operation.method.upper(), step.operation.path) == operation_key
+        for step in plan.steps
+    ):
+        raise ValueError("insert_operation cannot duplicate an operation already present in the plan")
+
+    required_needs = [
+        *_path_needs("inserted", operation.path),
+        *_parameter_needs("inserted", operation.request_parameters),
+        *_schema_needs("inserted", operation.request_schema),
+    ]
+    bindings_by_target = {binding.target: binding for binding in patch.new_step.request_bindings}
+    missing = [need.target for need in required_needs if need.target not in bindings_by_target]
+    if missing:
+        raise ValueError(f"insert_operation is missing required bindings: {', '.join(missing)}")
+
+    for binding in patch.new_step.request_bindings:
+        _validate_binding(binding, static_test_data, generator_registry)
+        if binding.source == "response":
+            if not binding.variable or not _variable_exists_before_index(
+                plan, insertion_index, binding.variable
+            ):
+                raise ValueError(
+                    f"insert_operation references unavailable variable: {binding.variable}"
+                )
+
+    patch.requires_human_review = True
+    plan.steps.insert(insertion_index, patch.new_step)
+    _bind_failed_step_to_inserted_extractions(
+        plan,
+        insertion_index,
+        patch.new_step,
+    )
+    return patch
+
+
+def _bind_failed_step_to_inserted_extractions(
+    plan: DataBindingPlan,
+    insertion_index: int,
+    inserted_step,
+) -> None:
+    failed_step_index = insertion_index + 1
+    if failed_step_index >= len(plan.steps):
+        return
+    failed_step = plan.steps[failed_step_index]
+    extraction_by_field = {
+        _target_field_name(extraction.variable): extraction
+        for extraction in inserted_step.response_extractions
+    }
+    source_step_id = f"s{insertion_index + 1:02d}"
+    for binding in failed_step.request_bindings:
+        extraction = extraction_by_field.get(_target_field_name(binding.target))
+        if not extraction:
+            continue
+        binding.source = "response"
+        binding.variable = extraction.variable
+        binding.static_key = None
+        binding.generator = None
+        binding.params = {}
+        binding.json_path = extraction.json_path
+        binding.expression = None
+        binding.literal = None
+        binding.source_step_id = source_step_id
+        binding.policy = "stabilization_inserted_operation"
+        binding.reason = "Bound to the response of the inserted prerequisite operation."
+        binding.requires_human_review = True
+
+
 def _find_step(plan: DataBindingPlan, step_id: str):
     try:
         index = int(_normalize_step_id(step_id).removeprefix("s")) - 1
@@ -170,6 +278,18 @@ def _variable_exists_before_step(plan: DataBindingPlan, step_id: str, variable: 
     return False
 
 
+def _variable_exists_before_index(
+    plan: DataBindingPlan,
+    insertion_index: int,
+    variable: str,
+) -> bool:
+    for step in plan.steps[:insertion_index]:
+        for extraction in step.response_extractions:
+            if extraction.variable == variable:
+                return True
+    return False
+
+
 def _validate_binding(binding, static_test_data: dict, generator_registry: GeneratorRegistry) -> None:
     if binding.source == "static" and binding.static_key not in static_test_data:
         raise ValueError(f"Unknown static key: {binding.static_key}")
@@ -197,6 +317,13 @@ def _normalize_target(target: str | None) -> str:
     if raw.startswith("$."):
         return raw
     return f"$.{raw}"
+
+
+def _target_field_name(value: str | None) -> str:
+    if not value:
+        return ""
+    field = str(value).split(".")[-1]
+    return "".join(character for character in field.casefold() if character.isalnum())
 
 
 def _normalize_generated_params(generator: str | None, params: dict) -> dict:

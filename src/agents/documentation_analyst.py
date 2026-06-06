@@ -74,11 +74,17 @@ Endpoint rules:
 
 Business step rules:
 - Keep the original scenario order and preserve the main action of each step.
+- If one documented step contains several API-triggering actions, preserve every action in the
+  business step text. Do not collapse "read/check and then submit/authorize/update" into only
+  the first action.
 - Do not summarize away lifecycle actions such as create an object, authorize a required external action,
   activate/start an object, complete/close an object, cancel, extend, add related data, validate an identifier,
   or register an event.
 - If a step says an employee/operator confirms operational facts before an object becomes active,
   preserve the activation/start meaning, not only the manual record/check.
+- Put a system state, status, or displayed result caused by an earlier command into success_criteria,
+  not into business_steps as another command. Keep it as a business step only when the document
+  explicitly describes a separate actor action or another API-triggering command.
 - Business steps may be translated to English, but the operational meaning must stay intact.
 
 Dependency examples:
@@ -86,6 +92,9 @@ Dependency examples:
 - "Run after UC-001 Create object" -> requires_scenario.
 - "Requires existing objectId" -> requires_data.
 - For requires_scenario, fill required_data with concrete data names needed from that scenario.
+- Do not create scenario_dependencies from ordinary request inputs, reference data, actor attributes,
+  or availability preconditions unless the document says they must come from another scenario or
+  from already existing system state.
 - If the scenario uses path placeholders like {{objectId}}, {{sessionId}}, or {{orderId}},
   include those names in required_data for the dependency that provides the existing object.
 """.strip(),

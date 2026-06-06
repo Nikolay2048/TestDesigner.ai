@@ -260,6 +260,7 @@ class BindingPatch(BaseModel):
         "add_response_extraction",
         "replace_generated_params",
         "replace_computed_expression",
+        "insert_operation",
         "no_patch",
     ]
     step_id: str | None = None
@@ -267,6 +268,7 @@ class BindingPatch(BaseModel):
     variable: str | None = None
     new_binding: RequestValueBinding | None = None
     new_extraction: ResponseExtraction | None = None
+    new_step: StepDataBinding | None = None
     params: dict[str, Any] = Field(default_factory=dict)
     expression: str | None = None
     reason: str = ""

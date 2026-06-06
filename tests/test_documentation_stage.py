@@ -63,6 +63,7 @@ from scenario_dependencies import (
     _add_path_placeholders_to_dependencies,
     _context_from_setup,
     _resolve_dependency_path,
+    _setup_dependencies,
     _stable_setup_step_limit,
 )
 from stabilization_rules import patch_from_server_hint
@@ -116,6 +117,7 @@ def test_documentation_analyst_prompt_mentions_endpoint_capture() -> None:
     assert "requires_scenario|requires_state|requires_data" in prompt[1].content
     assert "preserve the main action of each step" in prompt[1].content
     assert "activate/start an object" in prompt[1].content
+    assert "not into business_steps as another command" in prompt[1].content
 
 
 def test_endpoint_mention_normalizes_unknown_llm_location() -> None:
@@ -942,12 +944,168 @@ def test_stabilization_fixer_prompt_focuses_on_failed_step_only() -> None:
         attempts=[StabilizationAttempt(attempt=1, trace=trace, diagnosis=diagnosis)]
     )
 
-    prompt = StabilizationFixerAgent(diagnosis=diagnosis).build_prompt(state)[1].content
+    prompt = StabilizationFixerAgent(
+        diagnosis=diagnosis,
+        fixer_try=3,
+        rejected_proposals=[
+            {
+                "fixer_try": 2,
+                "patch": {"patch_type": "replace_generated_params"},
+                "rejection_reason": "Target does not use a generator.",
+            }
+        ],
+    ).build_prompt(state)[1].content
 
     assert "$.returnDate" in prompt
     assert "$.pickupDate" in prompt
     assert "$.customer.driverLicenseNo" not in prompt
     assert '"step_id": "s04"' not in prompt
+    assert "Current fixer try:\n3" in prompt
+    assert "Target does not use a generator." in prompt
+
+
+def test_insert_operation_patch_uses_only_openapi_operation_with_complete_bindings() -> None:
+    plan = DataBindingPlan(
+        steps=[
+            StepDataBinding(
+                business_step="Create object",
+                operation=OperationRef(method="POST", path="/objects"),
+                response_extractions=[
+                    ResponseExtraction(variable="object_id", json_path="$.id"),
+                    ResponseExtraction(variable="total_amount", json_path="$.totalAmount"),
+                ],
+            ),
+            StepDataBinding(
+                business_step="Activate object",
+                operation=OperationRef(method="POST", path="/objects/{objectId}/activate"),
+                request_bindings=[
+                    RequestValueBinding(
+                        target="$.path.authorizationId",
+                        location="path",
+                        source="generated",
+                        variable="authorizationId",
+                        generator="uuid",
+                    )
+                ],
+            ),
+        ]
+    )
+    authorization_operation = ApiOperation(
+        method="POST",
+        path="/authorizations",
+        operation_id="createAuthorization",
+        request_schema={
+            "type": "object",
+            "required": ["objectId", "token", "amount"],
+            "properties": {
+                "objectId": {"type": "string"},
+                "token": {"type": "string"},
+                "amount": {"type": "number"},
+            },
+        },
+    )
+    patch = BindingPatch(
+        patch_type="insert_operation",
+        step_id="s02",
+        new_step=StepDataBinding(
+            business_step="Authorize required external action",
+            operation=OperationRef(method="POST", path="/authorizations"),
+            request_bindings=[
+                RequestValueBinding(
+                    target="$.objectId",
+                    location="body",
+                    source="response",
+                    variable="object_id",
+                ),
+                RequestValueBinding(
+                    target="$.token",
+                    location="body",
+                    source="generated",
+                    variable="token",
+                    generator="payment_card_token",
+                    params={"provider": "mock"},
+                ),
+                RequestValueBinding(
+                    target="$.amount",
+                    location="body",
+                    source="response",
+                    variable="total_amount",
+                ),
+            ],
+            response_extractions=[
+                ResponseExtraction(
+                    variable="authorizationId",
+                    json_path="$.authorizationId",
+                )
+            ],
+        ),
+        reason="Server requires authorization before activation.",
+        requires_human_review=True,
+    )
+
+    applied = apply_binding_patch(
+        plan,
+        patch,
+        {},
+        GeneratorRegistry(),
+        allowed_bindings=[],
+        allowed_operations=[authorization_operation],
+    )
+
+    assert applied is patch
+    assert plan.steps[1].operation.path == "/authorizations"
+    assert plan.steps[2].operation.path == "/objects/{objectId}/activate"
+    rebound = plan.steps[2].request_bindings[0]
+    assert rebound.source == "response"
+    assert rebound.variable == "authorizationId"
+    assert rebound.source_step_id == "s02"
+
+
+def test_insert_operation_rejects_missing_required_bindings() -> None:
+    plan = DataBindingPlan(
+        steps=[
+            StepDataBinding(
+                business_step="Create object",
+                operation=OperationRef(method="POST", path="/objects"),
+            ),
+            StepDataBinding(
+                business_step="Activate object",
+                operation=OperationRef(method="POST", path="/objects/{objectId}/activate"),
+            ),
+        ]
+    )
+    operation = ApiOperation(
+        method="POST",
+        path="/authorizations",
+        operation_id="createAuthorization",
+        request_schema={
+            "type": "object",
+            "required": ["objectId"],
+            "properties": {"objectId": {"type": "string"}},
+        },
+    )
+    patch = BindingPatch(
+        patch_type="insert_operation",
+        step_id="s02",
+        new_step=StepDataBinding(
+            business_step="Authorize",
+            operation=OperationRef(method="POST", path="/authorizations"),
+            request_bindings=[],
+        ),
+    )
+
+    try:
+        apply_binding_patch(
+            plan,
+            patch,
+            {},
+            GeneratorRegistry(),
+            allowed_operations=[operation],
+        )
+    except ValueError as exc:
+        assert "missing required bindings" in str(exc)
+    else:
+        raise AssertionError("Incomplete inserted operation must be rejected")
 
 
 def test_executor_uses_extracted_variable_in_later_path(monkeypatch) -> None:
@@ -1251,6 +1409,42 @@ def test_dependency_runner_treats_required_data_state_as_setup_dependency(tmp_pa
     assert state.agent_runs[-1].agent_name == "Scenario Dependency Runner"
     assert state.agent_runs[-1].status == "failed"
     assert "Cannot resolve dependency scenario" in state.agent_runs[-1].notes[0]
+
+
+def test_plain_required_data_is_not_treated_as_scenario_setup_dependency() -> None:
+    state = ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Scenario", text=""),
+        understanding=ScenarioUnderstanding(
+            title="Independent scenario",
+            scenario_dependencies=[
+                ScenarioDependency(
+                    kind="requires_data",
+                    required_data=["objectId", "userId"],
+                    reason="Request needs ordinary input data.",
+                )
+            ],
+        ),
+    )
+
+    assert _setup_dependencies(state) == []
+
+
+def test_referenced_required_data_is_treated_as_scenario_setup_dependency() -> None:
+    dependency = ScenarioDependency(
+        kind="requires_data",
+        reference="Base scenario",
+        required_data=["objectId"],
+        reason="The object is created by the referenced scenario.",
+    )
+    state = ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Scenario", text=""),
+        understanding=ScenarioUnderstanding(
+            title="Dependent scenario",
+            scenario_dependencies=[dependency],
+        ),
+    )
+
+    assert _setup_dependencies(state) == [dependency]
 
 
 def test_dependency_path_resolves_scenario_number_reference() -> None:
@@ -1636,6 +1830,68 @@ def test_external_context_binding_decisions_prevent_generation_for_dependency_st
     assert tasks == []
     assert plan.steps[0].request_bindings[0].source == "external_context"
     assert plan.steps[0].request_bindings[0].variable == "reservation_id"
+
+
+def test_external_context_binding_overrides_wrong_response_candidate() -> None:
+    graph = DataDependencyGraph(
+        steps=[
+            DataDependencyStep(
+                step_id="s01",
+                business_step="Search orders",
+                operation=OperationRef(method="GET", path="/orders"),
+                produces=[
+                    DataProducer(
+                        step_id="s01",
+                        json_path="$.items[].id",
+                        type="string",
+                        field_name="id",
+                        operation=OperationRef(method="GET", path="/orders"),
+                    )
+                ],
+            ),
+            DataDependencyStep(
+                step_id="s02",
+                business_step="Use existing order",
+                operation=OperationRef(method="POST", path="/actions"),
+                needs=[
+                    DataNeed(
+                        step_id="s02",
+                        target="$.orderId",
+                        location="body",
+                        type="string",
+                    )
+                ],
+            ),
+        ]
+    )
+    tasks = build_dependency_resolution_tasks(graph)
+    wrong_resolution = DependencyResolution(
+        step_id="s02",
+        target="$.orderId",
+        selected_candidate_id=tasks[0].candidates[0].candidate_id,
+        confidence="medium",
+        reason="Same primitive type.",
+    )
+    state = ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Scenario", text=""),
+        external_context={"order_id": "ORDER-1"},
+    )
+
+    decisions = build_external_context_binding_decisions(
+        graph,
+        [wrong_resolution],
+        state,
+    )
+    plan = assemble_data_binding_plan(
+        graph,
+        tasks,
+        [wrong_resolution],
+        decisions,
+    )
+
+    binding = plan.steps[1].request_bindings[0]
+    assert binding.source == "external_context"
+    assert binding.variable == "order_id"
 
 
 def test_static_test_data_binding_decisions_prevent_array_enum_scalar_generation() -> None:

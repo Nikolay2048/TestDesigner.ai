@@ -17,6 +17,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-data", default=None, help="Optional JSON/YAML file with tester-provided constants")
     parser.add_argument("--base-url", default="http://localhost:8000", help="Base URL for happy-path execution")
     parser.add_argument("--max-attempts", type=int, default=7, help="Maximum stabilization attempts")
+    parser.add_argument(
+        "--max-fixer-tries",
+        type=int,
+        default=7,
+        help="Maximum different Fixer proposals for one failed executor attempt",
+    )
     parser.add_argument("--stable-dir", default="runs/stable", help="Directory with published stable scenarios")
     parser.add_argument(
         "--resolve-dependencies",
@@ -52,6 +58,7 @@ def main() -> None:
             args.test_data,
             base_url=args.base_url,
             max_attempts=args.max_attempts,
+            max_fixer_tries=args.max_fixer_tries,
             stable_dir=args.stable_dir,
             run_test_cases=args.run_test_cases,
             export_postman=args.export_postman,
@@ -65,6 +72,7 @@ def main() -> None:
             args.test_data,
             base_url=args.base_url,
             max_attempts=args.max_attempts,
+            max_fixer_tries=args.max_fixer_tries,
             stable_dir=args.stable_dir,
             publish_stable=True,
             run_test_cases=args.run_test_cases,

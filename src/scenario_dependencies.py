@@ -36,6 +36,7 @@ class ScenarioDependencyRunner:
         test_data_path: str | None = None,
         base_url: str = "http://localhost:8000",
         max_attempts: int = 7,
+        max_fixer_tries: int = 7,
         stable_dir: str | Path = "runs/stable",
         run_test_cases: bool = False,
         export_postman: bool = False,
@@ -66,11 +67,7 @@ class ScenarioDependencyRunner:
                 values=",".join(added_required_data),
             )
 
-        dependencies = [
-            item
-            for item in (state.understanding.scenario_dependencies if state.understanding else [])
-            if item.kind == "requires_scenario" or item.required_data
-        ]
+        dependencies = _setup_dependencies(state)
         store.log_event("Scenario dependencies discovered", count=len(dependencies))
         if not dependencies:
             return AgenticTestDesignOrchestrator(self.llm).run(
@@ -80,6 +77,7 @@ class ScenarioDependencyRunner:
                 test_data_path,
                 base_url=base_url,
                 max_attempts=max_attempts,
+                max_fixer_tries=max_fixer_tries,
                 stable_dir=stable_dir,
                 publish_stable=True,
                 reset_log=False,
@@ -167,6 +165,7 @@ class ScenarioDependencyRunner:
             test_data_path,
             base_url=base_url,
             max_attempts=max_attempts,
+            max_fixer_tries=max_fixer_tries,
             external_context=external_context,
             external_context_factory=lambda attempt: prepare_external_context(f"attempt_{attempt:02d}") or {},
             stable_dir=stable_dir,
@@ -235,6 +234,20 @@ def _resolve_dependency_from_stable_packages(
 
 def _dependency_desired_keys(dependency: ScenarioDependency) -> set[str]:
     return {_normalize_context_key(item) for item in dependency.required_data}
+
+
+def _setup_dependencies(state: ProjectState) -> list[ScenarioDependency]:
+    """Return dependencies that require execution of a stable scenario package."""
+
+    if not state.understanding:
+        return []
+    return [
+        item
+        for item in state.understanding.scenario_dependencies
+        if item.kind == "requires_scenario"
+        or (item.kind == "requires_state" and bool(item.required_data))
+        or (item.kind == "requires_data" and bool(item.reference))
+    ]
 
 
 def _add_path_placeholders_to_dependencies(state: ProjectState) -> list[str]:

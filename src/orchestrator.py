@@ -67,6 +67,7 @@ class AgenticTestDesignOrchestrator:
         test_data_path: str | None = None,
         base_url: str = "http://localhost:8080",
         max_attempts: int = 7,
+        max_fixer_tries: int = 7,
         external_context: dict | None = None,
         external_context_factory=None,
         stable_dir: str | Path | None = None,
@@ -90,6 +91,7 @@ class AgenticTestDesignOrchestrator:
             openapi=openapi_path,
             base_url=base_url,
             max_attempts=max_attempts,
+            max_fixer_tries=max_fixer_tries,
         )
         store.log_event(
             "Inputs loaded",
@@ -234,6 +236,7 @@ class AgenticTestDesignOrchestrator:
             store,
             base_url,
             max_attempts,
+            max_fixer_tries,
             external_context_factory=external_context_factory,
         )
         if state.stabilization and state.stabilization.status == "passed":
@@ -401,6 +404,7 @@ class AgenticTestDesignOrchestrator:
         store: ArtifactStore,
         base_url: str,
         max_attempts: int,
+        max_fixer_tries: int,
         external_context_factory=None,
     ) -> ProjectState:
         if not state.data_binding:
@@ -489,6 +493,7 @@ class AgenticTestDesignOrchestrator:
                     state.static_test_data,
                     self.generator_registry,
                     allowed_bindings=diagnosis.suspected_bindings,
+                    allowed_operations=state.operations,
                 )
                 if applied_patch:
                     applied.append(applied_patch)
@@ -510,9 +515,17 @@ class AgenticTestDesignOrchestrator:
                     )
                     continue
 
-            for fixer_try in range(1, 4):
+            rejected_proposals: list[dict] = []
+            seen_patch_signatures: set[str] = set()
+            for fixer_try in range(1, max_fixer_tries + 1):
                 store.log_event("Fixer try started", attempt=attempt_number, try_number=fixer_try)
-                fixer = StabilizationFixerAgent(self.llm, diagnosis, self.generator_registry)
+                fixer = StabilizationFixerAgent(
+                    self.llm,
+                    diagnosis,
+                    self.generator_registry,
+                    fixer_try=fixer_try,
+                    rejected_proposals=rejected_proposals,
+                )
                 state, fix_run = fixer.run(state)
                 store.save_agent_run(
                     fix_run,
@@ -525,15 +538,50 @@ class AgenticTestDesignOrchestrator:
                     status=fix_run.status,
                 )
                 if fix_run.status != "completed":
-                    state.stabilization.review_notes.append(
-                        f"Fixer failed on attempt {attempt_number}, try {fixer_try}: {fix_run.notes}"
+                    rejection_reason = (
+                        f"Fixer output failed schema validation: {'; '.join(fix_run.notes)}"
                     )
-                    store.log_event("Stabilization stopped", reason="fixer_failed", attempt=attempt_number)
-                    return state
+                    state.stabilization.review_notes.append(
+                        f"Fixer rejected on attempt {attempt_number}, try {fixer_try}: "
+                        f"{rejection_reason}"
+                    )
+                    rejected_proposals.append(
+                        {
+                            "fixer_try": fixer_try,
+                            "patch": fix_run.output,
+                            "rejection_reason": rejection_reason,
+                        }
+                    )
+                    store.log_event(
+                        "Fixer output rejected",
+                        attempt=attempt_number,
+                        try_number=fixer_try,
+                        reason=rejection_reason,
+                    )
+                    continue
 
                 fix = fixer.output_model.model_validate(fix_run.output)
                 attempt.fix = fix
                 for patch in fix.patches[:1]:
+                    patch_signature = patch.model_dump_json(exclude={"reason", "why_not_repeating_previous_fix"})
+                    if patch_signature in seen_patch_signatures:
+                        rejection_reason = "The same patch was already proposed and rejected for this diagnosis."
+                        rejected_proposals.append(
+                            {
+                                "fixer_try": fixer_try,
+                                "patch": patch.model_dump(mode="json"),
+                                "rejection_reason": rejection_reason,
+                            }
+                        )
+                        store.log_event(
+                            "Patch rejected",
+                            attempt=attempt_number,
+                            try_number=fixer_try,
+                            reason=rejection_reason,
+                        )
+                        continue
+                    seen_patch_signatures.add(patch_signature)
+
                     if patch.patch_type == "no_patch" and patch.requires_human_review:
                         state.stabilization.review_required = True
                         state.stabilization.review_notes.append(patch.reason)
@@ -560,16 +608,18 @@ class AgenticTestDesignOrchestrator:
                             state.static_test_data,
                             self.generator_registry,
                             allowed_bindings=diagnosis.suspected_bindings,
+                            allowed_operations=state.operations,
                         )
                     except Exception as exc:
+                        rejection_reason = str(exc)
                         state.stabilization.review_notes.append(
-                            f"Patch rejected on attempt {attempt_number}, try {fixer_try}: {exc}"
+                            f"Patch rejected on attempt {attempt_number}, try {fixer_try}: {rejection_reason}"
                         )
                         store.log_event(
                             "Patch rejected",
                             attempt=attempt_number,
                             try_number=fixer_try,
-                            reason=exc,
+                            reason=rejection_reason,
                         )
                         applied_patch = None
                     if applied_patch:
@@ -585,6 +635,19 @@ class AgenticTestDesignOrchestrator:
                         if applied_patch.requires_human_review:
                             state.stabilization.review_required = True
                             state.stabilization.review_notes.append(applied_patch.reason)
+                    else:
+                        rejection_reason = (
+                            "Deterministic validator rejected the patch. The target may not exist, "
+                            "the patch type may not match the current binding, or the referenced "
+                            "variable/source may be unavailable."
+                        )
+                        rejected_proposals.append(
+                            {
+                                "fixer_try": fixer_try,
+                                "patch": patch.model_dump(mode="json"),
+                                "rejection_reason": rejection_reason,
+                            }
+                        )
 
                 if applied:
                     break

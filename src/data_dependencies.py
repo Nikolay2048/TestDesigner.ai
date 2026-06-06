@@ -141,13 +141,10 @@ def build_external_context_binding_decisions(
 ) -> list[GenerationBindingDecision]:
     """Bind obvious request needs to stable dependency context without asking the LLM."""
 
-    resolved = {(item.step_id, item.target) for item in dependency_resolutions if item.selected_candidate_id}
     decisions: list[GenerationBindingDecision] = []
 
     for step in graph.steps:
         for need in step.needs:
-            if (step.step_id, need.target) in resolved:
-                continue
             external_key = _external_context_key_for_need(need, state.external_context)
             if not external_key:
                 continue
@@ -240,6 +237,14 @@ def assemble_data_binding_plan(
         for need in step.needs:
             resolution = resolution_by_need.get((need.step_id, need.target))
             candidate = candidate_by_id.get(resolution.selected_candidate_id) if resolution else None
+            decision = generation_by_need.get((need.step_id, need.target))
+
+            # Stable dependency state is authoritative for an exact request need.
+            # A small model may otherwise select a same-shaped ID from another resource.
+            if decision and decision.source == "external_context":
+                request_bindings.append(_binding_from_generation_decision(need, decision, graph))
+                continue
+
             if candidate:
                 variable = _variable_name(candidate.json_path)
                 request_bindings.append(
@@ -269,7 +274,6 @@ def assemble_data_binding_plan(
                 )
                 continue
 
-            decision = generation_by_need.get((need.step_id, need.target))
             if decision:
                 binding = _binding_from_generation_decision(need, decision, graph)
                 request_bindings.append(binding)
