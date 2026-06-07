@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import os
 from pathlib import Path
 
-from llm import NoLLM, OllamaLLM
+from dotenv import load_dotenv
+
+from llm import OllamaLLM, OpenRouterLLM
 from orchestrator import AgenticTestDesignOrchestrator
 from scenario_dependencies import ScenarioDependencyRunner
 
@@ -29,9 +32,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run only with already-published stable scenario dependencies",
     )
-    parser.add_argument("--llm", choices=["none", "ollama"], default="ollama")
-    parser.add_argument("--model", default="qwen3:14b", help="Ollama model name")
-    parser.add_argument("--ollama-url", default="http://localhost:11434")
+    parser.add_argument("--llm", choices=["ollama", "openrouter"], default="ollama")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Model name; defaults to OLLAMA_MODEL for Ollama and qwen/qwen3-32b for OpenRouter",
+    )
     parser.add_argument(
         "--run-test-cases",
         action="store_true",
@@ -46,8 +52,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    load_dotenv()
     args = build_parser().parse_args()
-    llm = NoLLM() if args.llm == "none" else OllamaLLM(model=args.model, base_url=args.ollama_url)
+    if args.llm == "openrouter":
+        llm = OpenRouterLLM(
+            model=args.model or "qwen/qwen3-32b",
+            api_key=os.getenv("OPENROUTER_API_KEY", ""),
+            base_url=os.getenv("OPENROUTER_URL", "https://openrouter.ai/api/v1"),
+        )
+    else:
+        llm = OllamaLLM(
+            model=args.model or os.getenv("OLLAMA_MODEL", "qwen3:14b"),
+            base_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
+        )
 
     if args.resolve_dependencies:
         runner = ScenarioDependencyRunner(llm=llm)

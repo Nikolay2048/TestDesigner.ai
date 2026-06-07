@@ -45,6 +45,7 @@ from stable import build_provided_state, publish_stable_package
 from stabilization_rules import patch_from_server_hint
 from test_design import execute_test_cases
 from validators import (
+    deduplicate_adjacent_terminal_operations,
     order_endpoint_mapping_by_business_steps,
     validate_data_binding,
     validate_endpoint_mapping,
@@ -124,6 +125,9 @@ class AgenticTestDesignOrchestrator:
                 state.endpoint_mapping = order_endpoint_mapping_by_business_steps(
                     state.endpoint_mapping,
                     state.understanding.business_steps,
+                )
+                state.endpoint_mapping = deduplicate_adjacent_terminal_operations(
+                    state.endpoint_mapping
                 )
             dependency_notes = apply_dependency_context_to_endpoint_mapping(state)
             if run.output is not None:
@@ -392,7 +396,11 @@ class AgenticTestDesignOrchestrator:
                 business_step=business_step,
             )
             task_state = state.model_copy(deep=True)
-            agent = EndpointMapperAgent(self.llm, business_steps=[business_step])
+            agent = EndpointMapperAgent(
+                self.llm,
+                business_steps=[business_step],
+                scenario_business_steps=steps,
+            )
             task_state, task_run = agent.run(task_state)
             store.save_agent_run(task_run, f"endpoint_mapper_tasks/task_{index:02d}")
             store.log_event(

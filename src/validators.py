@@ -69,6 +69,56 @@ def order_endpoint_mapping_by_business_steps(
     return mapping
 
 
+def deduplicate_adjacent_terminal_operations(
+    mapping: EndpointMappingResult,
+) -> EndpointMappingResult:
+    """Prevent a terminal lifecycle endpoint from being executed twice for adjacent outcomes."""
+
+    terminal_segments = {"/return", "/close", "/complete", "/cancel"}
+    previous_operations: set[tuple[str, str]] = set()
+    unmapped_by_step = {item.business_step: item for item in mapping.unmapped_steps}
+
+    for step_mapping in mapping.mappings:
+        retained = []
+        removed = []
+        for operation in step_mapping.operations:
+            key = (operation.method.upper(), operation.path)
+            normalized_path = operation.path.rstrip("/").lower()
+            is_terminal = any(normalized_path.endswith(segment) for segment in terminal_segments)
+            if operation.method.upper() != "GET" and is_terminal and key in previous_operations:
+                removed.append(operation)
+            else:
+                retained.append(operation)
+
+        if removed:
+            removed_text = ", ".join(
+                f"{operation.method.upper()} {operation.path}" for operation in removed
+            )
+            risk = (
+                f"Removed repeated terminal operation {removed_text} from business step "
+                f"'{step_mapping.business_step}'; the preceding step already executes it."
+            )
+            step_mapping.risks.append(risk)
+            mapping.risks.append(risk)
+            step_mapping.operations = retained
+            if not retained and step_mapping.business_step not in unmapped_by_step:
+                unmapped = UnmappedStep(
+                    business_step=step_mapping.business_step,
+                    reason=(
+                        "This step describes the outcome of the preceding terminal API operation "
+                        "and does not require another request."
+                    ),
+                )
+                mapping.unmapped_steps.append(unmapped)
+                unmapped_by_step[unmapped.business_step] = unmapped
+
+        previous_operations = {
+            (operation.method.upper(), operation.path) for operation in step_mapping.operations
+        }
+
+    return mapping
+
+
 def validate_data_binding(
     data_binding: DataBindingPlan,
     operations: list[ApiOperation],

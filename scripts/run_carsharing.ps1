@@ -1,8 +1,13 @@
 param(
-    [string]$Model = "qwen3:14b",
+    [ValidateSet("ollama", "openrouter")]
+    [string]$Llm = "ollama",
+    [string]$Model = "",
+    [Alias("Scenario")]
+    [string]$ScenarioName = "",
     [string]$OutputRoot = "",
     [string]$PythonCommand = "python",
     [int]$MaxFixerTries = 7,
+    [switch]$SkipDependencyResolution,
     [switch]$SkipTestCases,
     [switch]$SkipPostman
 )
@@ -65,11 +70,13 @@ function Wait-CarsharingMock {
 
 Write-Host "Output: $OutputRoot" -ForegroundColor Cyan
 
-try {
-    Invoke-RestMethod -Method Get -Uri "$ollamaUrl/api/tags" -TimeoutSec 3 | Out-Null
-}
-catch {
-    throw "Ollama is unavailable at $ollamaUrl. Start Ollama before running this script."
+if ($Llm -eq "ollama") {
+    try {
+        Invoke-RestMethod -Method Get -Uri "$ollamaUrl/api/tags" -TimeoutSec 3 | Out-Null
+    }
+    catch {
+        throw "Ollama is unavailable at $ollamaUrl. Start Ollama before running this script."
+    }
 }
 
 $mockProcess = $null
@@ -94,15 +101,22 @@ try {
         Write-Host "Carsharing mock started, PID $($mockProcess.Id)"
     }
 
-    $scenarios = Get-ChildItem -Path $scenarioDir -Filter "*.md" | Sort-Object Name
-    if (-not $scenarios) {
+    $scenarioFiles = @(Get-ChildItem -Path $scenarioDir -Filter "*.md" | Sort-Object Name)
+    if ($ScenarioName) {
+        $scenarioStem = [System.IO.Path]::GetFileNameWithoutExtension($ScenarioName)
+        $scenarioFiles = @($scenarioFiles | Where-Object { $_.BaseName -eq $scenarioStem })
+        if ($scenarioFiles.Count -eq 0) {
+            throw "Scenario '$ScenarioName' was not found in $scenarioDir."
+        }
+    }
+    if ($scenarioFiles.Count -eq 0) {
         throw "No scenarios found in $scenarioDir"
     }
 
     $results = @()
 
-    foreach ($scenario in $scenarios) {
-        $scenarioName = $scenario.BaseName
+    foreach ($scenarioFile in $scenarioFiles) {
+        $scenarioName = $scenarioFile.BaseName
         $runDir = Join-Path $OutputRoot $scenarioName
         $consoleLog = Join-Path $OutputRoot "$scenarioName.console.log"
 
@@ -113,19 +127,23 @@ try {
 
         $arguments = @(
             (Join-Path $projectRoot "src\main.py"),
-            "--scenario", $scenario.FullName,
+            "--scenario", $scenarioFile.FullName,
             "--openapi", $openapiPath,
             "--test-data", $testDataPath,
             "--out", $runDir,
             "--stable-dir", $stableDir,
             "--base-url", $baseUrl,
-            "--llm", "ollama",
-            "--model", $Model,
-            "--ollama-url", $ollamaUrl,
+            "--llm", $Llm,
             "--max-attempts", "7",
-            "--max-fixer-tries", "$MaxFixerTries",
-            "--resolve-dependencies"
+            "--max-fixer-tries", "$MaxFixerTries"
         )
+
+        if ($Model) {
+            $arguments += @("--model", $Model)
+        }
+        if (-not $SkipDependencyResolution) {
+            $arguments += "--resolve-dependencies"
+        }
 
         if (-not $SkipTestCases) {
             $arguments += "--run-test-cases"

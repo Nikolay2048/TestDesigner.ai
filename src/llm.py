@@ -36,6 +36,48 @@ class OllamaLLM:
         return response.json()["message"]["content"]
 
 
+class OpenRouterLLM:
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        base_url: str = "https://openrouter.ai/api/v1",
+        timeout: float = 300.0,
+        temperature: float = 0.1,
+    ):
+        if not api_key:
+            raise ValueError("OPENROUTER_API_KEY is required for the OpenRouter LLM backend.")
+        if not model:
+            raise ValueError("OPENROUTER_MODEL is required for the OpenRouter LLM backend.")
+        self.model = model
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self.temperature = temperature
+
+    def complete(self, messages: list[AgentMessage]) -> str:
+        payload = {
+            "model": self.model,
+            "messages": [message.model_dump() for message in messages],
+            "temperature": self.temperature,
+        }
+        response = httpx.post(
+            f"{self.base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        try:
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ValueError("OpenRouter response does not contain assistant message content.") from exc
+
+
 def extract_json(text: str) -> dict | list:
     fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if fenced:
@@ -61,4 +103,3 @@ def extract_json(text: str) -> dict | list:
                 return json.loads(text[start:index + 1])
 
     raise ValueError("LLM response does not contain valid JSON")
-

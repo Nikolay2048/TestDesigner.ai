@@ -79,6 +79,7 @@ from test_design import (
 )
 from stable import publish_stable_package, stable_package_dir, validate_stable_package
 from validators import (
+    deduplicate_adjacent_terminal_operations,
     order_endpoint_mapping_by_business_steps,
     validate_data_binding,
     validate_endpoint_mapping,
@@ -171,6 +172,8 @@ def test_endpoint_mapper_prompt_uses_compact_operations() -> None:
     assert "Do not put a step into unmapped_steps just because matching is hard" in prompt[1].content
     assert "Preserve lifecycle API steps that create IDs needed later" in prompt[1].content
     assert "start/activate" in prompt[1].content
+    assert "Full ordered business scenario for context" in prompt[1].content
+    assert "Do not repeat a state-changing operation" in prompt[1].content
     assert "request_schema" not in prompt[1].content
 
 
@@ -240,6 +243,50 @@ def test_endpoint_mapping_is_reordered_to_documented_business_step_order() -> No
         "Pay reservation",
     ]
     assert "reordered" in ordered.risks[0]
+
+
+def test_endpoint_mapping_removes_adjacent_duplicate_terminal_operation() -> None:
+    mapping = EndpointMappingResult(
+        mappings=[
+            StepOperationMapping(
+                business_step="Client returns the car",
+                operations=[OperationRef(method="POST", path="/rentals/{rentalId}/return")],
+            ),
+            StepOperationMapping(
+                business_step="System closes the rental",
+                operations=[OperationRef(method="POST", path="/rentals/{rentalId}/return")],
+            ),
+        ]
+    )
+
+    validated = deduplicate_adjacent_terminal_operations(mapping)
+
+    assert len(validated.mappings[0].operations) == 1
+    assert validated.mappings[1].operations == []
+    assert validated.unmapped_steps[0].business_step == "System closes the rental"
+    assert "does not require another request" in validated.unmapped_steps[0].reason
+    assert "Removed repeated terminal operation" in validated.risks[0]
+
+
+def test_endpoint_mapping_preserves_adjacent_duplicate_non_terminal_operation() -> None:
+    mapping = EndpointMappingResult(
+        mappings=[
+            StepOperationMapping(
+                business_step="User adds first item",
+                operations=[OperationRef(method="POST", path="/items")],
+            ),
+            StepOperationMapping(
+                business_step="User adds second item",
+                operations=[OperationRef(method="POST", path="/items")],
+            ),
+        ]
+    )
+
+    validated = deduplicate_adjacent_terminal_operations(mapping)
+
+    assert len(validated.mappings[0].operations) == 1
+    assert len(validated.mappings[1].operations) == 1
+    assert validated.unmapped_steps == []
 
 
 def test_data_dependency_graph_extracts_needs_and_producers() -> None:

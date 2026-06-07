@@ -61,8 +61,11 @@ python src/main.py --scenario data/carsharing/specs/01-basic-economy-rental.md -
 ## Запуск через Ollama
 
 ```bash
-python src/main.py --scenario data/carsharing/specs/01-basic-economy-rental.md --openapi data/carsharing/openapi/openapi.yaml --out runs/latest --llm ollama --model qwen3:14b
+python src/main.py --scenario data/carsharing/specs/01-basic-economy-rental.md --openapi data/carsharing/openapi/openapi.yaml --out runs/latest --llm ollama
 ```
+
+По умолчанию используется `qwen3:14b` для Ollama и `qwen/qwen3-32b` для OpenRouter.
+Модель можно переопределить единым параметром `--model`.
 
 Артефакты:
 
