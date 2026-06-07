@@ -291,8 +291,12 @@ def _variable_exists_before_index(
 
 
 def _validate_binding(binding, static_test_data: dict, generator_registry: GeneratorRegistry) -> None:
-    if binding.source == "static" and binding.static_key not in static_test_data:
-        raise ValueError(f"Unknown static key: {binding.static_key}")
+    if binding.source == "static":
+        current = static_test_data
+        for part in (binding.static_key or "").split("."):
+            if not isinstance(current, dict) or part not in current:
+                raise ValueError(f"Unknown static key: {binding.static_key}")
+            current = current[part]
     if binding.source == "generated" and (not binding.generator or not generator_registry.has(binding.generator)):
         raise ValueError(f"Unknown generator: {binding.generator}")
 

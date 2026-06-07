@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from domain import ApiOperation, DataBindingPlan, EndpointMappingResult, UnmappedStep
+from data_dependencies import _parameter_needs, _path_needs, _schema_needs
+from domain import ApiOperation, DataBindingPlan, EndpointMappingResult, ResponseExtraction, UnmappedStep
 from generators import GeneratorRegistry
 
 
@@ -83,6 +84,15 @@ def validate_data_binding(
     global_risks = list(data_binding.risks)
 
     for step in data_binding.steps:
+        operation = next(
+            (
+                item
+                for item in operations
+                if (item.method.upper(), item.path)
+                == (step.operation.method.upper(), step.operation.path)
+            ),
+            None,
+        )
         operation_key = (step.operation.method, step.operation.path)
         if operation_key not in allowed_operations:
             risk = (
@@ -92,7 +102,22 @@ def validate_data_binding(
             step.risks.append(risk)
             global_risks.append(risk)
 
+        needs_by_target = {}
+        if operation:
+            needs_by_target = {
+                need.target: need
+                for need in [
+                    *_path_needs("", operation.path),
+                    *_parameter_needs("", operation.request_parameters),
+                    *_schema_needs("", operation.request_schema),
+                ]
+            }
+
         for binding in step.request_bindings:
+            need = needs_by_target.get(binding.target)
+            if need:
+                binding.value_type = need.type
+                binding.value_format = need.field_schema.get("format")
             if binding.source == "static" and binding.static_key not in static_keys:
                 risk = (
                     f"Binding {binding.target} references unknown static key: "
@@ -124,6 +149,14 @@ def validate_data_binding(
                     step.risks.append(risk)
                     global_risks.append(risk)
 
+        if operation:
+            bound_targets = {binding.target for binding in step.request_bindings}
+            for target in needs_by_target:
+                if target not in bound_targets:
+                    risk = f"Required request value has no binding: {step.operation.method} {step.operation.path} {target}."
+                    step.risks.append(risk)
+                    global_risks.append(risk)
+
         for extraction in step.response_extractions:
             if not extraction.json_path.startswith("$"):
                 risk = (
@@ -136,8 +169,57 @@ def validate_data_binding(
     for missing in data_binding.missing_generators:
         missing.human_review_required = True
 
-    data_binding.risks = global_risks
+    _reconcile_response_bindings(data_binding, global_risks)
+    data_binding.risks = list(dict.fromkeys(global_risks))
     return data_binding
+
+
+def _reconcile_response_bindings(
+    data_binding: DataBindingPlan,
+    risks: list[str],
+) -> None:
+    """Keep response consumers connected to a concrete earlier extraction."""
+
+    producers: dict[str, list[tuple[int, ResponseExtraction]]] = {}
+    for step_index, step in enumerate(data_binding.steps):
+        for binding in step.request_bindings:
+            if binding.source != "response":
+                continue
+            matches = [
+                item
+                for item in producers.get(binding.variable or "", [])
+                if item[0] < step_index
+            ]
+            if not matches and binding.variable and binding.json_path and binding.source_step_id:
+                try:
+                    source_index = int(binding.source_step_id.removeprefix("s")) - 1
+                except ValueError:
+                    source_index = -1
+                if 0 <= source_index < step_index:
+                    extraction = ResponseExtraction(
+                        variable=binding.variable,
+                        json_path=binding.json_path,
+                        scope="scenario",
+                        source_step_id=f"s{source_index + 1:02d}",
+                        policy="reconciled_from_response_binding",
+                        reason=f"Required by step s{step_index + 1:02d} {binding.target}.",
+                    )
+                    data_binding.steps[source_index].response_extractions.append(extraction)
+                    producers.setdefault(binding.variable, []).append((source_index, extraction))
+                    matches = [(source_index, extraction)]
+            if not matches:
+                risks.append(
+                    f"s{step_index + 1:02d} {binding.target} references response variable "
+                    f"{binding.variable or '<empty>'} without an earlier extraction."
+                )
+                continue
+            source_index, extraction = matches[-1]
+            binding.source_step_id = f"s{source_index + 1:02d}"
+            binding.json_path = extraction.json_path
+
+        for extraction in step.response_extractions:
+            extraction.source_step_id = f"s{step_index + 1:02d}"
+            producers.setdefault(extraction.variable, []).append((step_index, extraction))
 
 
 def _flatten_static_keys(value: dict, prefix: str = "") -> list[str]:

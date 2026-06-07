@@ -36,6 +36,10 @@ class FlowExecutor:
     def execute(self, plan: DataBindingPlan, attempt: int) -> ExecutorTrace:
         variables: dict[str, Any] = {}
         trace = ExecutorTrace(attempt=attempt, base_url=self.base_url)
+        if not plan.steps:
+            trace.status = "failed"
+            trace.failure = "Execution plan has no REST steps."
+            return trace
 
         for index, step in enumerate(plan.steps, start=1):
             step_id = f"s{index:02d}"

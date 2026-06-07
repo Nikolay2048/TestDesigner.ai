@@ -205,6 +205,82 @@ def build_static_test_data_binding_decisions(
     return decisions
 
 
+def complete_generation_bindings_with_fallbacks(
+    graph: DataDependencyGraph,
+    decisions: list[GenerationBindingDecision],
+) -> list[GenerationBindingDecision]:
+    """Replace unresolved primitive needs with universal executable generators."""
+
+    by_need = {(item.step_id, item.target): item for item in decisions}
+    completed: list[GenerationBindingDecision] = []
+    for step in graph.steps:
+        for need in step.needs:
+            decision = by_need.get((need.step_id, need.target))
+            if decision and decision.source not in {"missing", "unknown"}:
+                completed.append(decision)
+                continue
+            fallback = _fallback_generation_decision(need)
+            if fallback:
+                completed.append(fallback)
+            elif decision:
+                completed.append(decision)
+    known = {(item.step_id, item.target) for item in completed}
+    completed.extend(
+        item for item in decisions if (item.step_id, item.target) not in known
+    )
+    return completed
+
+
+def _fallback_generation_decision(need: DataNeed) -> GenerationBindingDecision | None:
+    schema = need.field_schema
+    enum_values = schema.get("enum") if isinstance(schema.get("enum"), list) else []
+    if enum_values:
+        generator = "enum_value"
+        params = {"values": enum_values}
+    elif need.type == "boolean":
+        generator = "enum_value"
+        params = {"values": [True]}
+    elif need.type in {"integer", "number"}:
+        minimum = schema.get("minimum", 0)
+        maximum = schema.get("maximum", max(minimum + 100, 100))
+        generator = "random_int"
+        params = {"min": int(minimum), "max": int(maximum)}
+    elif need.type == "string":
+        value_format = schema.get("format")
+        if value_format == "date":
+            generator = "date_after_now"
+            params = {"days": 1, "format": "date"}
+        elif value_format == "date-time":
+            generator = "date_after_now"
+            params = {"days": 1, "format": "iso_datetime"}
+        elif value_format == "email":
+            generator = "email"
+            params = {}
+        elif value_format == "uuid":
+            generator = "uuid"
+            params = {}
+        else:
+            min_length = max(1, int(schema.get("minLength", 1)))
+            max_length = max(min_length, int(schema.get("maxLength", 32)))
+            generator = "random_string"
+            params = {
+                "prefix": _target_variable_name(need.target).split("_")[-1] or "test",
+                "length": min(max_length, max(min_length, 16)),
+            }
+    else:
+        return None
+    return GenerationBindingDecision(
+        step_id=need.step_id,
+        target=need.target,
+        source="generated",
+        generator=generator,
+        params=params,
+        confidence="medium",
+        reason="Deterministic fallback for an unresolved required primitive request value.",
+        requires_human_review=True,
+    )
+
+
 def assemble_data_binding_plan(
     graph: DataDependencyGraph,
     dependency_tasks: list[DependencyResolutionTask],
@@ -257,6 +333,8 @@ def assemble_data_binding_plan(
                         scope=_scope_for_need(need, graph),
                         source_step_id=candidate.source_step_id,
                         candidate_id=candidate.candidate_id,
+                        value_type=need.type,
+                        value_format=need.field_schema.get("format"),
                         policy="dependency_resolver_selected",
                         reason=resolution.reason,
                     )
@@ -286,6 +364,8 @@ def assemble_data_binding_plan(
                     target=need.target,
                     location=need.location,
                     source="unknown",
+                    value_type=need.type,
+                    value_format=need.field_schema.get("format"),
                     scope=_scope_for_need(need, graph),
                     reason="No dependency resolution or generation decision was provided.",
                 )
@@ -514,6 +594,8 @@ def _binding_from_generation_decision(
         params=decision.params,
         expression=decision.expression,
         literal=decision.literal,
+        value_type=need.type,
+        value_format=need.field_schema.get("format"),
         scope=_scope_for_need(need, graph),
         policy="generation_binding_selected" if source != "unknown" else "missing_or_unknown",
         requires_human_review=decision.requires_human_review or source == "unknown",

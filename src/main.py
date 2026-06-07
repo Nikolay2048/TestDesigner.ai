@@ -110,6 +110,9 @@ def main() -> None:
         if last_run.status == "needs_llm":
             print("Next step: inspect the generated prompt, then run with --llm ollama or improve the agent contract.")
 
+    if not state.stabilization or state.stabilization.status != "passed":
+        raise SystemExit(1)
+
 
 def _format_execution_statuses(executions) -> str:
     counts = Counter(item.status for item in executions)

@@ -13,8 +13,17 @@ class EndpointMapperAgent(Agent):
     name = "Endpoint Mapper"
     output_model = EndpointMappingResult
 
+    def __init__(self, llm=None, business_steps: list[str] | None = None):
+        super().__init__(llm)
+        self.business_steps = business_steps
+
     def build_prompt(self, state: ProjectState) -> list[AgentMessage]:
         understanding = state.understanding
+        business_steps = (
+            self.business_steps
+            if self.business_steps is not None
+            else understanding.business_steps if understanding else []
+        )
         operations = [
             {
                 "method": operation.method,
@@ -36,7 +45,7 @@ class EndpointMapperAgent(Agent):
                 role="user",
                 content=f"""
 Business steps:
-{json.dumps(understanding.business_steps if understanding else [], ensure_ascii=False, indent=2)}
+{json.dumps(business_steps, ensure_ascii=False, indent=2)}
 
 Endpoint mentions from documentation:
 {json.dumps([item.model_dump(mode="json") for item in understanding.endpoint_mentions] if understanding else [], ensure_ascii=False, indent=2)}

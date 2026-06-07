@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import copy
 import re
 from pathlib import Path
 from typing import Any
 
 from agents.documentation_analyst import DocumentationAnalystAgent
-from domain import AgentRun, ProjectState, ScenarioDependency
+from domain import AgentRun, DataBindingPlan, ProjectState, ResponseExtraction, ScenarioDependency
 from generators import GeneratorRegistry
 from io_utils import ArtifactStore, load_scenario, load_test_data
 from llm import LLM
@@ -13,6 +14,8 @@ from openapi import load_openapi_operations
 from orchestrator import AgenticTestDesignOrchestrator
 from stable import (
     execute_stable_setup,
+    load_dependency_setup_plan,
+    load_stable_plan,
     load_scenario_output,
     scenario_id,
     semantic_type,
@@ -156,6 +159,7 @@ class ScenarioDependencyRunner:
         external_context = prepare_external_context("initial")
         if external_context is None:
             return state
+        dependency_setup_plan = _build_dependency_setup_plan(dependency_specs)
 
         store.log_event("External context prepared", keys=",".join(sorted(external_context)) or "-")
         return AgenticTestDesignOrchestrator(self.llm).run(
@@ -168,12 +172,62 @@ class ScenarioDependencyRunner:
             max_fixer_tries=max_fixer_tries,
             external_context=external_context,
             external_context_factory=lambda attempt: prepare_external_context(f"attempt_{attempt:02d}") or {},
+            dependency_setup_plan=dependency_setup_plan,
             stable_dir=stable_dir,
             publish_stable=True,
             reset_log=False,
             run_test_cases=run_test_cases,
             export_postman=export_postman,
         )
+
+
+def _build_dependency_setup_plan(dependency_specs) -> DataBindingPlan:
+    """Build the reproducible setup chain used by exported Postman collections."""
+
+    combined = DataBindingPlan()
+    for dependency, _dependency_path, package_dir in dependency_specs:
+        plan = copy.deepcopy(load_stable_plan(package_dir))
+        step_limit = _stable_setup_step_limit(package_dir, dependency)
+        if step_limit is not None:
+            plan.steps = plan.steps[:step_limit]
+        _add_external_context_alias_extractions(plan, package_dir)
+        nested_setup = copy.deepcopy(load_dependency_setup_plan(package_dir))
+        combined.steps.extend(nested_setup.steps)
+        combined.steps.extend(plan.steps)
+    return combined
+
+
+def _add_external_context_alias_extractions(
+    plan: DataBindingPlan,
+    package_dir: str | Path,
+) -> None:
+    """Expose semantic aliases such as reservation_id from dependency responses."""
+
+    output = load_scenario_output(package_dir)
+    for item in output.provided_state:
+        step_number = _step_number(item.source_step_id or "")
+        if not step_number or step_number > len(plan.steps) or not item.json_path:
+            continue
+        step = plan.steps[step_number - 1]
+        semantic = item.semantic_type
+        if semantic in {None, "id"}:
+            semantic = _infer_semantic_type_from_stable_plan(output, item.name)
+        aliases = _provided_state_aliases(item.name, semantic)
+        existing = {extraction.variable for extraction in step.response_extractions}
+        for alias in aliases:
+            if alias in existing:
+                continue
+            step.response_extractions.append(
+                ResponseExtraction(
+                    variable=alias,
+                    json_path=item.json_path,
+                    scope="scenario",
+                    source_step_id=f"s{step_number:02d}",
+                    policy="dependency_context_alias",
+                    reason="Required by a dependent scenario.",
+                )
+            )
+            existing.add(alias)
 
 
 def _resolve_dependency_path(

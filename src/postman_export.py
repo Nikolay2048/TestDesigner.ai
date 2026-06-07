@@ -1,10 +1,13 @@
 ﻿from __future__ import annotations
 
+import copy
 import re
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from data_dependencies import _parameter_needs, _path_needs, _schema_needs
 from domain import DataBindingPlan, DesignedTestCase, ProjectState, RequestValueBinding, ResponseExtraction, TestAssertion
 from generators import GeneratorRegistry
 from io_utils import write_json
@@ -12,6 +15,12 @@ from test_design import build_case_execution_plan
 
 
 POSTMAN_SCHEMA = "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+
+
+@dataclass(frozen=True)
+class _TemplateValue:
+    variable: str
+    value_type: str
 
 
 def export_postman_artifacts(
@@ -38,13 +47,25 @@ class PostmanExporter:
         self.unsupported_features: list[str] = []
         self.requires_human_review: list[str] = []
         self.scenario_generated_bindings: dict[str, RequestValueBinding] = {}
+        self.binding_types: dict[tuple[str, str, str], str] = {}
+        self.static_test_data: dict[str, Any] = {}
+        self.external_context: dict[str, Any] = {}
+        self.dependency_setup_plan = DataBindingPlan()
 
     def export(self, state: ProjectState, base_url: str) -> dict[str, Any]:
         if not state.stabilization or state.stabilization.status != "passed" or not state.stabilization.stable_plan:
             raise ValueError("Stable happy path is required for Postman export.")
 
-        stable_plan = state.stabilization.stable_plan
-        self.scenario_generated_bindings = _scenario_generated_bindings(stable_plan)
+        stable_plan = copy.deepcopy(state.stabilization.stable_plan)
+        if not stable_plan.steps:
+            raise ValueError("Stable happy path contains no scenario REST requests.")
+        self.dependency_setup_plan = copy.deepcopy(state.dependency_setup_plan or DataBindingPlan())
+        self.static_test_data = state.static_test_data
+        self.external_context = state.external_context
+        self.binding_types = _operation_binding_types(state)
+        combined_plan = _combine_plans(self.dependency_setup_plan, stable_plan)
+        self._validate_export_plan(combined_plan)
+        self.scenario_generated_bindings = _scenario_generated_bindings(combined_plan)
         happy_path_collection = self._collection(
             name=f"{state.scenario.title} - Happy Path",
             items=self._happy_path_items(stable_plan),
@@ -56,12 +77,31 @@ class PostmanExporter:
             name=f"{state.scenario.title} - Test Cases",
             items=test_case_items,
         )
-        environment = self._environment(state.scenario.title, base_url, state.static_test_data)
+        environment = self._environment(
+            state.scenario.title,
+            base_url,
+            state.static_test_data,
+            state.external_context,
+            set(_runtime_variables(self.dependency_setup_plan)),
+            _external_variables(combined_plan),
+        )
+        environment_keys = {item["key"] for item in environment["values"]}
+        collection_issues = [
+            *_collection_variable_issues(happy_path_collection, environment_keys),
+            *_collection_variable_issues(test_cases_collection, environment_keys),
+        ]
+        if collection_issues:
+            raise ValueError(
+                "Generated Postman collection contains undefined variables:\n- "
+                + "\n- ".join(collection_issues)
+            )
         summary = {
             "happy_path_requests": len(stable_plan.steps),
             "test_cases": len(state.test_design.test_cases) if state.test_design else 0,
             "test_case_requests": _count_requests(test_case_items),
             "environment_values": len(environment["values"]),
+            "dependency_setup_requests": len(self.dependency_setup_plan.steps),
+            "variable_validation": "passed",
             "unsupported_features": self.unsupported_features,
             "requires_human_review": self.requires_human_review,
             "files": {
@@ -89,30 +129,45 @@ class PostmanExporter:
         }
 
     def _happy_path_items(self, plan: DataBindingPlan) -> list[dict[str, Any]]:
-        return [
-            self._request_item(
-                name=f"{step_id} {step.business_step}",
-                step=step,
-                expected_statuses=None,
-                review_note=None,
+        combined = _combine_plans(self.dependency_setup_plan, plan)
+        reset_variables = _runtime_variables(combined)
+        setup_count = len(self.dependency_setup_plan.steps)
+        items = []
+        for index, (step_id, step) in enumerate(_iter_steps(combined)):
+            items.append(
+                self._request_item(
+                    name=f"{'setup' if index < setup_count else 'scenario'} {step_id} {step.business_step}",
+                    step=step,
+                    expected_statuses=None,
+                    review_note=None,
+                    reset_variables=reset_variables if index == 0 else None,
+                )
             )
-            for step_id, step in _iter_steps(plan)
-        ]
+        return items
 
     def _test_case_folder(self, stable_plan: DataBindingPlan, case: DesignedTestCase) -> dict[str, Any]:
         try:
             case_plan = build_case_execution_plan(stable_plan, case)
+            combined = _combine_plans(self.dependency_setup_plan, case_plan)
+            self._validate_export_plan(combined)
+            reset_variables = _runtime_variables(combined)
+            setup_count = len(self.dependency_setup_plan.steps)
             items = []
-            for step_id, step in _iter_steps(case_plan):
-                assertions = [assertion for assertion in case.assertions if assertion.step_id == step_id]
+            for index, (step_id, step) in enumerate(_iter_steps(combined)):
+                case_step_number = index - setup_count + 1
+                case_step_id = f"s{case_step_number:02d}" if case_step_number > 0 else ""
+                assertions = [
+                    assertion for assertion in case.assertions if assertion.step_id == case_step_id
+                ]
                 items.append(
                     self._request_item(
-                        name=f"{step_id} {step.business_step}",
+                        name=f"{'setup' if index < setup_count else 'scenario'} {step_id} {step.business_step}",
                         step=step,
                         expected_statuses=None,
                         review_note=None,
-                        include_extractions=False,
-                        assertions=assertions,
+                        include_extractions=True,
+                        assertions=assertions if index >= setup_count else None,
+                        reset_variables=reset_variables if index == 0 else None,
                     )
                 )
         except Exception as exc:
@@ -164,12 +219,13 @@ class PostmanExporter:
         review_note: str | None,
         include_extractions: bool = True,
         assertions: list[TestAssertion] | None = None,
+        reset_variables: list[str] | None = None,
     ) -> dict[str, Any]:
         body, query, headers, path = self._request_parts(step)
-        pre_request = self._pre_request_script(step.request_bindings)
+        pre_request = self._pre_request_script(step.request_bindings, reset_variables)
         extractions = step.response_extractions if include_extractions else []
         tests = (
-            self._test_script_from_assertions(assertions)
+            self._test_script_from_assertions(assertions, extractions)
             if assertions is not None
             else self._test_script(extractions, expected_statuses, review_note)
         )
@@ -188,7 +244,7 @@ class PostmanExporter:
         if body is not None:
             item["request"]["body"] = {
                 "mode": "raw",
-                "raw": _json_dumps(body),
+                "raw": _render_json_body(body),
                 "options": {"raw": {"language": "json"}},
             }
             item["request"]["header"].append({"key": "Content-Type", "value": "application/json"})
@@ -200,26 +256,37 @@ class PostmanExporter:
         headers: dict[str, str] = {}
         path = step.operation.path
         for binding in step.request_bindings:
-            value = self._binding_template(binding)
+            value = self._binding_template(binding, step)
             if binding.location == "path":
                 param_name = binding.target.removeprefix("$.path.")
-                path = path.replace("{" + param_name + "}", value)
+                path = path.replace("{" + param_name + "}", str(value))
             elif binding.location == "query":
-                query[_field_name(binding.target)] = value
+                query[_field_name(binding.target)] = str(value)
             elif binding.location == "header":
-                headers[_field_name(binding.target)] = value
+                headers[_field_name(binding.target)] = str(value)
             elif binding.location == "body":
                 _set_json_path(body, binding.target, value)
         return (body or None), query, headers, path
 
-    def _binding_template(self, binding: RequestValueBinding) -> Any:
+    def _binding_template(self, binding: RequestValueBinding, step) -> Any:
         if binding.source == "literal":
             return binding.literal
         variable = _binding_variable(binding)
-        return "{{" + variable + "}}"
+        if binding.location != "body":
+            return "{{" + variable + "}}"
+        return _TemplateValue(
+            variable=variable,
+            value_type=self._binding_value_type(binding, step),
+        )
 
-    def _pre_request_script(self, bindings: list[RequestValueBinding]) -> list[str]:
+    def _pre_request_script(
+        self,
+        bindings: list[RequestValueBinding],
+        reset_variables: list[str] | None = None,
+    ) -> list[str]:
         lines: list[str] = []
+        for variable in reset_variables or []:
+            lines.append(f"pm.collectionVariables.unset('{variable}');")
         used_generators: set[str] = set()
         for binding in bindings:
             if binding.source == "generated" and binding.generator:
@@ -253,8 +320,10 @@ class PostmanExporter:
                 else:
                     lines.append(f"pm.variables.set('{variable}', {call});")
             elif binding.source == "computed":
-                self.unsupported_features.append(f"Computed binding requires review: {binding.target}")
-                lines.append(f"// REVIEW: computed binding is not exported automatically: {binding.target}")
+                variable = _binding_variable(binding)
+                lines.append(
+                    f"pm.variables.set('{variable}', {_computed_expression_js(binding.expression or '')});"
+                )
         return lines or ["// No generated values for this request."]
 
     def _test_script(
@@ -282,25 +351,21 @@ class PostmanExporter:
             )
         if review_note:
             lines.append(f"// REVIEW: {review_note}")
-        if extractions:
-            lines.append("const json = pm.response.json();")
-            for extraction in extractions:
-                accessor = _json_path_accessor("json", extraction.json_path)
-                lines.extend(
-                    [
-                        f"pm.test('{extraction.variable} extracted', function () {{",
-                        f"  pm.expect({accessor}).to.not.equal(undefined);",
-                        "});",
-                        f"pm.collectionVariables.set('{extraction.variable}', {accessor});",
-                    ]
-                )
+        lines.extend(_extraction_script(extractions))
         return lines
 
-    def _test_script_from_assertions(self, assertions: list[TestAssertion]) -> list[str]:
+    def _test_script_from_assertions(
+        self,
+        assertions: list[TestAssertion],
+        extractions: list[ResponseExtraction],
+    ) -> list[str]:
         if not assertions:
-            return ["// No assertions generated for this request."]
+            return [
+                "// No assertions generated for this request.",
+                *_extraction_script(extractions),
+            ]
         lines: list[str] = []
-        needs_json = any(assertion.kind.startswith("json_path_") for assertion in assertions)
+        needs_json = any(assertion.kind.startswith("json_path_") for assertion in assertions) or bool(extractions)
         if needs_json:
             lines.append("const json = pm.response.json();")
         for assertion in assertions:
@@ -335,6 +400,7 @@ class PostmanExporter:
                 lines.extend(_json_type_assertion_lines(accessor, assertion.expected, assertion.json_path))
             elif assertion.kind == "manual_review":
                 lines.append(f"// REVIEW: {assertion.description}")
+        lines.extend(_extraction_script(extractions, json_declared=needs_json))
         return lines
 
     def _url(self, path: str, query: dict[str, str]) -> dict[str, Any]:
@@ -348,12 +414,32 @@ class PostmanExporter:
             "query": [{"key": key, "value": value} for key, value in query.items()],
         }
 
-    def _environment(self, scenario_title: str, base_url: str, static_test_data: dict[str, Any]) -> dict[str, Any]:
+    def _environment(
+        self,
+        scenario_title: str,
+        base_url: str,
+        static_test_data: dict[str, Any],
+        external_context: dict[str, Any],
+        setup_variables: set[str],
+        required_external_variables: set[str],
+    ) -> dict[str, Any]:
         values = [{"key": "baseUrl", "value": base_url, "type": "default", "enabled": True}]
         for key, value in sorted(_flatten_static_values(static_test_data).items()):
             values.append(
                 {
                     "key": _variable_name(key),
+                    "value": value if isinstance(value, str) else _json_dumps(value),
+                    "type": "default",
+                    "enabled": True,
+                }
+            )
+        for key, value in sorted(external_context.items()):
+            variable = _variable_name(key)
+            if variable in setup_variables or variable not in required_external_variables:
+                continue
+            values.append(
+                {
+                    "key": variable,
                     "value": value if isinstance(value, str) else _json_dumps(value),
                     "type": "default",
                     "enabled": True,
@@ -366,6 +452,59 @@ class PostmanExporter:
             "_postman_variable_scope": "environment",
             "_postman_exported_using": "TestDesignerAI",
         }
+
+    def _binding_value_type(self, binding: RequestValueBinding, step) -> str:
+        if binding.value_type != "unknown":
+            return binding.value_type
+        key = (
+            step.operation.method.upper(),
+            step.operation.path,
+            binding.target,
+        )
+        return self.binding_types.get(key, "string")
+
+    def _validate_export_plan(self, plan: DataBindingPlan) -> None:
+        errors: list[str] = []
+        produced: set[str] = set()
+        external_keys = {_variable_name(key) for key in self.external_context}
+        static_keys = {_variable_name(key) for key in _flatten_static_values(self.static_test_data)}
+
+        for step_id, step in _iter_steps(plan):
+            for binding in step.request_bindings:
+                variable = _binding_variable(binding)
+                if binding.source == "unknown":
+                    errors.append(f"{step_id} {binding.target}: unresolved binding")
+                elif binding.source == "response" and variable not in produced:
+                    errors.append(
+                        f"{step_id} {binding.target}: response variable {variable} "
+                        "has no earlier extraction"
+                    )
+                elif binding.source == "external_context":
+                    if variable not in produced and variable not in external_keys:
+                        errors.append(
+                            f"{step_id} {binding.target}: external variable {variable} is unavailable"
+                        )
+                elif binding.source == "static" and variable not in static_keys:
+                    errors.append(
+                        f"{step_id} {binding.target}: static variable {variable} is unavailable"
+                    )
+                elif binding.source == "generated":
+                    if not binding.generator or not self.generator_registry.has(binding.generator):
+                        errors.append(
+                            f"{step_id} {binding.target}: generator "
+                            f"{binding.generator or '<empty>'} is unavailable"
+                        )
+                    elif binding.scope == "scenario":
+                        produced.add(variable)
+                elif binding.source == "computed":
+                    try:
+                        _computed_expression_js(binding.expression or "")
+                    except ValueError as exc:
+                        errors.append(f"{step_id} {binding.target}: {exc}")
+            produced.update(_variable_name(item.variable) for item in step.response_extractions)
+
+        if errors:
+            raise ValueError("Postman export plan is not executable:\n- " + "\n- ".join(errors))
 
     def _case_description(self, case: DesignedTestCase) -> str:
         lines = [
@@ -383,6 +522,49 @@ class PostmanExporter:
 def _iter_steps(plan: DataBindingPlan):
     for index, step in enumerate(plan.steps, start=1):
         yield f"s{index:02d}", step
+
+
+def _combine_plans(first: DataBindingPlan, second: DataBindingPlan) -> DataBindingPlan:
+    return DataBindingPlan(steps=[*copy.deepcopy(first.steps), *copy.deepcopy(second.steps)])
+
+
+def _produced_variables(plan: DataBindingPlan) -> set[str]:
+    return {
+        _variable_name(extraction.variable)
+        for step in plan.steps
+        for extraction in step.response_extractions
+    }
+
+
+def _runtime_variables(plan: DataBindingPlan) -> list[str]:
+    variables = set(_produced_variables(plan))
+    for step in plan.steps:
+        for binding in step.request_bindings:
+            if binding.source == "generated" and binding.scope == "scenario":
+                variables.add(_binding_variable(binding))
+    return sorted(variables)
+
+
+def _external_variables(plan: DataBindingPlan) -> set[str]:
+    return {
+        _binding_variable(binding)
+        for step in plan.steps
+        for binding in step.request_bindings
+        if binding.source == "external_context"
+    }
+
+
+def _operation_binding_types(state: ProjectState) -> dict[tuple[str, str, str], str]:
+    result: dict[tuple[str, str, str], str] = {}
+    for operation in state.operations:
+        needs = [
+            *_path_needs("", operation.path),
+            *_parameter_needs("", operation.request_parameters),
+            *_schema_needs("", operation.request_schema),
+        ]
+        for need in needs:
+            result[(operation.method.upper(), operation.path, need.target)] = need.type
+    return result
 
 
 def _scenario_generated_bindings(plan: DataBindingPlan) -> dict[str, RequestValueBinding]:
@@ -403,6 +585,62 @@ def _count_requests(items: list[dict[str, Any]]) -> int:
         elif "request" in item:
             count += 1
     return count
+
+
+def _collection_variable_issues(
+    collection: dict[str, Any],
+    environment_keys: set[str],
+) -> list[str]:
+    issues: list[str] = []
+    for sequence_name, requests in _request_sequences(collection.get("item", []), collection["info"]["name"]):
+        collection_variables: set[str] = set()
+        for item in requests:
+            prerequest = _event_script(item, "prerequest")
+            for variable in re.findall(
+                r"pm\.collectionVariables\.unset\('([^']+)'\)",
+                prerequest,
+            ):
+                collection_variables.discard(variable)
+            local_variables = set(
+                re.findall(r"pm\.variables\.set\('([^']+)'", prerequest)
+            )
+            collection_variables.update(
+                re.findall(r"pm\.collectionVariables\.set\('([^']+)'", prerequest)
+            )
+            request_text = _json_dumps(item.get("request", {}))
+            referenced = set(re.findall(r"{{([A-Za-z0-9_]+)}}", request_text))
+            missing = referenced - environment_keys - collection_variables - local_variables
+            for variable in sorted(missing):
+                issues.append(f"{sequence_name} / {item.get('name')}: {variable}")
+            tests = _event_script(item, "test")
+            collection_variables.update(
+                re.findall(r"pm\.collectionVariables\.set\('([^']+)'", tests)
+            )
+    return issues
+
+
+def _request_sequences(
+    items: list[dict[str, Any]],
+    prefix: str,
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    direct_requests = [item for item in items if "request" in item]
+    child_folders = [item for item in items if "item" in item]
+    sequences = [(prefix, direct_requests)] if direct_requests else []
+    for folder in child_folders:
+        sequences.extend(
+            _request_sequences(
+                folder.get("item", []),
+                f"{prefix} / {folder.get('name', 'folder')}",
+            )
+        )
+    return sequences
+
+
+def _event_script(item: dict[str, Any], listen: str) -> str:
+    for event in item.get("event", []):
+        if event.get("listen") == listen:
+            return "\n".join(event.get("script", {}).get("exec", []))
+    return ""
 
 
 def _flatten_static_values(value: dict[str, Any], prefix: str = "") -> dict[str, Any]:
@@ -492,6 +730,33 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2)
 
 
+def _render_json_body(value: Any, level: int = 0) -> str:
+    import json
+
+    indent = "  " * level
+    child_indent = "  " * (level + 1)
+    if isinstance(value, _TemplateValue):
+        template = "{{" + value.variable + "}}"
+        if value.value_type in {"integer", "number", "boolean", "array", "object"}:
+            return template
+        return json.dumps(template, ensure_ascii=False)
+    if isinstance(value, dict):
+        if not value:
+            return "{}"
+        entries = [
+            f"{child_indent}{json.dumps(str(key), ensure_ascii=False)}: "
+            f"{_render_json_body(item, level + 1)}"
+            for key, item in value.items()
+        ]
+        return "{\n" + ",\n".join(entries) + f"\n{indent}" + "}"
+    if isinstance(value, list):
+        if not value:
+            return "[]"
+        entries = [f"{child_indent}{_render_json_body(item, level + 1)}" for item in value]
+        return "[\n" + ",\n".join(entries) + f"\n{indent}]"
+    return json.dumps(value, ensure_ascii=False)
+
+
 def _js_literal(value: Any) -> str:
     import json
 
@@ -504,6 +769,7 @@ def _js_generator_name(name: str) -> str:
         "email": "email",
         "phone_number": "phoneNumber",
         "full_name": "fullName",
+        "random_string": "randomString",
         "driver_license_number": "driverLicenseNumber",
         "payment_card_token": "paymentCardToken",
         "date_after_now": "dateAfterNow",
@@ -520,6 +786,7 @@ def _generator_arg_values(name: str, params: dict[str, Any]) -> list[Any]:
         "payment_card_token": {"provider": "mock"},
         "date_after_now": {"days": 1, "format": "iso_datetime"},
         "random_int": {"min": 0, "max": 1000},
+        "random_string": {"prefix": "test", "length": 16},
     }
     order = {
         "email": ["domain"],
@@ -528,6 +795,7 @@ def _generator_arg_values(name: str, params: dict[str, Any]) -> list[Any]:
         "payment_card_token": ["provider"],
         "date_after_now": ["days", "format"],
         "random_int": ["min", "max"],
+        "random_string": ["prefix", "length"],
         "enum_value": ["values"],
     }.get(name, [])
     merged = {**defaults.get(name, {}), **params}
@@ -547,6 +815,48 @@ def _json_path_accessor(root: str, path: str) -> str:
         else:
             current += f"[{_js_literal(part)}]"
     return current
+
+
+def _extraction_script(
+    extractions: list[ResponseExtraction],
+    json_declared: bool = False,
+) -> list[str]:
+    if not extractions:
+        return []
+    lines = ["if (pm.response.code >= 200 && pm.response.code < 300) {"]
+    root = "json"
+    if not json_declared:
+        lines.append("  const json = pm.response.json();")
+    for extraction in extractions:
+        accessor = _json_path_accessor(root, extraction.json_path)
+        lines.extend(
+            [
+                f"  pm.test('{extraction.variable} extracted', function () {{",
+                f"    pm.expect({accessor}).to.not.equal(undefined);",
+                "  });",
+                f"  if ({accessor} !== undefined) {{",
+                f"    pm.collectionVariables.set('{_variable_name(extraction.variable)}', {accessor});",
+                "  }",
+            ]
+        )
+    lines.append("}")
+    return lines
+
+
+def _computed_expression_js(expression: str) -> str:
+    if not expression.strip():
+        raise ValueError("computed binding has no expression")
+    names = re.findall(r"{{\s*([A-Za-z0-9_]+)\s*}}", expression)
+    rendered = expression
+    for name in names:
+        rendered = re.sub(
+            r"{{\s*" + re.escape(name) + r"\s*}}",
+            f"Number(pm.variables.get('{_variable_name(name)}'))",
+            rendered,
+        )
+    if not re.fullmatch(r"[A-Za-z0-9_.'()\s+\-*/]+", rendered):
+        raise ValueError(f"unsupported computed expression: {expression}")
+    return rendered
 
 
 def _json_type_assertion_lines(accessor: str, expected_type: Any, label: str) -> list[str]:

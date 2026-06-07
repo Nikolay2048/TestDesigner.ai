@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from agents.dependency_resolver import DependencyResolverAgent
 from agents.documentation_analyst import DocumentationAnalystAgent
 from agents.endpoint_mapper import EndpointMapperAgent
@@ -16,6 +18,7 @@ from data_dependencies import (
     build_external_context_binding_decisions,
     build_generation_binding_tasks,
     build_static_test_data_binding_decisions,
+    complete_generation_bindings_with_fallbacks,
 )
 from dependency_context import apply_dependency_context_to_endpoint_mapping
 from domain import (
@@ -2666,6 +2669,101 @@ def test_postman_exporter_builds_happy_path_collection() -> None:
     assert environment["values"][0]["value"] == "http://server"
 
 
+def test_postman_exporter_preserves_json_value_types() -> None:
+    state = _stable_generic_completion_state()
+
+    artifacts = PostmanExporter().export(state, base_url="http://server")
+    raw_body = artifacts["happy_path_collection"]["item"][0]["request"]["body"]["raw"]
+
+    assert '"attemptCount": {{attempt_count}}' in raw_body
+    assert '"progressPercent": {{progress_percent}}' in raw_body
+    assert '"approved": {{approved}}' in raw_body
+    assert '"{{attempt_count}}"' not in raw_body
+
+
+def test_postman_exporter_includes_dependency_setup_and_alias_extraction() -> None:
+    state = _stable_generic_completion_state()
+    state.external_context = {"task_id": "TASK-OLD"}
+    state.dependency_setup_plan = DataBindingPlan(
+        steps=[
+            StepDataBinding(
+                business_step="Create task",
+                operation=OperationRef(method="POST", path="/tasks"),
+                response_extractions=[
+                    ResponseExtraction(variable="task_id", json_path="$.id"),
+                ],
+            )
+        ]
+    )
+
+    artifacts = PostmanExporter().export(state, base_url="http://server")
+    items = artifacts["happy_path_collection"]["item"]
+    environment_keys = {item["key"] for item in artifacts["environment"]["values"]}
+    setup_tests = "\n".join(items[0]["event"][1]["script"]["exec"])
+
+    assert len(items) == 2
+    assert items[0]["name"].startswith("setup ")
+    assert "pm.collectionVariables.set('task_id'" in setup_tests
+    assert "task_id" not in environment_keys
+
+
+def test_postman_exporter_keeps_response_extractions_in_test_cases() -> None:
+    state = _stable_two_step_state()
+    state.test_design = build_test_design(state)
+    case = next(item for item in state.test_design.test_cases if item.mutated_step_id == "s02")
+    state.test_design.test_cases = [case]
+
+    artifacts = PostmanExporter().export(state, base_url="http://server")
+    folder = artifacts["test_cases_collection"]["item"][0]["item"][0]
+    setup_tests = "\n".join(folder["item"][0]["event"][1]["script"]["exec"])
+
+    assert "pm.collectionVariables.set('task_id'" in setup_tests
+
+
+def test_postman_exporter_rejects_unavailable_external_variable() -> None:
+    state = _stable_generic_completion_state()
+    state.external_context = {}
+
+    with pytest.raises(ValueError, match="external variable task_id is unavailable"):
+        PostmanExporter().export(state, base_url="http://server")
+
+
+def test_unresolved_required_string_gets_generic_generator_fallback() -> None:
+    graph = DataDependencyGraph(
+        steps=[
+            DataDependencyStep(
+                step_id="s01",
+                business_step="Create resource",
+                operation=OperationRef(method="POST", path="/resources"),
+                needs=[
+                    DataNeed(
+                        step_id="s01",
+                        target="$.displayName",
+                        location="body",
+                        type="string",
+                        field_schema={"type": "string", "minLength": 3, "maxLength": 24},
+                    )
+                ],
+            )
+        ]
+    )
+    decisions = [
+        GenerationBindingDecision(
+            step_id="s01",
+            target="$.displayName",
+            source="unknown",
+            reason="Model could not choose.",
+        )
+    ]
+
+    completed = complete_generation_bindings_with_fallbacks(graph, decisions)
+
+    assert completed[0].source == "generated"
+    assert completed[0].generator == "random_string"
+    assert completed[0].params["length"] == 16
+    assert completed[0].requires_human_review is True
+
+
 def test_postman_exporter_preserves_generator_argument_order() -> None:
     state = _stable_generic_completion_state()
     state.data_binding.steps[0].request_bindings[1].generator = "date_after_now"
@@ -2820,7 +2918,7 @@ def test_export_postman_artifacts_writes_files(tmp_path) -> None:
     assert (tmp_path / "postman" / "test_cases.postman_collection.json").exists()
     assert (tmp_path / "postman" / "environment.postman_environment.json").exists()
     assert summary["happy_path_requests"] == 1
-    assert summary["environment_values"] == 2
+    assert summary["environment_values"] == 3
 
 
 def _stable_generic_completion_state() -> ProjectState:
@@ -2907,6 +3005,7 @@ def _stable_generic_completion_state() -> ProjectState:
     return ProjectState(
         scenario=ScenarioInput(path="scenario.md", title="Scenario", text=""),
         operations=[operation],
+        external_context={"task_id": "TASK-1"},
         data_binding=plan,
         understanding=ScenarioUnderstanding(
             title="Scenario",

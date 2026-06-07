@@ -153,6 +153,8 @@ class RequestValueBinding(BaseModel):
     json_path: str | None = None
     expression: str | None = None
     literal: Any = None
+    value_type: str = "unknown"
+    value_format: str | None = None
     scope: Literal["step", "scenario"] = "step"
     source_step_id: str | None = None
     candidate_id: str | None = None
@@ -635,6 +637,7 @@ class ProjectState(BaseModel):
     operations: list[ApiOperation] = Field(default_factory=list)
     static_test_data: dict[str, Any] = Field(default_factory=dict)
     external_context: dict[str, Any] = Field(default_factory=dict)
+    dependency_setup_plan: DataBindingPlan | None = None
     understanding: ScenarioUnderstanding | None = None
     endpoint_mapping: EndpointMappingResult | None = None
     data_dependency_graph: DataDependencyGraph | None = None

@@ -20,11 +20,13 @@ from data_dependencies import (
     build_dependency_resolution_tasks,
     build_generation_binding_tasks,
     build_static_test_data_binding_decisions,
+    complete_generation_bindings_with_fallbacks,
 )
 from dependency_context import apply_dependency_context_to_endpoint_mapping
 from domain import (
     AgentRun,
     DependencyResolverResult,
+    EndpointMappingResult,
     GenerationBindingResult,
     ScenarioRunOutput,
     StabilizationAttempt,
@@ -70,6 +72,7 @@ class AgenticTestDesignOrchestrator:
         max_fixer_tries: int = 7,
         external_context: dict | None = None,
         external_context_factory=None,
+        dependency_setup_plan=None,
         stable_dir: str | Path | None = None,
         publish_stable: bool = True,
         reset_log: bool = True,
@@ -81,6 +84,7 @@ class AgenticTestDesignOrchestrator:
             operations=load_openapi_operations(openapi_path),
             static_test_data=load_test_data(test_data_path),
             external_context=external_context or {},
+            dependency_setup_plan=dependency_setup_plan,
         )
         store = ArtifactStore(out_dir)
         if reset_log:
@@ -113,7 +117,7 @@ class AgenticTestDesignOrchestrator:
 
         # Stage 2: map extracted business steps to available OpenAPI operations.
         store.log_event("Stage started", stage="endpoint_mapper")
-        state, run = self.endpoint_mapper.run(state)
+        state, run = self._run_endpoint_mapper_tasks(state, store)
         if state.endpoint_mapping:
             state.endpoint_mapping = validate_endpoint_mapping(state.endpoint_mapping, state.operations)
             if state.understanding:
@@ -137,6 +141,18 @@ class AgenticTestDesignOrchestrator:
         if run.status != "completed":
             store.save_state(state)
             store.log_event("Run stopped", reason="endpoint_mapper_failed")
+            return state
+        mapped_operation_count = sum(
+            len(item.operations)
+            for item in (state.endpoint_mapping.mappings if state.endpoint_mapping else [])
+        )
+        if mapped_operation_count == 0:
+            run.status = "failed"
+            run.notes.append("No valid REST operation was mapped for the scenario.")
+            state.agent_runs[-1] = run
+            store.save_agent_run(run)
+            store.save_state(state)
+            store.log_event("Run stopped", reason="endpoint_mapper_produced_no_operations")
             return state
 
         # Stage 3: extract request needs and response producers deterministically.
@@ -207,6 +223,11 @@ class AgenticTestDesignOrchestrator:
             store.save_state(state)
             store.log_event("Run stopped", reason="generation_binding_failed")
             return state
+        if state.generation_bindings and state.data_dependency_graph:
+            state.generation_bindings.decisions = complete_generation_bindings_with_fallbacks(
+                state.data_dependency_graph,
+                state.generation_bindings.decisions,
+            )
 
         # Stage 6: assemble the final plan in deterministic code.
         store.log_event("Stage started", stage="data_binding_assembly")
@@ -353,6 +374,53 @@ class AgenticTestDesignOrchestrator:
         summary.notes.append(f"Resolved {len(resolutions)} dependency tasks.")
         return state, summary
 
+    def _run_endpoint_mapper_tasks(
+        self,
+        state: ProjectState,
+        store: ArtifactStore,
+    ) -> tuple[ProjectState, AgentRun]:
+        steps = state.understanding.business_steps if state.understanding else []
+        mappings = []
+        unmapped = []
+        risks = []
+        status = "completed"
+        notes = []
+        for index, business_step in enumerate(steps, start=1):
+            store.log_event(
+                "Endpoint mapper task started",
+                task=index,
+                business_step=business_step,
+            )
+            task_state = state.model_copy(deep=True)
+            agent = EndpointMapperAgent(self.llm, business_steps=[business_step])
+            task_state, task_run = agent.run(task_state)
+            store.save_agent_run(task_run, f"endpoint_mapper_tasks/task_{index:02d}")
+            store.log_event(
+                "Endpoint mapper task finished",
+                task=index,
+                status=task_run.status,
+            )
+            if task_run.status != "completed" or not task_state.endpoint_mapping:
+                status = "failed"
+                notes.extend(task_run.notes or [f"Endpoint mapping failed for: {business_step}"])
+                continue
+            mappings.extend(task_state.endpoint_mapping.mappings)
+            unmapped.extend(task_state.endpoint_mapping.unmapped_steps)
+            risks.extend(task_state.endpoint_mapping.risks)
+
+        state.endpoint_mapping = EndpointMappingResult(
+            mappings=mappings,
+            unmapped_steps=unmapped,
+            risks=risks,
+        )
+        summary = AgentRun(
+            agent_name="Endpoint Mapper",
+            status=status,
+            output=state.endpoint_mapping.model_dump(mode="json"),
+            notes=notes,
+        )
+        return state, summary
+
     def _run_generation_binding_tasks(
         self,
         state: ProjectState,
@@ -450,6 +518,13 @@ class AgenticTestDesignOrchestrator:
             )
 
             if trace.status == "passed":
+                state.data_binding = validate_data_binding(
+                    state.data_binding,
+                    state.operations,
+                    state.static_test_data,
+                    self.generator_registry,
+                    state.external_context,
+                )
                 state.stabilization.status = "passed"
                 state.stabilization.stable_plan = state.data_binding
                 store.log_event("Stabilization passed", attempt=attempt_number)

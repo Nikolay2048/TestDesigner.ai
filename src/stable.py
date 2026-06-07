@@ -57,6 +57,10 @@ def publish_stable_package(
 
     write_json(package_dir / "metadata.json", metadata)
     write_json(package_dir / "stable_plan.json", state.stabilization.stable_plan.model_dump(mode="json"))
+    write_json(
+        package_dir / "dependency_setup_plan.json",
+        (state.dependency_setup_plan or DataBindingPlan()).model_dump(mode="json"),
+    )
     write_json(package_dir / "last_success_trace.json", latest_trace.model_dump(mode="json"))
     write_json(package_dir / "provided_state.json", output.model_dump(mode="json"))
     write_json(package_dir / "review_notes.json", state.stabilization.review_notes)
@@ -66,6 +70,13 @@ def publish_stable_package(
 def load_stable_plan(package_dir: str | Path) -> DataBindingPlan:
     data = json.loads((Path(package_dir) / "stable_plan.json").read_text(encoding="utf-8"))
     return DataBindingPlan.model_validate(data)
+
+
+def load_dependency_setup_plan(package_dir: str | Path) -> DataBindingPlan:
+    path = Path(package_dir) / "dependency_setup_plan.json"
+    if not path.exists():
+        return DataBindingPlan()
+    return DataBindingPlan.model_validate(json.loads(path.read_text(encoding="utf-8")))
 
 
 def load_scenario_output(package_dir: str | Path) -> ScenarioRunOutput:
@@ -108,8 +119,10 @@ def execute_stable_setup(
     step_limit: int | None = None,
 ) -> tuple[ExecutorTrace, dict[str, Any]]:
     plan = load_stable_plan(package_dir)
+    dependency_setup = load_dependency_setup_plan(package_dir)
     if step_limit is not None:
         plan = DataBindingPlan(steps=plan.steps[:step_limit])
+    plan = DataBindingPlan(steps=[*dependency_setup.steps, *plan.steps])
     executor = FlowExecutor(
         base_url=base_url,
         static_test_data=static_test_data,

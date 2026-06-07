@@ -30,6 +30,10 @@ def full_name() -> str:
     """Return a simple human full name."""
 
 
+def random_string(prefix: str = "test", length: int = 16) -> str:
+    """Return a synthetic generic string with a stable prefix."""
+
+
 def driver_license_number(country: str = "RU") -> str:
     """Return a synthetic driver license number for test data."""
 
@@ -59,6 +63,7 @@ class GeneratorRegistry:
             "email": self._email,
             "phone_number": self._phone_number,
             "full_name": self._full_name,
+            "random_string": self._random_string,
             "driver_license_number": self._driver_license_number,
             "payment_card_token": self._payment_card_token,
             "date_after_now": self._date_after_now,
@@ -70,6 +75,7 @@ class GeneratorRegistry:
             "email": email,
             "phone_number": phone_number,
             "full_name": full_name,
+            "random_string": random_string,
             "driver_license_number": driver_license_number,
             "payment_card_token": payment_card_token,
             "date_after_now": date_after_now,
@@ -97,6 +103,14 @@ class GeneratorRegistry:
                 },
             ),
             "full_name": GeneratorSpec(name="full_name", description="Simple human full name."),
+            "random_string": GeneratorSpec(
+                name="random_string",
+                description="Generic synthetic string for fields without a specialized generator.",
+                parameters={
+                    "prefix": "Readable prefix, default test.",
+                    "length": "Maximum result length, default 16.",
+                },
+            ),
             "driver_license_number": GeneratorSpec(
                 name="driver_license_number",
                 description="Synthetic driver license number for test data.",
@@ -145,6 +159,11 @@ class GeneratorRegistry:
             "full_name": (
                 "function fullName() { "
                 "return `Test User ${Math.floor(Math.random() * 100000)}`; }"
+            ),
+            "random_string": (
+                "function randomString(prefix = 'test', length = 16) { "
+                "const suffix = `${Date.now()}${Math.floor(Math.random() * 100000)}`; "
+                "return `${prefix}_${suffix}`.slice(0, Math.max(1, length)); }"
             ),
             "driver_license_number": (
                 "function driverLicenseNumber(country = 'RU') { "
@@ -234,6 +253,11 @@ class GeneratorRegistry:
     @staticmethod
     def _full_name() -> str:
         return f"Test User {random.randint(10000, 99999)}"
+
+    @staticmethod
+    def _random_string(prefix: str = "test", length: int = 16) -> str:
+        value = f"{prefix}_{uuid.uuid4().hex}"
+        return value[: max(1, length)]
 
     @staticmethod
     def _driver_license_number(country: str = "RU") -> str:
