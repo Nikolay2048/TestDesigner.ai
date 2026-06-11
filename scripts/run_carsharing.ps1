@@ -79,7 +79,7 @@ if ($Llm -eq "ollama") {
     }
 }
 
-$mockProcess = $null
+$mockJob = $null
 $mockStartedHere = $false
 
 try {
@@ -88,17 +88,16 @@ try {
     }
     else {
         Write-Host "Starting carsharing mock at $baseUrl"
-        $mockProcess = Start-Process `
-            -FilePath $python `
-            -ArgumentList @("-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", "8080") `
-            -WorkingDirectory $serverDir `
-            -WindowStyle Hidden `
-            -RedirectStandardOutput (Join-Path $mockLogDir "stdout.log") `
-            -RedirectStandardError (Join-Path $mockLogDir "stderr.log") `
-            -PassThru
+        $stdoutLog = Join-Path $mockLogDir "stdout.log"
+        $stderrLog = Join-Path $mockLogDir "stderr.log"
+        $mockJob = Start-Job -ScriptBlock {
+            param($pythonPath, $workingDirectory, $outLog, $errLog)
+            Set-Location $workingDirectory
+            & $pythonPath -m uvicorn app:app --host 127.0.0.1 --port 8080 1>> $outLog 2>> $errLog
+        } -ArgumentList $python, $serverDir, $stdoutLog, $stderrLog
         $mockStartedHere = $true
         Wait-CarsharingMock
-        Write-Host "Carsharing mock started, PID $($mockProcess.Id)"
+        Write-Host "Carsharing mock started, job $($mockJob.Id)"
     }
 
     $scenarioFiles = @(Get-ChildItem -Path $scenarioDir -Filter "*.md" | Sort-Object Name)
@@ -185,9 +184,9 @@ try {
     }
 }
 finally {
-    if ($mockStartedHere -and $mockProcess -and -not $mockProcess.HasExited) {
-        Write-Host "Stopping carsharing mock, PID $($mockProcess.Id)"
-        Stop-Process -Id $mockProcess.Id
-        $mockProcess.WaitForExit()
+    if ($mockStartedHere -and $mockJob) {
+        Write-Host "Stopping carsharing mock, job $($mockJob.Id)"
+        Stop-Job -Job $mockJob -ErrorAction SilentlyContinue
+        Remove-Job -Job $mockJob -Force -ErrorAction SilentlyContinue
     }
 }

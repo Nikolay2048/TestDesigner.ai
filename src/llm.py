@@ -20,16 +20,35 @@ class NoLLM:
 
 
 class OllamaLLM:
-    def __init__(self, model: str, base_url: str = "http://localhost:11434", timeout: float = 120.0):
+    def __init__(
+        self,
+        model: str,
+        base_url: str = "http://localhost:11434",
+        timeout: float = 900.0,
+        temperature: float = 0.1,
+        num_ctx: int = 32768,
+        think: bool = False,
+        seed: int = 42,
+    ):
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.temperature = temperature
+        self.num_ctx = num_ctx
+        self.think = think
+        self.seed = seed
 
     def complete(self, messages: list[AgentMessage]) -> str:
         payload = {
             "model": self.model,
             "stream": False,
             "messages": [message.model_dump() for message in messages],
+            "think": self.think,
+            "options": {
+                "temperature": self.temperature,
+                "num_ctx": self.num_ctx,
+                "seed": self.seed,
+            },
         }
         response = httpx.post(f"{self.base_url}/api/chat", json=payload, timeout=self.timeout)
         response.raise_for_status()

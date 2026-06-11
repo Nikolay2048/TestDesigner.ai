@@ -19,6 +19,7 @@ from data_dependencies import (
     build_generation_binding_tasks,
     build_static_test_data_binding_decisions,
     complete_generation_bindings_with_fallbacks,
+    _variable_name,
 )
 from dependency_context import apply_dependency_context_to_endpoint_mapping
 from domain import (
@@ -1495,6 +1496,30 @@ def test_referenced_required_data_is_treated_as_scenario_setup_dependency() -> N
     )
 
     assert _setup_dependencies(state) == [dependency]
+
+
+def test_required_data_with_existing_state_is_treated_as_setup_dependency() -> None:
+    dependency = ScenarioDependency(
+        kind="requires_data",
+        required_state="existing reservation available for modification",
+        required_data=["reservationId"],
+        reason="The current scenario continues from an existing reservation.",
+    )
+    state = ProjectState(
+        scenario=ScenarioInput(path="scenario.md", title="Scenario", text=""),
+        understanding=ScenarioUnderstanding(
+            title="Dependent scenario",
+            scenario_dependencies=[dependency],
+        ),
+    )
+
+    assert _setup_dependencies(state) == [dependency]
+
+
+def test_response_id_variable_uses_producer_resource() -> None:
+    assert _variable_name("$.id", "/vehicles/{vehicleId}") == "vehicle_id"
+    assert _variable_name("$.id", "/reservations") == "reservation_id"
+    assert _variable_name("$.items[].id", "/catalog") == "items_id"
 
 
 def test_dependency_path_resolves_scenario_number_reference() -> None:

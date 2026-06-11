@@ -300,7 +300,11 @@ def _setup_dependencies(state: ProjectState) -> list[ScenarioDependency]:
         for item in state.understanding.scenario_dependencies
         if item.kind == "requires_scenario"
         or (item.kind == "requires_state" and bool(item.required_data))
-        or (item.kind == "requires_data" and bool(item.reference))
+        or (
+            item.kind == "requires_data"
+            and bool(item.required_data)
+            and (bool(item.reference) or bool(item.required_state))
+        )
     ]
 
 

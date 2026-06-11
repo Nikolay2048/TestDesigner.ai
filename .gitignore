@@ -7,6 +7,10 @@ __pycache__/
 # project files
 output
 runs/
+evals/results/agent_benchmark_*/
+evals/results/e2e_*/
+.tmp/
+.pytest-tmp*/
 
 # C extensions
 *.so

@@ -3,7 +3,43 @@ from __future__ import annotations
 import pytest
 
 from domain import AgentMessage
-from llm import OpenRouterLLM
+from llm import OllamaLLM, OpenRouterLLM
+
+
+def test_ollama_llm_uses_structured_output_settings(monkeypatch):
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"message": {"content": '{"status":"ok"}'}}
+
+    def fake_post(url, *, json, timeout):
+        captured.update(url=url, json=json, timeout=timeout)
+        return Response()
+
+    monkeypatch.setattr("llm.httpx.post", fake_post)
+
+    llm = OllamaLLM(
+        model="qwen3.5:27b",
+        timeout=321,
+        temperature=0.1,
+        num_ctx=32768,
+        think=False,
+        seed=42,
+    )
+    result = llm.complete([AgentMessage(role="user", content="Return JSON")])
+
+    assert result == '{"status":"ok"}'
+    assert captured["timeout"] == 321
+    assert captured["json"]["think"] is False
+    assert captured["json"]["options"] == {
+        "temperature": 0.1,
+        "num_ctx": 32768,
+        "seed": 42,
+    }
 
 
 def test_openrouter_llm_calls_chat_completions(monkeypatch):

@@ -64,6 +64,11 @@ def main() -> None:
         llm = OllamaLLM(
             model=args.model or os.getenv("OLLAMA_MODEL", "qwen3:14b"),
             base_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
+            timeout=float(os.getenv("OLLAMA_TIMEOUT", "900")),
+            temperature=float(os.getenv("OLLAMA_TEMPERATURE", "0.1")),
+            num_ctx=int(os.getenv("OLLAMA_NUM_CTX", "32768")),
+            think=os.getenv("OLLAMA_THINK", "false").lower() in {"1", "true", "yes"},
+            seed=int(os.getenv("OLLAMA_SEED", "42")),
         )
 
     if args.resolve_dependencies:

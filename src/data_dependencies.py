@@ -322,7 +322,10 @@ def assemble_data_binding_plan(
                 continue
 
             if candidate:
-                variable = _variable_name(candidate.json_path)
+                variable = _variable_name(
+                    candidate.json_path,
+                    operation_path=candidate.producer_operation.path,
+                )
                 request_bindings.append(
                     RequestValueBinding(
                         target=need.target,
@@ -553,11 +556,31 @@ def _safe_id(value: str) -> str:
     return cleaned or "value"
 
 
-def _variable_name(json_path: str) -> str:
+def _variable_name(json_path: str, operation_path: str | None = None) -> str:
     parts = [part for part in re.split(r"[^A-Za-z0-9]+", json_path) if part and part != "$"]
     if len(parts) >= 2 and parts[-1] == "id":
         return f"{parts[-2]}_id"
+    if parts == ["id"] and operation_path:
+        resource = _operation_resource_name(operation_path)
+        if resource:
+            return f"{resource}_id"
     return "_".join(parts[-2:] if len(parts) > 1 else parts) or "value"
+
+
+def _operation_resource_name(operation_path: str) -> str | None:
+    segments = [
+        segment
+        for segment in operation_path.strip("/").split("/")
+        if segment and not segment.startswith("{")
+    ]
+    if not segments:
+        return None
+    resource = re.sub(r"[^A-Za-z0-9]+", "_", segments[-1]).strip("_")
+    if resource.endswith("ies"):
+        resource = f"{resource[:-3]}y"
+    elif resource.endswith("s") and not resource.endswith("ss"):
+        resource = resource[:-1]
+    return resource or None
 
 
 def _scope_for_need(need: DataNeed, graph: DataDependencyGraph) -> str:

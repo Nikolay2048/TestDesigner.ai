@@ -2,75 +2,81 @@
 
 Учебный проект агентной системы для автоматического тест-дизайна REST API.
 
-Мы развиваем систему поэтапно. Сейчас реализованы первые два агента, остальные этапы оставлены заглушками, чтобы архитектура была понятна и не разрасталась раньше времени.
+Система принимает постановку системного анализа, OpenAPI-спецификацию и
+константы тестировщика. На выходе она сохраняет:
 
-## Текущий этап
+- стабилизированный happy path;
+- трассы HTTP-запросов, диагностик и исправлений;
+- исполняемые тест-кейсы;
+- Postman-коллекцию;
+- stable package для зависимых сценариев.
 
-### Documentation Analyst Agent
+Архитектура гибридная: LLM решает небольшие семантические задачи, а обычный
+код отвечает за OpenAPI, граф данных, валидацию, HTTP-выполнение, хранение
+состояния, применение патчей и экспорт.
 
-Файл: `src/agents/documentation_analyst.py`
+Актуальная документация и план следующего этапа:
+[docs/system/README.md](docs/system/README.md).
 
-Задача агента:
+## Модели
 
-- прочитать постановку;
-- выделить бизнес-цель;
-- выделить предусловия;
-- выделить ordered business steps;
-- выделить бизнес-правила;
-- выделить критерии успеха и негативные условия;
-- классифицировать endpoint-упоминания, если они прямо написаны в постановке;
-- зафиксировать зависимости сценария, если для выполнения нужен другой сценарий, существующее состояние или подготовленные данные.
+Рекомендуемые локальные модели:
 
-Endpoint-упоминания сначала извлекает обычный код по регулярному выражению. LLM не должна придумывать endpoint'ы, она только классифицирует найденные.
+- `qwen3.5:27b` для основной разработки и сложных агентных задач;
+- `qwen3:14b` для быстрых регрессий и итераций над промптами.
 
-### Endpoint Mapper Agent
+Настройки Ollama можно переопределить переменными:
 
-Файл: `src/agents/endpoint_mapper.py`
+- `OLLAMA_TIMEOUT`;
+- `OLLAMA_TEMPERATURE`;
+- `OLLAMA_NUM_CTX`;
+- `OLLAMA_THINK`;
+- `OLLAMA_SEED`.
 
-Задача агента:
+## Один сценарий
 
-- взять `business_steps` из результата Documentation Analyst;
-- взять `endpoint_mentions` из постановки;
-- взять компактный список OpenAPI operations;
-- сопоставить каждый бизнес-шаг с одним или несколькими endpoint'ами.
-
-Агент не получает request/response schema. Это важно, чтобы не перегружать маленькую модель.
-
-После агента обычный код проверяет, что выбранные endpoint'ы реально есть в OpenAPI. Выдуманные endpoint'ы удаляются и попадают в risks.
-
-Если для бизнес-шага нет отдельного REST endpoint'а, агент не должен выдумывать его. Такой шаг попадает в `unmapped_steps` с причиной.
-
-## Будущие этапы
-
-Пока это заглушки:
-
-- `Data Binding` - заполнит body/path/query и связи переменных.
-- `FlowExecutor` - выполнит HTTP-запросы.
-- `Stabilization Diagnostician` - объяснит падения.
-- `Stabilization Fixer` - позже попробует предложить исправление.
-- `Test Designer` - позже сгенерирует тест-кейсы по стабилизированному happy path.
-
-## Запуск без LLM
-
-Генерирует prompt первого агента:
-
-```bash
-python src/main.py --scenario data/carsharing/specs/01-basic-economy-rental.md --openapi data/carsharing/openapi/openapi.yaml --out runs/latest --llm none
+```powershell
+python .\src\main.py `
+  --scenario .\data\carsharing\specs\01-basic-economy-rental.md `
+  --openapi .\data\carsharing\openapi\openapi.yaml `
+  --test-data .\data\carsharing\test-data.yaml `
+  --out .\runs\example `
+  --stable-dir .\runs\example\stable `
+  --base-url http://127.0.0.1:8080 `
+  --llm ollama `
+  --model qwen3.5:27b `
+  --resolve-dependencies `
+  --run-test-cases `
+  --export-postman
 ```
 
-## Запуск через Ollama
+## Все сценарии
 
-```bash
-python src/main.py --scenario data/carsharing/specs/01-basic-economy-rental.md --openapi data/carsharing/openapi/openapi.yaml --out runs/latest --llm ollama
+Скрипты сами поднимают и останавливают соответствующий mock-сервер:
+
+```powershell
+.\scripts\run_carsharing.ps1 -Model qwen3.5:27b
+.\scripts\run_clinic.ps1 -Model qwen3.5:27b
 ```
 
-По умолчанию используется `qwen3:14b` для Ollama и `qwen/qwen3-32b` для OpenRouter.
-Модель можно переопределить единым параметром `--model`.
+## Тесты
 
-Артефакты:
+Большая часть suite выполняется без внешних сервисов:
 
-- `runs/latest/documentation_analyst.prompt.md`
-- `runs/latest/documentation_analyst.run.json`
-- `runs/latest/endpoint_mapper.prompt.md`
-- `runs/latest/endpoint_mapper.run.json`
-- `runs/latest/state.json`
+```powershell
+python -m pytest -q
+```
+
+`tests/test_chains_requests.py` ожидает carsharing mock на
+`http://127.0.0.1:8080`.
+
+## Оценка моделей
+
+```powershell
+python .\evals\agent_benchmark.py --repetitions 3 `
+  --models qwen3:14b qwen3.5:27b qwen3.5:35b `
+  --out .\evals\results\agent_benchmark
+```
+
+Сводка испытаний от 11 июня 2026 года:
+[model benchmark](docs/system/13-model-benchmark-2026-06-11.md).
