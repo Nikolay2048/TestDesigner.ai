@@ -1,0 +1,10 @@
+baseUrl: http://127.0.0.1:8080
+regularCustomerId: CUST-REGULAR
+loyalCustomerId: CUST-LOYAL
+loyaltyNumber: LOY-000777
+paymentToken: tok_warehouse_demo_2026
+courierId: COUR-0042
+recipientCode: "654321"
+countryCode: RU
+regionCode: RU-MOW
+warehouseId: WH-MSK-01

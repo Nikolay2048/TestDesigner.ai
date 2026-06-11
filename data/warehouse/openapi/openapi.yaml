@@ -1,0 +1,888 @@
+openapi: 3.0.3
+info:
+  title: Warehouse Order and Delivery API
+  version: 1.0.0
+  description: |
+    Stateful B2B API for warehouse catalog browsing, order reservation and
+    payment, shipment delivery, and partial returns.
+servers:
+  - url: http://127.0.0.1:8080
+tags:
+  - name: Catalog
+  - name: Orders
+  - name: Shipping
+  - name: Returns
+  - name: Mock control
+paths:
+  /warehouses:
+    get:
+      tags: [Catalog]
+      operationId: listWarehouses
+      summary: List fulfillment warehouses
+      description: Returns stable warehouses available for order fulfillment.
+      responses:
+        '200':
+          description: Warehouse collection.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Warehouse'
+        default:
+          $ref: '#/components/responses/Error'
+  /warehouses/{warehouse_id}/products:
+    get:
+      tags: [Catalog]
+      operationId: listWarehouseProducts
+      summary: List products and stock
+      description: Returns product prices and current available and reserved quantities for one warehouse.
+      parameters:
+        - $ref: '#/components/parameters/WarehouseId'
+        - name: availableOnly
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
+      responses:
+        '200':
+          description: Product stock collection.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/InventoryProduct'
+        '404':
+          $ref: '#/components/responses/Error'
+  /products/{product_id}:
+    get:
+      tags: [Catalog]
+      operationId: getProduct
+      summary: Get product card
+      description: Returns catalog data used as the authoritative source of unit price.
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+      responses:
+        '200':
+          description: Product card.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '404':
+          $ref: '#/components/responses/Error'
+  /orders:
+    post:
+      tags: [Orders]
+      operationId: createOrder
+      summary: Create an editable order
+      description: Creates a draft order and prices its lines from the product catalog.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '201':
+          description: Draft order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+  /orders/{order_id}:
+    get:
+      tags: [Orders]
+      operationId: getOrder
+      summary: Get order
+      description: Returns current items, references, customer terms, pricing, and lifecycle state.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Current order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/Error'
+  /orders/{order_id}/items:
+    put:
+      tags: [Orders]
+      operationId: replaceOrderItems
+      summary: Replace order items
+      description: Replaces all lines while the order is still editable.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceItemsRequest'
+      responses:
+        '200':
+          description: Updated draft order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+  /orders/{order_id}/customer-terms:
+    post:
+      tags: [Orders]
+      operationId: applyCustomerTerms
+      summary: Apply loyalty conditions
+      description: Validates the loyalty number against the order customer and records applicable conditions.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomerTermsRequest'
+      responses:
+        '200':
+          description: Order with customer terms.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+  /orders/{order_id}/reservations:
+    post:
+      tags: [Orders]
+      operationId: reserveOrder
+      summary: Reserve all order items
+      description: Atomically checks and reserves the complete order against current free stock.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReserveOrderRequest'
+      responses:
+        '201':
+          description: Active inventory reservation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reservation'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+  /orders/{order_id}/quote:
+    post:
+      tags: [Orders]
+      operationId: calculateOrderPrice
+      summary: Calculate authoritative order total
+      description: Calculates subtotal, loyalty discount, delivery fee, and final payable total.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Priced order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+  /orders/{order_id}/payments:
+    post:
+      tags: [Orders]
+      operationId: payOrder
+      summary: Capture order payment
+      description: Captures the exact calculated total and deduplicates retries by idempotency key.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentRequest'
+      responses:
+        '201':
+          description: Captured payment or the original result of an idempotent retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+  /orders/{order_id}/shipments:
+    post:
+      tags: [Shipping]
+      operationId: createShipment
+      summary: Prepare a paid order for delivery
+      description: Creates one prepared shipment with the validated address and future delivery window.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateShipmentRequest'
+      responses:
+        '201':
+          description: Prepared shipment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Shipment'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+  /shipments/{shipment_id}:
+    get:
+      tags: [Shipping]
+      operationId: getShipment
+      summary: Get shipment
+      description: Returns current shipment state, routing data, courier, and delivery reference.
+      parameters:
+        - $ref: '#/components/parameters/ShipmentId'
+      responses:
+        '200':
+          description: Current shipment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Shipment'
+        '404':
+          $ref: '#/components/responses/Error'
+  /shipments/{shipment_id}/delivery:
+    patch:
+      tags: [Shipping]
+      operationId: updateShipmentDelivery
+      summary: Change address and delivery window
+      description: Replaces routing data while the shipment remains prepared at the warehouse.
+      parameters:
+        - $ref: '#/components/parameters/ShipmentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateDeliveryRequest'
+      responses:
+        '200':
+          description: Updated prepared shipment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Shipment'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+  /shipments/{shipment_id}/handoff:
+    post:
+      tags: [Shipping]
+      operationId: handoffShipment
+      summary: Hand shipment to courier
+      description: Assigns a registered courier and closes ordinary customer delivery editing.
+      parameters:
+        - $ref: '#/components/parameters/ShipmentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CourierHandoffRequest'
+      responses:
+        '200':
+          description: Shipment handed to courier.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Shipment'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+  /shipments/{shipment_id}/deliveries/start:
+    post:
+      tags: [Shipping]
+      operationId: startDelivery
+      summary: Start courier delivery
+      description: Creates an in-transit delivery for the assigned courier.
+      parameters:
+        - $ref: '#/components/parameters/ShipmentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartDeliveryRequest'
+      responses:
+        '201':
+          description: In-transit delivery.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Delivery'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+  /deliveries/{delivery_id}/complete:
+    post:
+      tags: [Shipping]
+      operationId: completeDelivery
+      summary: Confirm recipient handover
+      description: Validates courier, recipient code, and actual time before completing all linked resources.
+      parameters:
+        - $ref: '#/components/parameters/DeliveryId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompleteDeliveryRequest'
+      responses:
+        '200':
+          description: Synchronized final delivery state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryCompletion'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+  /orders/{order_id}/returns:
+    post:
+      tags: [Returns]
+      operationId: createReturn
+      summary: Register a partial order return
+      description: Validates remaining delivered quantity and calculates the refundable paid item amount.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateReturnRequest'
+      responses:
+        '201':
+          description: Requested return.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Return'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+  /returns/{return_id}/receive:
+    post:
+      tags: [Returns]
+      operationId: receiveReturn
+      summary: Receive returned goods
+      description: Marks goods as received and restores the accepted quantity to free warehouse stock.
+      parameters:
+        - $ref: '#/components/parameters/ReturnId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReceiveReturnRequest'
+      responses:
+        '200':
+          description: Received return.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Return'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+  /returns/{return_id}/refund:
+    post:
+      tags: [Returns]
+      operationId: refundReturn
+      summary: Refund accepted returned quantity
+      description: Records one refund after the warehouse has physically received the goods.
+      parameters:
+        - $ref: '#/components/parameters/ReturnId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefundReturnRequest'
+      responses:
+        '200':
+          description: Refunded return.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Return'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+  /mock/reset:
+    post:
+      tags: [Mock control]
+      operationId: resetMockState
+      summary: Restore deterministic initial state
+      description: Clears created resources, resets counters, and restores all seed inventory and catalogs.
+      responses:
+        '200':
+          description: Reset confirmation.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, resetAt]
+                properties:
+                  status:
+                    type: string
+                    enum: [RESET]
+                  resetAt:
+                    type: string
+                    format: date-time
+components:
+  parameters:
+    WarehouseId:
+      name: warehouse_id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 30}
+    ProductId:
+      name: product_id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 30}
+    OrderId:
+      name: order_id
+      in: path
+      required: true
+      schema: {type: string, pattern: '^ORD-\d{4}$'}
+    ShipmentId:
+      name: shipment_id
+      in: path
+      required: true
+      schema: {type: string, pattern: '^SHP-\d{4}$'}
+    DeliveryId:
+      name: delivery_id
+      in: path
+      required: true
+      schema: {type: string, pattern: '^DLV-\d{4}$'}
+    ReturnId:
+      name: return_id
+      in: path
+      required: true
+      schema: {type: string, pattern: '^RET-\d{4}$'}
+  responses:
+    Error:
+      description: Unified validation, lookup, or state-transition error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    Warehouse:
+      type: object
+      additionalProperties: false
+      required: [warehouseId, name, regionCode]
+      properties:
+        warehouseId: {type: string, example: WH-MSK-01}
+        name: {type: string, minLength: 2, maxLength: 100}
+        regionCode: {type: string, minLength: 2, maxLength: 12}
+    Product:
+      type: object
+      additionalProperties: false
+      required: [productId, sku, name, unitPrice]
+      properties:
+        productId: {type: string, example: PRD-1002}
+        sku: {type: string, minLength: 2, maxLength: 40}
+        name: {type: string, minLength: 2, maxLength: 120}
+        unitPrice: {type: number, format: double, minimum: 0.01}
+    InventoryProduct:
+      allOf:
+        - $ref: '#/components/schemas/Product'
+        - type: object
+          required: [warehouseId, available, reserved]
+          properties:
+            warehouseId: {type: string}
+            available: {type: integer, minimum: 0}
+            reserved: {type: integer, minimum: 0}
+    DeliveryType:
+      type: string
+      enum: [STANDARD, PRIORITY]
+    OrderStatus:
+      type: string
+      enum: [DRAFT, RESERVED, PRICED, PAID, READY_TO_SHIP, DELIVERED, PARTIALLY_RETURNED]
+    ShipmentStatus:
+      type: string
+      enum: [PREPARED, HANDED_TO_COURIER, IN_TRANSIT, DELIVERED]
+    ReturnStatus:
+      type: string
+      enum: [REQUESTED, RECEIVED, REFUNDED]
+    OrderItemInput:
+      type: object
+      additionalProperties: false
+      required: [productId, quantity]
+      properties:
+        productId: {type: string, minLength: 1, maxLength: 30}
+        quantity: {type: integer, minimum: 1, maximum: 100}
+    OrderItem:
+      type: object
+      additionalProperties: false
+      required: [orderItemId, productId, productName, quantity, unitPrice, lineTotal, returnedQuantity]
+      properties:
+        orderItemId: {type: string, pattern: '^ITM-\d{4}$'}
+        productId: {type: string}
+        productName: {type: string}
+        quantity: {type: integer, minimum: 1, maximum: 100}
+        unitPrice: {type: number, format: double, minimum: 0.01}
+        lineTotal: {type: number, format: double, minimum: 0.01}
+        returnedQuantity: {type: integer, minimum: 0}
+    CreateOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [customerId, warehouseId, requestedDeliveryDate, items]
+      properties:
+        customerId: {type: string, minLength: 1, maxLength: 40}
+        warehouseId: {type: string, minLength: 1, maxLength: 30}
+        deliveryType:
+          allOf: [{$ref: '#/components/schemas/DeliveryType'}]
+          default: STANDARD
+        requestedDeliveryDate: {type: string, format: date}
+        items:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/OrderItemInput'
+    ReplaceItemsRequest:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/OrderItemInput'
+    CustomerTermsRequest:
+      type: object
+      additionalProperties: false
+      required: [loyaltyNumber]
+      properties:
+        loyaltyNumber: {type: string, pattern: '^LOY-\d{6}$'}
+    ReserveOrderRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        holdMinutes: {type: integer, minimum: 15, maximum: 120, default: 30}
+    Pricing:
+      type: object
+      additionalProperties: false
+      required: [subtotal, discount, deliveryFee, total, currency]
+      properties:
+        subtotal: {type: number, format: double, minimum: 0}
+        discount: {type: number, format: double, minimum: 0}
+        deliveryFee: {type: number, format: double, minimum: 0}
+        total: {type: number, format: double, minimum: 0}
+        currency: {type: string, enum: [RUB]}
+    CustomerTerms:
+      type: object
+      additionalProperties: false
+      required: [loyaltyLevel, discountRate]
+      properties:
+        loyaltyLevel: {type: string, enum: [NONE, GOLD]}
+        discountRate: {type: number, format: double, minimum: 0, maximum: 1}
+    Order:
+      type: object
+      additionalProperties: false
+      required: [orderId, customerId, warehouseId, deliveryType, requestedDeliveryDate, status, items]
+      properties:
+        orderId: {type: string, pattern: '^ORD-\d{4}$'}
+        customerId: {type: string}
+        warehouseId: {type: string}
+        deliveryType: {$ref: '#/components/schemas/DeliveryType'}
+        requestedDeliveryDate: {type: string, format: date}
+        status: {$ref: '#/components/schemas/OrderStatus'}
+        items:
+          type: array
+          minItems: 1
+          items: {$ref: '#/components/schemas/OrderItem'}
+        customerTerms:
+          nullable: true
+          allOf: [{$ref: '#/components/schemas/CustomerTerms'}]
+        pricing:
+          nullable: true
+          allOf: [{$ref: '#/components/schemas/Pricing'}]
+        reservationId: {type: string, nullable: true, pattern: '^RES-\d{4}$'}
+        paymentId: {type: string, nullable: true, pattern: '^PAY-\d{4}$'}
+        shipmentId: {type: string, nullable: true, pattern: '^SHP-\d{4}$'}
+        deliveredAt: {type: string, format: date-time, nullable: true}
+    ReservationItem:
+      type: object
+      additionalProperties: false
+      required: [orderItemId, productId, quantity]
+      properties:
+        orderItemId: {type: string}
+        productId: {type: string}
+        quantity: {type: integer, minimum: 1}
+    Reservation:
+      type: object
+      additionalProperties: false
+      required: [reservationId, orderId, status, expiresAt, items]
+      properties:
+        reservationId: {type: string, pattern: '^RES-\d{4}$'}
+        orderId: {type: string, pattern: '^ORD-\d{4}$'}
+        status: {type: string, enum: [ACTIVE, CONSUMED, EXPIRED]}
+        expiresAt: {type: string, format: date-time}
+        items:
+          type: array
+          minItems: 1
+          items: {$ref: '#/components/schemas/ReservationItem'}
+    PaymentRequest:
+      type: object
+      additionalProperties: false
+      required: [amount, paymentToken, idempotencyKey]
+      properties:
+        amount: {type: number, format: double, minimum: 0.01}
+        paymentToken: {type: string, minLength: 8, maxLength: 100}
+        idempotencyKey: {type: string, minLength: 8, maxLength: 80}
+    Payment:
+      type: object
+      additionalProperties: false
+      required: [paymentId, orderId, amount, currency, status, idempotencyKey, capturedAt]
+      properties:
+        paymentId: {type: string, pattern: '^PAY-\d{4}$'}
+        orderId: {type: string, pattern: '^ORD-\d{4}$'}
+        amount: {type: number, format: double, minimum: 0.01}
+        currency: {type: string, enum: [RUB]}
+        status: {type: string, enum: [CAPTURED]}
+        idempotencyKey: {type: string}
+        capturedAt: {type: string, format: date-time}
+    Address:
+      type: object
+      additionalProperties: false
+      required: [countryCode, regionCode, city, street, building, postalCode]
+      properties:
+        countryCode: {type: string, pattern: '^[A-Z]{2}$'}
+        regionCode: {type: string, minLength: 2, maxLength: 12}
+        city: {type: string, minLength: 2, maxLength: 80}
+        street: {type: string, minLength: 3, maxLength: 120}
+        building: {type: string, minLength: 1, maxLength: 20}
+        postalCode: {type: string, pattern: '^\d{6}$'}
+    DeliveryWindow:
+      type: object
+      additionalProperties: false
+      required: [startsAt, endsAt]
+      properties:
+        startsAt: {type: string, format: date-time}
+        endsAt: {type: string, format: date-time}
+    DeliveryDetails:
+      type: object
+      additionalProperties: false
+      required: [address, window]
+      properties:
+        address: {$ref: '#/components/schemas/Address'}
+        window: {$ref: '#/components/schemas/DeliveryWindow'}
+    CreateShipmentRequest:
+      type: object
+      additionalProperties: false
+      required: [delivery]
+      properties:
+        delivery: {$ref: '#/components/schemas/DeliveryDetails'}
+    UpdateDeliveryRequest:
+      allOf:
+        - $ref: '#/components/schemas/DeliveryDetails'
+    Shipment:
+      type: object
+      additionalProperties: false
+      required: [shipmentId, orderId, warehouseId, deliveryType, status, address, window]
+      properties:
+        shipmentId: {type: string, pattern: '^SHP-\d{4}$'}
+        orderId: {type: string, pattern: '^ORD-\d{4}$'}
+        warehouseId: {type: string}
+        deliveryType: {$ref: '#/components/schemas/DeliveryType'}
+        status: {$ref: '#/components/schemas/ShipmentStatus'}
+        address: {$ref: '#/components/schemas/Address'}
+        window: {$ref: '#/components/schemas/DeliveryWindow'}
+        courierId: {type: string, nullable: true, pattern: '^COUR-\d{4}$'}
+        deliveryId: {type: string, nullable: true, pattern: '^DLV-\d{4}$'}
+    CourierHandoffRequest:
+      type: object
+      additionalProperties: false
+      required: [courierId]
+      properties:
+        courierId: {type: string, pattern: '^COUR-\d{4}$'}
+    StartDeliveryRequest:
+      type: object
+      additionalProperties: false
+      required: [courierId, startedAt]
+      properties:
+        courierId: {type: string, pattern: '^COUR-\d{4}$'}
+        startedAt: {type: string, format: date-time}
+    CompleteDeliveryRequest:
+      type: object
+      additionalProperties: false
+      required: [courierId, recipientCode, deliveredAt]
+      properties:
+        courierId: {type: string, pattern: '^COUR-\d{4}$'}
+        recipientCode: {type: string, pattern: '^\d{6}$'}
+        deliveredAt: {type: string, format: date-time}
+    Delivery:
+      type: object
+      additionalProperties: false
+      required: [deliveryId, shipmentId, orderId, courierId, status, startedAt]
+      properties:
+        deliveryId: {type: string, pattern: '^DLV-\d{4}$'}
+        shipmentId: {type: string, pattern: '^SHP-\d{4}$'}
+        orderId: {type: string, pattern: '^ORD-\d{4}$'}
+        courierId: {type: string, pattern: '^COUR-\d{4}$'}
+        status: {type: string, enum: [IN_TRANSIT, DELIVERED]}
+        startedAt: {type: string, format: date-time}
+        deliveredAt: {type: string, format: date-time, nullable: true}
+    DeliveryCompletion:
+      type: object
+      additionalProperties: false
+      required: [delivery, shipment, order]
+      properties:
+        delivery: {$ref: '#/components/schemas/Delivery'}
+        shipment: {$ref: '#/components/schemas/Shipment'}
+        order: {$ref: '#/components/schemas/Order'}
+    ReturnItemInput:
+      type: object
+      additionalProperties: false
+      required: [orderItemId, quantity]
+      properties:
+        orderItemId: {type: string, pattern: '^ITM-\d{4}$'}
+        quantity: {type: integer, minimum: 1, maximum: 100}
+    CreateReturnRequest:
+      type: object
+      additionalProperties: false
+      required: [reason, items]
+      properties:
+        reason: {type: string, minLength: 5, maxLength: 300}
+        items:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items: {$ref: '#/components/schemas/ReturnItemInput'}
+    ReturnItem:
+      type: object
+      additionalProperties: false
+      required: [orderItemId, productId, quantity, refundAmount]
+      properties:
+        orderItemId: {type: string}
+        productId: {type: string}
+        quantity: {type: integer, minimum: 1}
+        refundAmount: {type: number, format: double, minimum: 0}
+    Return:
+      type: object
+      additionalProperties: false
+      required: [returnId, orderId, warehouseId, status, reason, items, refundAmount, currency]
+      properties:
+        returnId: {type: string, pattern: '^RET-\d{4}$'}
+        orderId: {type: string, pattern: '^ORD-\d{4}$'}
+        warehouseId: {type: string}
+        status: {$ref: '#/components/schemas/ReturnStatus'}
+        reason: {type: string}
+        items:
+          type: array
+          minItems: 1
+          items: {$ref: '#/components/schemas/ReturnItem'}
+        refundAmount: {type: number, format: double, minimum: 0}
+        currency: {type: string, enum: [RUB]}
+        receivedAt: {type: string, format: date-time, nullable: true}
+        refundId: {type: string, nullable: true, pattern: '^RFD-\d{4}$'}
+        refundedAt: {type: string, format: date-time, nullable: true}
+    ReceiveReturnRequest:
+      type: object
+      additionalProperties: false
+      required: [warehouseId, receivedAt]
+      properties:
+        warehouseId: {type: string, minLength: 1, maxLength: 30}
+        receivedAt: {type: string, format: date-time}
+    RefundReturnRequest:
+      type: object
+      additionalProperties: false
+      required: [paymentToken]
+      properties:
+        paymentToken: {type: string, minLength: 8, maxLength: 100}
+    ErrorDetail:
+      type: object
+      required: [code, message]
+      properties:
+        code: {type: string, minLength: 1}
+        message: {type: string, minLength: 1}
+        field: {type: string, nullable: true}
+        hint: {type: string, nullable: true}
+        currentState: {type: string, nullable: true}
+        allowedStates:
+          type: array
+          nullable: true
+          items: {type: string}
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [detail]
+      properties:
+        detail: {$ref: '#/components/schemas/ErrorDetail'}
