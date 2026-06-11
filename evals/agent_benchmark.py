@@ -17,7 +17,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from domain import (
+from old.domain import (
     DependencyResolverResult,
     EndpointMappingResult,
     GenerationBindingResult,
@@ -25,7 +25,7 @@ from domain import (
     StabilizationDiagnosis,
     StabilizationFix,
 )
-from llm import extract_json
+from old.llm import extract_json
 
 
 DEFAULT_MODELS = [

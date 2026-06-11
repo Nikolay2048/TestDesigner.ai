@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from agents.dependency_resolver import DependencyResolverAgent
-from agents.documentation_analyst import DocumentationAnalystAgent
-from agents.endpoint_mapper import EndpointMapperAgent
-from agents.generation_binding import GenerationBindingAgent
-from agents.stabilization_fixer import StabilizationFixerAgent
-from agents.test_designer import TestDesignerAgent
-from data_dependencies import (
+from old.agents.dependency_resolver import DependencyResolverAgent
+from old.agents.documentation_analyst import DocumentationAnalystAgent
+from old.agents.endpoint_mapper import EndpointMapperAgent
+from old.agents.generation_binding import GenerationBindingAgent
+from old.agents.stabilization_fixer import StabilizationFixerAgent
+from old.agents.test_designer import TestDesignerAgent
+from old.data_dependencies import (
     assemble_data_binding_plan,
     build_dependency_graph,
     build_dependency_resolution_tasks,
@@ -21,8 +21,8 @@ from data_dependencies import (
     complete_generation_bindings_with_fallbacks,
     _variable_name,
 )
-from dependency_context import apply_dependency_context_to_endpoint_mapping
-from domain import (
+from old.dependency_context import apply_dependency_context_to_endpoint_mapping
+from old.domain import (
     AgentRun,
     ApiOperation,
     BindingPatch,
@@ -55,14 +55,14 @@ from domain import (
     StepOperationMapping,
     ProvidedState,
 )
-from executor import FlowExecutor
-from generators import GeneratorRegistry
-from io_utils import extract_raw_endpoint_mentions
-from openapi import load_openapi_operations
-from orchestrator import AgenticTestDesignOrchestrator
-from patches import apply_binding_patch
-from postman_export import PostmanExporter, export_postman_artifacts
-from scenario_dependencies import (
+from old.executor import FlowExecutor
+from old.generators import GeneratorRegistry
+from old.io_utils import extract_raw_endpoint_mentions
+from old.openapi import load_openapi_operations
+from old.orchestrator import AgenticTestDesignOrchestrator
+from old.patches import apply_binding_patch
+from old.postman_export import PostmanExporter, export_postman_artifacts
+from old.scenario_dependencies import (
     ScenarioDependencyRunner,
     _add_path_placeholders_to_dependencies,
     _context_from_setup,
@@ -70,16 +70,16 @@ from scenario_dependencies import (
     _setup_dependencies,
     _stable_setup_step_limit,
 )
-from stabilization_rules import patch_from_server_hint
-from test_design import (
+from old.stabilization_rules import patch_from_server_hint
+from old.test_design import (
     append_business_rule_attack_ideas,
     build_case_execution_plan,
     build_test_basis,
     build_test_design,
     execute_test_cases,
 )
-from stable import publish_stable_package, stable_package_dir, validate_stable_package
-from validators import (
+from old.stable import publish_stable_package, validate_stable_package
+from old.validators import (
     deduplicate_adjacent_terminal_operations,
     order_endpoint_mapping_by_business_steps,
     validate_data_binding,
@@ -1384,7 +1384,7 @@ def test_stable_package_validation_allows_test_data_additions(tmp_path) -> None:
         "openapi_hash": "will be set below",
         "test_data_hash": "old-hash",
     }
-    from stable import file_sha256
+    from old.stable import file_sha256
 
     metadata["scenario_hash"] = file_sha256(scenario_path)
     metadata["openapi_hash"] = file_sha256(openapi_path)

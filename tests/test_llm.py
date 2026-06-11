@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from domain import AgentMessage
-from llm import OllamaLLM, OpenRouterLLM
+from old.domain import AgentMessage
+from old.llm import OllamaLLM, OpenRouterLLM
 
 
 def test_ollama_llm_uses_structured_output_settings(monkeypatch):
