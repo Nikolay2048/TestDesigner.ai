@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import re
+from urllib.parse import unquote
 from typing import Any
 
 from domain import (
@@ -88,7 +90,7 @@ def build_test_basis(state: ProjectState) -> TestBasis:
                 type=_schema_type(schema),
                 required=_is_required(operation, binding.target) if operation else True,
                 field_schema=schema,
-                happy_value=_happy_value(trace_step, binding.location, binding.target),
+                happy_value=_happy_value(trace_step, binding.location, binding.target, step.operation.path),
                 binding_source=binding.source,
                 techniques=_techniques_for_field(schema, binding.location),
             )
@@ -104,6 +106,14 @@ def build_test_ideas(basis: TestBasis, state: ProjectState) -> list[TestIdea]:
 
     for field in basis.fields:
         for mutation, technique, title_suffix, reason in _field_mutations(field):
+            if technique == "resource_not_found":
+                operation = next((op for op in state.operations if op.method.upper() == field.operation.method.upper() and op.path == field.operation.path), None)
+                if not operation or "404" not in operation.response_statuses:
+                    continue
+                if any(idea.technique == technique and idea.mutation.target == field.target and
+                       any(previous.step_id == idea.mutation.step_id and previous.operation == field.operation for previous in basis.fields)
+                       for idea in ideas):
+                    continue
             ideas.append(
                 TestIdea(
                     idea_id=f"TI-{counter:03d}",
@@ -123,6 +133,8 @@ def build_test_ideas(basis: TestBasis, state: ProjectState) -> list[TestIdea]:
             )
             counter += 1
 
+    # Preserve contract checks first; resource lookup checks supplement them.
+    ideas.sort(key=lambda idea: idea.technique == "resource_not_found")
     return _dedupe_ideas(ideas)
 
 
@@ -307,13 +319,13 @@ def build_case_execution_plan(stable_plan: DataBindingPlan, case: DesignedTestCa
 
 def _field_mutations(field: TestDesignField) -> list[tuple[TestMutation, str, str, str]]:
     mutations: list[tuple[TestMutation, str, str, str]] = []
-    if field.required and field.location == "body":
+    if field.required and field.location in {"body", "query", "header"}:
         mutations.append(
             (
                 TestMutation(step_id=field.step_id, target=field.target, action="omit_field"),
                 "required_field_omission",
                 "omit required field",
-                "Required request body field should be tested when absent.",
+                "Required request field should be tested when absent.",
             )
         )
 
@@ -378,7 +390,29 @@ def _field_mutations(field: TestDesignField) -> list[tuple[TestMutation, str, st
             )
         )
 
-    return mutations[:4]
+    if field.type == "string":
+        minimum = field.field_schema.get("minLength")
+        maximum = field.field_schema.get("maxLength")
+        string_values = []
+        if isinstance(minimum, int) and 0 < minimum <= 10000:
+            string_values.append(("x" * (minimum - 1), "boundary_value_analysis", "use string below minLength"))
+        if isinstance(maximum, int) and 0 <= maximum < 10000:
+            string_values.append(("x" * (maximum + 1), "boundary_value_analysis", "use string above maxLength"))
+        if field.field_schema.get("format") in {"uuid", "email", "date", "date-time", "uri", "ipv4", "ipv6"}:
+            string_values.append(("__INVALID_FORMAT__", "equivalence_partitioning", "use invalid string format"))
+        for value, technique, title in string_values:
+            mutations.append((TestMutation(step_id=field.step_id, target=field.target, action="set_value", value=value), technique, title, "Validate a documented string constraint."))
+        if (field.location == "path" and field.target.lower().endswith("id") and not enum_values
+                and not field.field_schema.get("pattern")
+                and field.field_schema.get("format") in {None, "uuid"}
+                and (minimum is None or minimum <= 36) and (maximum is None or maximum >= 36)):
+            mutations.append((
+                TestMutation(step_id=field.step_id, target=field.target, action="replace_binding_value", replacement=RequestValueBinding(target=field.target, location=field.location, source="generated", generator="uuid")),
+                "resource_not_found", "use unknown resource identifier",
+                "A generated identifier should not resolve to an existing resource; review identifier format and expected response.",
+            ))
+
+    return mutations
 
 
 def _priority_for_idea(idea: TestIdea) -> str:
@@ -463,6 +497,12 @@ def _rules_from_understanding(state: ProjectState, fields: list[TestDesignField]
 
 
 def _schema_for_binding(operation: ApiOperation, target: str) -> dict[str, Any]:
+    for location in ("path", "query", "header"):
+        prefix = f"$.{location}."
+        if target.startswith(prefix):
+            parameter = next((item for item in operation.request_parameters if item.get("in") == location and item.get("name") == target.removeprefix(prefix)), None)
+            if parameter is not None:
+                return parameter.get("schema") or {}
     if target.startswith("$.path."):
         return {"type": "string"}
     if not operation.request_schema:
@@ -481,6 +521,11 @@ def _schema_for_binding(operation: ApiOperation, target: str) -> dict[str, Any]:
 def _is_required(operation: ApiOperation, target: str) -> bool:
     if target.startswith("$.path."):
         return True
+    for location in ("query", "header"):
+        prefix = f"$.{location}."
+        if target.startswith(prefix):
+            parameter = next((item for item in operation.request_parameters if item.get("in") == location and item.get("name") == target.removeprefix(prefix)), None)
+            return bool(parameter and parameter.get("required"))
     if not operation.request_schema:
         return True
     current = operation.request_schema
@@ -502,7 +547,7 @@ def _schema_type(schema: dict[str, Any]) -> str:
 def _techniques_for_field(schema: dict[str, Any], location: str) -> list[str]:
     techniques = []
     schema_type = _schema_type(schema)
-    if location == "body":
+    if location in {"body", "query", "header"}:
         techniques.append("required_field_omission")
     if schema.get("enum"):
         techniques.append("equivalence_partitioning")
@@ -512,10 +557,17 @@ def _techniques_for_field(schema: dict[str, Any], location: str) -> list[str]:
         techniques.append("decision_table")
     if schema_type == "array":
         techniques.append("equivalence_partitioning")
+    if schema_type == "string":
+        if "minLength" in schema or "maxLength" in schema:
+            techniques.append("boundary_value_analysis")
+        if schema.get("format"):
+            techniques.append("equivalence_partitioning")
+        if location == "path" and not schema.get("enum"):
+            techniques.append("resource_not_found")
     return techniques
 
 
-def _happy_value(trace_step, location: str, target: str) -> Any:
+def _happy_value(trace_step, location: str, target: str, path_template: str = "") -> Any:
     if not trace_step:
         return None
     if location == "body":
@@ -525,7 +577,12 @@ def _happy_value(trace_step, location: str, target: str) -> Any:
     if location == "header":
         return _get_path(trace_step.request.get("headers") or {}, target)
     if location == "path":
-        return trace_step.resolved_path
+        names = re.findall(r"\{([^{}]+)\}", path_template)
+        pattern = re.escape(path_template)
+        for name in names:
+            pattern = pattern.replace(re.escape("{" + name + "}"), "([^/]+)", 1)
+        match = re.fullmatch(pattern, trace_step.resolved_path or "")
+        return dict(zip(names, map(unquote, match.groups()))).get(target.removeprefix("$.path.")) if match else None
     return None
 
 
@@ -557,6 +614,8 @@ def _negative_expectation(
         "decision_table",
     }
     candidate_statuses = ["400", "422"] if technique in validation_techniques else ["400", "409", "422"]
+    if technique == "resource_not_found":
+        candidate_statuses = ["404"]
     documented = [int(status) for status in candidate_statuses if status in operation.response_statuses]
     if documented:
         primary_status = documented[0]

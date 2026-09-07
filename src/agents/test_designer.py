@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from domain import (
     AgentMessage,
     AgentRun,
-    BusinessRuleAttackResult,
+    BusinessRuleAttackIdea,
     ProjectState,
     TestDesignResult,
     TestIdeaRefinementResult,
@@ -38,9 +38,13 @@ class TestDesignerAgent:
         business_notes = _add_business_attacks_with_llm(state, self.llm, business_prompts)
         prompt = _build_refinement_prompt(state)
         notes = _refine_with_llm(state.test_design, self.llm, prompt)
+        if state.test_design.test_cases:
+            state.test_design.risks = [risk for risk in state.test_design.risks if risk != "No test ideas were generated from the current stable happy path."]
+        else:
+            notes.append("Test design failed: no executable test cases were generated.")
         return state, AgentRun(
             agent_name=self.name,
-            status="completed",
+            status="completed" if state.test_design.test_cases else "failed",
             prompt=[message for business_prompt in business_prompts for message in business_prompt] + prompt,
             output=state.test_design.model_dump(mode="json"),
             notes=[
@@ -105,6 +109,12 @@ def _build_business_attack_prompts(state: ProjectState) -> list[list[AgentMessag
 Business rule:
 {json.dumps(rule.model_dump(mode="json"), ensure_ascii=False, indent=2)}
 
+Scenario context (requirements and preconditions):
+{state.scenario.text}
+
+Available tester static keys:
+{json.dumps(list(state.static_test_data), ensure_ascii=False)}
+
 Stable REST steps:
 {json.dumps(steps, ensure_ascii=False, indent=2)}
 
@@ -148,8 +158,13 @@ Rules:
 - Use only step_id and target values present in Stable REST steps.
 - Use JSON values with the correct type: numbers as numbers, booleans as booleans, not strings.
 - Generate 2-4 distinct attacks for this one business rule when possible.
+- Prefer fewer meaningful tests to filling a quota. Return no ideas and explain the coverage gap in risks if this rule cannot be tested with the available mutations.
+- A random or malformed identifier tests lookup or validation, not an unpaid, cancelled, or differently owned resource. Do not claim it tests those business states.
+- Each attack must actually establish the precondition needed to exercise its rule. Do not invent fixture identifiers, static keys, or setup steps.
+- Repeat operations only to test a documented transition or idempotency requirement; do not assume every repeat must fail.
 - For replace_binding_value use generator="uuid" unless another listed generator is clearly better.
 - For repeat_step use repeat_count >= 2.
+- For all other mutation types use repeat_count=1; never return null.
 - Use skip_setup_step only for skipping state-changing setup operations such as create/confirm/start/pay.
 - Do not use skip_setup_step to skip lookup/search/list operations; use set_field_value or replace_binding_value instead.
 - If the rule is about two existing values being different, mutate one of those request fields directly.
@@ -184,16 +199,27 @@ def _add_business_attacks_with_llm(
 
         try:
             parsed = extract_json(raw)
-            result = BusinessRuleAttackResult.model_validate(parsed)
+            if not isinstance(parsed, dict) or not isinstance(parsed.get("ideas"), list):
+                raise ValueError("Expected an object with an ideas array")
         except (ValueError, ValidationError) as exc:
             state.test_design.risks.append(f"LLM business-rule attack batch {index} ignored: {exc}")
             notes.append(f"Business-rule attack batch {index} ignored because output did not match schema.")
             continue
 
-        total_proposed += len(result.ideas)
-        state.test_design.risks.extend(result.risks)
+        total_proposed += len(parsed["ideas"])
+        attacks = []
+        for idea_index, idea in enumerate(parsed["ideas"], start=1):
+            try:
+                attacks.append(BusinessRuleAttackIdea.model_validate(idea))
+            except (ValueError, ValidationError) as exc:
+                diagnostic = f"LLM business-rule attack batch {index}, idea {idea_index} ignored: {exc}"
+                state.test_design.risks.append(diagnostic)
+                notes.append(diagnostic)
+        risks = parsed.get("risks", [])
+        if isinstance(risks, list):
+            state.test_design.risks.extend(risk for risk in risks if isinstance(risk, str))
         before = len(state.test_design.ideas)
-        batch_notes = append_business_rule_attack_ideas(state.test_design, result.ideas, state)
+        batch_notes = append_business_rule_attack_ideas(state.test_design, attacks, state)
         after = len(state.test_design.ideas)
         total_added += max(0, after - before)
         notes.extend(note for note in batch_notes if not note.startswith("Business-rule executable attacks accepted:"))

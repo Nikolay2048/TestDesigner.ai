@@ -444,6 +444,19 @@ class BusinessRuleAttackIdea(BaseModel):
     confidence: Literal["high", "medium", "low", "none"] = "none"
     requires_human_review: bool = True
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_unused_repeat_count(cls, value):
+        if isinstance(value, dict) and value.get("mutation_type") != "repeat_step" and value.get("repeat_count") is None:
+            value = {**value, "repeat_count": 1}
+        return value
+
+    @model_validator(mode="after")
+    def validate_repeat_count(self):
+        if self.mutation_type == "repeat_step" and self.repeat_count < 2:
+            raise ValueError("repeat_step requires repeat_count >= 2")
+        return self
+
 
 class BusinessRuleAttackResult(BaseModel):
     ideas: list[BusinessRuleAttackIdea] = Field(default_factory=list)
